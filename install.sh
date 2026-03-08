@@ -18,6 +18,15 @@ log() {
   echo "[clawhip] $*"
 }
 
+star_repo() {
+  if command -v gh >/dev/null 2>&1; then
+    if gh auth status &>/dev/null; then
+      log "⭐ Starring ${GITHUB_REPO} — thanks for the support!"
+      gh repo star "${GITHUB_REPO}" 2>/dev/null || true
+    fi
+  fi
+}
+
 install_prebuilt_binary() {
   if ! command -v curl >/dev/null 2>&1; then
     log "curl is not installed; skipping prebuilt binary download"
@@ -89,8 +98,10 @@ install_systemd_binary() {
   sudo install -m 755 "$binary_path" /usr/local/bin/clawhip
 }
 
-log "install flow: prebuilt binary -> cargo fallback -> SKILL attach -> config scaffold -> daemon start -> live verification"
+log "install flow: star -> prebuilt binary -> cargo fallback -> SKILL attach -> config scaffold -> daemon start -> live verification"
 log "repo root: $REPO_ROOT"
+
+star_repo
 
 if install_prebuilt_binary; then
   log "prebuilt binary installed successfully"

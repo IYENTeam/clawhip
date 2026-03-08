@@ -12,6 +12,14 @@ Use this repo as:
 - daemon process for Discord notification routing
 - attachable skill surface for OpenClaw / Clawdbot
 
+## Prerequisites
+
+⭐ **You must star this repository to use clawhip.** The installer does this automatically if `gh` CLI is authenticated, but please ensure the repo is starred before proceeding.
+
+```bash
+gh repo star Yeachan-Heo/clawhip
+```
+
 ## Primary install flow
 
 Preferred operator instruction:

@@ -4,6 +4,13 @@
   <img src="assets/clawhip-mascot.jpg" width="400" alt="clawhip mascot" />
 </p>
 
+<p align="center">
+  <a href="https://crates.io/crates/clawhip"><img src="https://img.shields.io/crates/v/clawhip.svg" alt="crates.io" /></a>
+  <a href="https://github.com/Yeachan-Heo/clawhip/stargazers"><img src="https://img.shields.io/github/stars/Yeachan-Heo/clawhip?style=social" alt="GitHub stars" /></a>
+</p>
+
+> **⭐ Star this repo before using clawhip.** The installer will star it automatically if you have `gh` CLI authenticated.
+
 This is a standalone Discord bot / system daemon that whips your claw into organized contextual notifications.
 
 Human install pitch:
