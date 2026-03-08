@@ -20,6 +20,38 @@ Then OpenClaw should:
 - start the daemon
 - run live verification for issue / PR / git / tmux / install flows
 
+## Good to use together
+
+clawhip pairs well with coding session tools that run in tmux:
+
+### [OMX (oh-my-codex)](https://github.com/Yeachan-Heo/oh-my-codex)
+
+OpenAI Codex wrapper with auto-monitoring. Launch monitored coding sessions:
+
+```bash
+clawhip tmux new -s issue-123 \
+  --channel YOUR_CHANNEL_ID \
+  --mention "<@your-user-id>" \
+  --keywords "error,PR created,complete" \
+  -- 'source ~/.zshrc && omx --madmax'
+```
+
+See [`skills/omx/`](skills/omx/) for ready-to-use scripts.
+
+### [OMC (oh-my-claudecode)](https://github.com/Yeachan-Heo/oh-my-claudecode)
+
+Claude Code wrapper with auto-monitoring. Launch monitored coding sessions:
+
+```bash
+clawhip tmux new -s issue-456 \
+  --channel YOUR_CHANNEL_ID \
+  --mention "<@your-user-id>" \
+  --keywords "error,PR created,complete" \
+  -- 'source ~/.zshrc && omc --openclaw --madmax'
+```
+
+See [`skills/omc/`](skills/omc/) for ready-to-use scripts.
+
 ## Description
 
 Operational spec for OpenClaw / Clawdbot agents consuming this repo.
@@ -412,34 +444,3 @@ clawhip git ...         # thin client git event
 clawhip tmux ...        # thin client / wrapper surface
 ```
 
-## Good to use together
-
-clawhip pairs well with coding session tools that run in tmux:
-
-### [OMX (oh-my-codex)](https://github.com/Yeachan-Heo/oh-my-codex)
-
-OpenAI Codex wrapper with auto-monitoring. Launch monitored coding sessions:
-
-```bash
-clawhip tmux new -s issue-123 \
-  --channel YOUR_CHANNEL_ID \
-  --mention "<@your-user-id>" \
-  --keywords "error,PR created,complete" \
-  -- 'source ~/.zshrc && omx --madmax'
-```
-
-See [`skills/omx/`](skills/omx/) for ready-to-use scripts.
-
-### [OMC (oh-my-claudecode)](https://github.com/Yeachan-Heo/oh-my-claudecode)
-
-Claude Code wrapper with auto-monitoring. Launch monitored coding sessions:
-
-```bash
-clawhip tmux new -s issue-456 \
-  --channel YOUR_CHANNEL_ID \
-  --mention "<@your-user-id>" \
-  --keywords "error,PR created,complete" \
-  -- 'source ~/.zshrc && omc --openclaw --madmax'
-```
-
-See [`skills/omc/`](skills/omc/) for ready-to-use scripts.
