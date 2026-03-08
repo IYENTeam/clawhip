@@ -1,91 +1,121 @@
 <p align="center">
-  <img src="assets/clawhip-mascot.jpg" alt="clawhip mascot" width="500">
+  <img src="assets/clawhip-mascot.jpg" alt="clawhip mascot" width="420">
 </p>
 
 <h1 align="center">🦞🔥 clawhip</h1>
 
 <p align="center">
-  <strong>claw + whip</strong> — standalone event gateway to Discord<br>
-  <em>All events come in through CLI or webhooks, then route to channels.</em>
+  <strong>Daemon-first event gateway for Discord</strong><br>
+  GitHub webhooks, git polling, tmux monitoring, and CLI clients all flow through one daemon.
 </p>
 
 ---
 
-## Core architecture
+## What clawhip is
 
-`clawhip` is a **gateway**, not a plugin and not a Discord gateway client.
+`clawhip` is a **daemon**, not a one-shot direct-to-Discord CLI.
 
-The model is:
+The daemon listens on **port `25294` by default** and is the **single delivery point** for all notifications.
+
+Architecture:
 
 ```text
-[external hook / cron / wrapper / webhook] -> [clawhip CLI or HTTP] -> [route matching] -> [Discord REST API]
+[CLI client] --------------------------->
+[GitHub webhook] ----------------------->
+[Built-in git monitor] ----------------->  [clawhip daemon :25294] -> [route/filter engine] -> [Discord REST API]
+[Built-in tmux monitor] --------------->
+[clawhip tmux new registration] ------->
 ```
 
-That means:
+Everything routes through the daemon.
 
-- no clawdbot plugin integration
-- no internal git polling daemon
-- no internal tmux watch daemon
-- git and tmux integrations are provided as **ready-to-use scripts** under `integrations/`
-- `clawhip tmux new ... -- command` is a built-in wrapper for launching a tmux session with monitoring
+## Core model
 
-## Features
+- `clawhip` or `clawhip start` starts the daemon
+- `clawhip status` checks daemon health
+- `clawhip send`, `clawhip github ...`, `clawhip git ...`, `clawhip tmux keyword|stale ...` are **thin clients**
+- thin clients POST events to the local daemon API
+- the daemon performs all Discord delivery
+- the daemon also runs built-in:
+  - git repo polling
+  - tmux keyword monitoring
+  - tmux staleness monitoring
 
-- `clawhip custom --channel <id> --message <text>`
-- `clawhip git commit ...`
-- `clawhip git branch-changed ...`
-- `clawhip github issue-opened ...`
-- `clawhip github pr-status-changed ...`
-- `clawhip tmux keyword ...`
-- `clawhip tmux stale ...`
-- `clawhip tmux new -s session --channel ... --keywords ... --stale-minutes ... -- command args`
-- `clawhip stdin`
-- `clawhip serve --port 8765`
-- `clawhip config`
-- route filters with payload-field matching and glob support
-- Discord delivery via `reqwest`
+## Default port
 
-## Install
+Default daemon port: **`25294`**
 
-```bash
-cargo install --path .
+Why `25294`?
+- `CLAW` on a phone keypad -> `2529`
+- plus `4` for the whip
+
+Default daemon base URL:
+
+```text
+http://127.0.0.1:25294
 ```
 
-## Basic usage
+## Commands
+
+### Start the daemon
 
 ```bash
-# Custom notification
-clawhip custom --channel 1468539002985644084 --message "Build complete"
+# default daemon mode
+clawhip
 
-# Git commit event
+# explicit
+clawhip start
+
+# override port
+clawhip start --port 25294
+```
+
+### Check daemon health
+
+```bash
+clawhip status
+```
+
+### Send events via daemon client commands
+
+These commands do **not** talk to Discord directly. They POST to the running daemon.
+
+```bash
+# custom event
+clawhip send --channel 1468539002985644084 --message "Build complete"
+
+# git events
 clawhip git commit \
   --repo clawhip \
   --branch main \
   --commit deadbeefcafebabe \
-  --summary "Ship gateway prototype"
+  --summary "Ship daemon refactor"
 
-# GitHub issue-opened event
+clawhip git branch-changed \
+  --repo clawhip \
+  --old-branch feature/x \
+  --new-branch main
+
+# github events
 clawhip github issue-opened \
   --repo clawhip \
   --number 42 \
   --title "Webhook regression"
 
-# Pull-request status event
 clawhip github pr-status-changed \
   --repo clawhip \
   --number 77 \
-  --title "Add tmux wrapper" \
+  --title "Add daemon mode" \
   --old-status open \
   --new-status merged \
-  --url https://github.com/bellman/clawhip/pull/77
+  --url https://github.com/Yeachan-Heo/clawhip/pull/77
 
-# tmux keyword event
+# tmux event clients
 clawhip tmux keyword \
   --session issue-1440 \
   --keyword "PR created" \
   --line "PR #1453 created"
 
-# tmux stale event
 clawhip tmux stale \
   --session issue-1440 \
   --pane 0.0 \
@@ -93,9 +123,26 @@ clawhip tmux stale \
   --last-line "running integration tests"
 ```
 
-## tmux wrapper mode
+## Built-in monitoring
 
-`clawhip tmux new` launches a tmux session and monitors its pane output for keywords and staleness.
+The daemon includes built-in monitors configured in `~/.clawhip/config.toml`.
+
+### Git monitoring
+
+The daemon can poll repositories for:
+- new commits
+- branch changes
+- PR status changes
+
+### tmux monitoring
+
+The daemon can monitor tmux sessions for:
+- keyword matches in pane output
+- stale panes with no new output for N minutes
+
+## tmux wrapper
+
+`clawhip tmux new` launches tmux locally, then registers the session with the daemon for monitoring.
 
 ```bash
 clawhip tmux new -s issue-2000 \
@@ -107,50 +154,57 @@ clawhip tmux new -s issue-2000 \
   -- cargo test
 ```
 
-### Wrapper argument model
+Wrapper-specific arguments are parsed **before** `--`:
 
-Arguments **before** `--` are clawhip/tmux wrapper options parsed by Clap:
-
-- `-s, --session <name>`
 - `--channel <id>`
 - `--mention <tag>`
 - `--keywords <comma-separated>`
 - `--stale-minutes <n>`
 - `--format <compact|alert|inline>`
+- `-s, --session <name>`
 - `-n, --window-name <name>`
 - `-c, --cwd <dir>`
 - `--attach`
 
-Arguments **after** `--` are passed through as the command to run inside tmux.
+Everything after `--` is passed through to the command running inside tmux.
 
-## HTTP webhook gateway
+## Webhook API
 
-```bash
-clawhip serve --port 8765
-```
-
-Endpoints:
+The daemon exposes:
 
 - `GET /health`
-- `POST /events` — generic JSON events
-- `POST /github` — GitHub `issues` and `pull_request` events
+- `GET /api/status`
+- `POST /api/event`
+- `POST /events`
+- `POST /api/tmux/register`
+- `POST /github`
 
-Supported GitHub webhook mappings:
+### GitHub webhook support
 
+`POST /github` supports:
 - `issues.opened` -> `github.issue-opened`
-- `pull_request.opened` -> `git.pr-status-changed` (`<new>` -> `open`)
-- `pull_request.reopened` -> `git.pr-status-changed` (`closed` -> `open`)
-- `pull_request.closed` -> `git.pr-status-changed` (`open` -> `closed` or `merged`)
+- `pull_request.opened` -> `git.pr-status-changed`
+- `pull_request.reopened` -> `git.pr-status-changed`
+- `pull_request.closed` -> `git.pr-status-changed` with `closed` or `merged`
 
 ## Config
 
-Config lives at `~/.clawhip/config.toml`.
+Config file:
+
+```text
+~/.clawhip/config.toml
+```
 
 Example:
 
 ```toml
 [discord]
 bot_token = "your-discord-bot-token"
+
+[daemon]
+bind_host = "0.0.0.0"
+port = 25294
+base_url = "http://127.0.0.1:25294"
 
 [defaults]
 channel = "1468539002985644084"
@@ -173,102 +227,96 @@ event = "tmux.*"
 filter = { session = "issue-*" }
 channel = "1468539002985644084"
 format = "compact"
+
+[monitors]
+poll_interval_secs = 5
+github_api_base = "https://api.github.com"
+# github_token = "optional-token"
+
+[[monitors.git.repos]]
+path = "/home/user/Workspace/clawhip"
+name = "clawhip"
+remote = "origin"
+emit_commits = true
+emit_branch_changes = true
+emit_pr_status = true
+channel = "1468539002985644084"
+format = "compact"
+
+[[monitors.tmux.sessions]]
+session = "issue-*"
+keywords = ["error", "FAILED", "complete", "PR created"]
+stale_minutes = 10
+channel = "1468539002985644084"
+mention = "<@botid>"
+format = "alert"
 ```
 
-### Route filtering
+## Route filtering
 
-Routes are evaluated in config order. A route matches when:
-
-1. `event` glob matches the event type, and
-2. every `filter` entry matches the corresponding payload field
-
-Filter values support glob patterns, so this works:
+Routes support payload-based filters so the same event type can go to different channels.
 
 ```toml
+[[routes]]
+event = "github.*"
+filter = { repo = "oh-my-claudecode" }
+channel = "1468539002985644084"
+format = "compact"
+
+[[routes]]
+event = "github.*"
+filter = { repo = "clawhip" }
+channel = "9999999999"
+format = "alert"
+
 [[routes]]
 event = "tmux.*"
 filter = { session = "issue-*" }
 channel = "1468539002985644084"
 ```
 
-That lets the same event type route to different channels based on payload fields like `repo`, `session`, `branch`, etc.
+Filter values support glob matching.
 
-### Environment overrides
+## Config commands
+
+```bash
+clawhip config
+clawhip config show
+clawhip config path
+```
+
+## systemd deployment
+
+A ready-to-use unit file is included at:
+
+```text
+deploy/clawhip.service
+```
+
+Typical install flow:
+
+```bash
+sudo cp deploy/clawhip.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now clawhip
+sudo systemctl status clawhip
+```
+
+## Environment variables
 
 - `CLAWHIP_CONFIG`
+- `CLAWHIP_DAEMON_URL`
 - `CLAWHIP_DISCORD_BOT_TOKEN`
 - `CLAWHIP_DISCORD_API_BASE`
+- `CLAWHIP_GITHUB_TOKEN`
+- `CLAWHIP_GIT_BIN`
 - `CLAWHIP_TMUX_BIN`
-- `CLAWHIP_TMUX_POLL_SECS`
-
-## JSON event gateway
-
-`clawhip stdin` and `POST /events` accept flat or payload-style JSON.
-
-Flat example:
-
-```json
-{
-  "type": "custom",
-  "channel": "1468539002985644084",
-  "message": "Deploy completed"
-}
-```
-
-Payload example:
-
-```json
-{
-  "type": "git.commit",
-  "payload": {
-    "repo": "clawhip",
-    "branch": "main",
-    "commit": "deadbeefcafebabe",
-    "summary": "Ship gateway prototype"
-  }
-}
-```
-
-## integrations/
-
-Ready-to-use examples live in `integrations/`:
-
-### Git
-
-- `integrations/git/post-commit.sh`
-- `integrations/git/post-checkout.sh`
-- `integrations/git/install-hooks.sh`
-
-Install example hooks into the current repo:
-
-```bash
-cd /path/to/repo
-/path/to/clawhip/integrations/git/install-hooks.sh
-```
-
-Optional channel override:
-
-```bash
-export CLAWHIP_CHANNEL=1468539002985644084
-```
-
-### tmux
-
-- `integrations/tmux/notify-keyword.sh`
-- `integrations/tmux/scan-keywords.sh`
-- `integrations/tmux/stale-check.sh`
-
-Example cron entries:
-
-```cron
-* * * * * /path/to/clawhip/integrations/tmux/scan-keywords.sh --session issue-1440 --keywords error,FAILED,complete --channel 1468539002985644084
-* * * * * /path/to/clawhip/integrations/tmux/stale-check.sh --session issue-1440 --stale-minutes 10 --channel 1468539002985644084
-```
 
 ## Development
 
 ```bash
 cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo build
 ```
