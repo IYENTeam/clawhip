@@ -181,7 +181,7 @@ async fn post_github(
                 _ => None,
             };
             if let Some((old_status, new_status)) = transition {
-                let event = IncomingEvent::git_pr_status_changed(
+                let event = IncomingEvent::github_pr_status_changed(
                     repo, number, title, old_status, new_status, url, None,
                 );
                 state.router.dispatch(&event, state.discord.as_ref()).await

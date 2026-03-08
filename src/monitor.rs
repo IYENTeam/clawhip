@@ -101,6 +101,8 @@ struct TmuxPaneState {
 #[derive(Clone)]
 struct IssueSnapshot {
     title: String,
+    state: String,
+    comments: u64,
 }
 
 #[derive(Clone)]
@@ -194,7 +196,7 @@ async fn poll_git(
                         {
                             Ok(issues) => {
                                 if let Some(previous) = previous {
-                                    for event in collect_new_issue_events(
+                                    for event in collect_issue_events(
                                         repo,
                                         &snapshot.repo_name,
                                         &previous.issues,
@@ -253,17 +255,18 @@ async fn poll_git(
                                         match previous.prs.get(number) {
                                             Some(old) if old.status == pr.status => {}
                                             old => {
-                                                let event = IncomingEvent::git_pr_status_changed(
-                                                    snapshot.repo_name.clone(),
-                                                    *number,
-                                                    pr.title.clone(),
-                                                    old.map(|value| value.status.clone())
-                                                        .unwrap_or_else(|| "<new>".to_string()),
-                                                    pr.status.clone(),
-                                                    pr.url.clone(),
-                                                    repo.channel.clone(),
-                                                )
-                                                .with_format(repo.format.clone());
+                                                let event =
+                                                    IncomingEvent::github_pr_status_changed(
+                                                        snapshot.repo_name.clone(),
+                                                        *number,
+                                                        pr.title.clone(),
+                                                        old.map(|value| value.status.clone())
+                                                            .unwrap_or_else(|| "<new>".to_string()),
+                                                        pr.status.clone(),
+                                                        pr.url.clone(),
+                                                        repo.channel.clone(),
+                                                    )
+                                                    .with_format(repo.format.clone());
                                                 if let Err(error) = dispatch_event(
                                                     router,
                                                     discord,
@@ -543,25 +546,52 @@ async fn list_new_commits(repo: &GitRepoMonitor, old: &str, new: &str) -> Result
         .collect())
 }
 
-fn collect_new_issue_events(
+fn collect_issue_events(
     repo: &GitRepoMonitor,
     repo_name: &str,
     previous: &HashMap<u64, IssueSnapshot>,
     current: &HashMap<u64, IssueSnapshot>,
 ) -> Vec<IncomingEvent> {
-    current
-        .iter()
-        .filter(|(number, _)| !previous.contains_key(number))
-        .map(|(number, issue)| {
-            IncomingEvent::github_issue_opened(
-                repo_name.to_string(),
-                *number,
-                issue.title.clone(),
-                repo.channel.clone(),
-            )
-            .with_format(repo.format.clone())
-        })
-        .collect()
+    let mut events = Vec::new();
+    for (number, issue) in current {
+        match previous.get(number) {
+            None => events.push(
+                IncomingEvent::github_issue_opened(
+                    repo_name.to_string(),
+                    *number,
+                    issue.title.clone(),
+                    repo.channel.clone(),
+                )
+                .with_format(repo.format.clone()),
+            ),
+            Some(old) => {
+                if old.state != issue.state && issue.state == "closed" {
+                    events.push(
+                        IncomingEvent::github_issue_closed(
+                            repo_name.to_string(),
+                            *number,
+                            issue.title.clone(),
+                            repo.channel.clone(),
+                        )
+                        .with_format(repo.format.clone()),
+                    );
+                }
+                if issue.comments > old.comments {
+                    events.push(
+                        IncomingEvent::github_issue_commented(
+                            repo_name.to_string(),
+                            *number,
+                            issue.title.clone(),
+                            issue.comments,
+                            repo.channel.clone(),
+                        )
+                        .with_format(repo.format.clone()),
+                    );
+                }
+            }
+        }
+    }
+    events
 }
 
 async fn fetch_issues(
@@ -592,7 +622,16 @@ async fn fetch_issues(
     Ok(issues
         .into_iter()
         .filter(|issue| !issue.is_pull_request())
-        .map(|issue| (issue.number, IssueSnapshot { title: issue.title }))
+        .map(|issue| {
+            (
+                issue.number,
+                IssueSnapshot {
+                    title: issue.title,
+                    state: issue.state,
+                    comments: issue.comments,
+                },
+            )
+        })
         .collect())
 }
 
@@ -806,6 +845,8 @@ struct KeywordHit {
 struct GitHubIssue {
     number: u64,
     title: String,
+    state: String,
+    comments: u64,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
 }
@@ -856,11 +897,13 @@ mod tests {
             2_u64,
             IssueSnapshot {
                 title: "live issue".into(),
+                state: "open".into(),
+                comments: 0,
             },
         )]
         .into_iter()
         .collect();
-        let events = collect_new_issue_events(&repo, "clawhip", &previous, &current);
+        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.issue-opened");
         assert_eq!(events[0].payload["repo"], "clawhip");
@@ -888,6 +931,46 @@ mod tests {
         assert_eq!(channel, "dev-channel");
         assert!(content.starts_with("<@1465264645320474637> "));
         assert!(content.contains("live issue"));
+    }
+
+    #[test]
+    fn issue_comment_and_close_events_are_emitted() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            ..GitRepoMonitor::default()
+        };
+        let previous = [(
+            2_u64,
+            IssueSnapshot {
+                title: "live issue".into(),
+                state: "open".into(),
+                comments: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let current = [(
+            2_u64,
+            IssueSnapshot {
+                title: "live issue".into(),
+                state: "closed".into(),
+                comments: 1,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.canonical_kind() == "github.issue-commented")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.canonical_kind() == "github.issue-closed")
+        );
     }
 
     #[test]

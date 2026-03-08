@@ -85,7 +85,7 @@ async fn real_main() -> Result<()> {
                     new_status,
                     url,
                     channel,
-                } => IncomingEvent::git_pr_status_changed(
+                } => IncomingEvent::github_pr_status_changed(
                     repo, number, title, old_status, new_status, url, channel,
                 ),
             };

@@ -113,6 +113,37 @@ impl IncomingEvent {
         }
     }
 
+    pub fn github_issue_commented(
+        repo: String,
+        number: u64,
+        title: String,
+        comments: u64,
+        channel: Option<String>,
+    ) -> Self {
+        Self {
+            kind: "github.issue-commented".to_string(),
+            channel,
+            format: None,
+            template: None,
+            payload: json!({ "repo": repo, "number": number, "title": title, "comments": comments }),
+        }
+    }
+
+    pub fn github_issue_closed(
+        repo: String,
+        number: u64,
+        title: String,
+        channel: Option<String>,
+    ) -> Self {
+        Self {
+            kind: "github.issue-closed".to_string(),
+            channel,
+            format: None,
+            template: None,
+            payload: json!({ "repo": repo, "number": number, "title": title }),
+        }
+    }
+
     pub fn git_commit(
         repo: String,
         branch: String,
@@ -154,7 +185,7 @@ impl IncomingEvent {
         }
     }
 
-    pub fn git_pr_status_changed(
+    pub fn github_pr_status_changed(
         repo: String,
         number: u64,
         title: String,
@@ -164,7 +195,7 @@ impl IncomingEvent {
         channel: Option<String>,
     ) -> Self {
         Self {
-            kind: "git.pr-status-changed".to_string(),
+            kind: "github.pr-status-changed".to_string(),
             channel,
             format: None,
             template: None,
@@ -223,6 +254,7 @@ impl IncomingEvent {
     pub fn canonical_kind(&self) -> &str {
         match self.kind.as_str() {
             "issue-opened" => "github.issue-opened",
+            "git.pr-status-changed" => "github.pr-status-changed",
             other => other,
         }
     }
@@ -255,6 +287,47 @@ impl IncomingEvent {
                 string_field(payload, "title")?
             ),
             ("github.issue-opened", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
+            ("github.issue-commented", MessageFormat::Compact) => format!(
+                "{}#{} commented ({} comments): {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                payload.field_u64("comments")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-commented", MessageFormat::Alert) => format!(
+                "🚨 GitHub issue commented in {}: #{} {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-commented", MessageFormat::Inline) => format!(
+                "[GitHub comment] {}#{} {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-commented", MessageFormat::Raw) => {
+                serde_json::to_string_pretty(payload)?
+            }
+            ("github.issue-closed", MessageFormat::Compact) => format!(
+                "{}#{} closed: {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-closed", MessageFormat::Alert) => format!(
+                "🚨 GitHub issue closed in {}: #{} {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-closed", MessageFormat::Inline) => format!(
+                "[GitHub closed] {}#{} {}",
+                string_field(payload, "repo")?,
+                payload.field_u64("number")?,
+                string_field(payload, "title")?
+            ),
+            ("github.issue-closed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
             ("git.commit", MessageFormat::Compact) => format!(
                 "git:{}@{} {} {}",
@@ -297,7 +370,7 @@ impl IncomingEvent {
             ),
             ("git.branch-changed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
-            ("git.pr-status-changed", MessageFormat::Compact) => format!(
+            ("github.pr-status-changed", MessageFormat::Compact) => format!(
                 "PR {}#{} {} -> {}: {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
@@ -305,7 +378,7 @@ impl IncomingEvent {
                 string_field(payload, "new_status")?,
                 string_field(payload, "title")?
             ),
-            ("git.pr-status-changed", MessageFormat::Alert) => format!(
+            ("github.pr-status-changed", MessageFormat::Alert) => format!(
                 "🚨 PR status changed in {}: #{} {} -> {} ({})",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
@@ -313,14 +386,16 @@ impl IncomingEvent {
                 string_field(payload, "new_status")?,
                 string_field(payload, "title")?
             ),
-            ("git.pr-status-changed", MessageFormat::Inline) => format!(
+            ("github.pr-status-changed", MessageFormat::Inline) => format!(
                 "[PR {}#{}] {} -> {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "old_status")?,
                 string_field(payload, "new_status")?
             ),
-            ("git.pr-status-changed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
+            ("github.pr-status-changed", MessageFormat::Raw) => {
+                serde_json::to_string_pretty(payload)?
+            }
 
             ("tmux.keyword", MessageFormat::Compact) => format!(
                 "tmux:{} matched '{}' => {}",
