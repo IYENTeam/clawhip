@@ -164,19 +164,83 @@ async fn launch_session(args: &TmuxNewArgs) -> Result<()> {
     if let Some(cwd) = &args.cwd {
         command.arg("-c").arg(cwd);
     }
-    if !args.command.is_empty() {
-        command.arg("--");
-        command.args(&args.command);
-    }
     let output = command.output().await?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_string()
-            .into())
+    if !output.status.success() {
+        return Err(tmux_stderr(&output.stderr).into());
     }
+
+    if let Some(command) = build_command_to_send(args) {
+        send_command_to_session(&args.session, &command).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_command_to_session(session: &str, command: &str) -> Result<()> {
+    let literal_output = Command::new(tmux_bin())
+        .arg("send-keys")
+        .arg("-t")
+        .arg(session)
+        .arg("-l")
+        .arg(command)
+        .output()
+        .await?;
+    if !literal_output.status.success() {
+        return Err(tmux_stderr(&literal_output.stderr).into());
+    }
+
+    let enter_output = Command::new(tmux_bin())
+        .arg("send-keys")
+        .arg("-t")
+        .arg(session)
+        .arg("Enter")
+        .output()
+        .await?;
+    if !enter_output.status.success() {
+        return Err(tmux_stderr(&enter_output.stderr).into());
+    }
+
+    Ok(())
+}
+
+fn build_command_to_send(args: &TmuxNewArgs) -> Option<String> {
+    if args.command.is_empty() {
+        return None;
+    }
+
+    let joined = if args.command.len() == 1 {
+        args.command[0].clone()
+    } else {
+        shell_join(&args.command)
+    };
+    Some(match &args.shell {
+        Some(shell) => format!("{} -c {}", shell_escape(shell), shell_escape(&joined)),
+        None => joined,
+    })
+}
+
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| shell_escape(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_escape(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "_@%+=:,./-".contains(ch))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn tmux_stderr(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr).trim().to_string()
 }
 
 async fn attach_session(session: &str) -> Result<()> {
@@ -309,12 +373,86 @@ mod tests {
     #[test]
     fn keyword_hits_only_emit_for_new_lines() {
         let hits = collect_keyword_hits(
-            "done\nall good",
-            "done\nall good\nerror: failed\nPR created #7",
+            "done
+all good",
+            "done
+all good
+error: failed
+PR created #7",
             &["error".into(), "PR created".into()],
         );
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].keyword, "error");
         assert_eq!(hits[1].keyword, "PR created");
+    }
+
+    #[test]
+    fn build_command_to_send_preserves_shell_arguments_when_joining() {
+        let args = TmuxNewArgs {
+            session: "dev".into(),
+            window_name: None,
+            cwd: None,
+            channel: None,
+            mention: None,
+            keywords: Vec::new(),
+            stale_minutes: 10,
+            format: None,
+            attach: false,
+            shell: None,
+            command: vec![
+                "zsh".into(),
+                "-c".into(),
+                "source ~/.zshrc && omx --madmax".into(),
+            ],
+        };
+
+        assert_eq!(
+            build_command_to_send(&args).as_deref(),
+            Some("zsh -c 'source ~/.zshrc && omx --madmax'")
+        );
+    }
+
+    #[test]
+    fn build_command_to_send_wraps_joined_command_with_override_shell() {
+        let args = TmuxNewArgs {
+            session: "dev".into(),
+            window_name: None,
+            cwd: None,
+            channel: None,
+            mention: None,
+            keywords: Vec::new(),
+            stale_minutes: 10,
+            format: None,
+            attach: false,
+            shell: Some("/bin/zsh".into()),
+            command: vec!["source ~/.zshrc && omx --madmax".into()],
+        };
+
+        assert_eq!(
+            build_command_to_send(&args).as_deref(),
+            Some("/bin/zsh -c 'source ~/.zshrc && omx --madmax'")
+        );
+    }
+
+    #[test]
+    fn build_command_to_send_leaves_single_shell_snippet_unquoted_without_override() {
+        let args = TmuxNewArgs {
+            session: "dev".into(),
+            window_name: None,
+            cwd: None,
+            channel: None,
+            mention: None,
+            keywords: Vec::new(),
+            stale_minutes: 10,
+            format: None,
+            attach: false,
+            shell: None,
+            command: vec!["source ~/.zshrc && omx --madmax".into()],
+        };
+
+        assert_eq!(
+            build_command_to_send(&args).as_deref(),
+            Some("source ~/.zshrc && omx --madmax")
+        );
     }
 }

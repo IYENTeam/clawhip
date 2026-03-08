@@ -203,6 +203,8 @@ pub struct TmuxNewArgs {
     pub format: Option<TmuxWrapperFormat>,
     #[arg(long, default_value_t = false)]
     pub attach: bool,
+    #[arg(long)]
+    pub shell: Option<String>,
     #[arg(last = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
 }

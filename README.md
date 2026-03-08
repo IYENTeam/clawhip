@@ -222,11 +222,13 @@ clawhip tmux new -s <session> \
   --keywords 'error,PR created,FAILED,complete' \
   --stale-minutes 10 \
   --format alert \
+  --shell /bin/zsh \
   -- command args
 ```
 
 Behavior:
-- create tmux session
+- create tmux session using the user's default shell (or `--shell` override)
+- send the requested command into the session
 - register session with daemon
 - daemon monitors keyword/stale events
 - final delivery goes through daemon routing
