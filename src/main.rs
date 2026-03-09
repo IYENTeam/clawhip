@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod discord;
 mod dynamic_tokens;
+mod event;
 mod events;
 mod keyword_window;
 mod lifecycle;
@@ -22,6 +23,7 @@ use crate::cli::{
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
+use crate::event::compat::from_incoming_event;
 use crate::events::IncomingEvent;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -35,6 +37,12 @@ async fn main() {
         eprintln!("clawhip error: {error}");
         std::process::exit(1);
     }
+}
+
+fn prepare_event(event: IncomingEvent) -> Result<IncomingEvent> {
+    let event = crate::events::normalize_event(event);
+    let _typed = from_incoming_event(&event)?;
+    Ok(event)
 }
 
 async fn real_main() -> Result<()> {
@@ -52,8 +60,7 @@ async fn real_main() -> Result<()> {
         }
         Commands::Emit(args) => {
             let client = DaemonClient::from_config(config.as_ref());
-            let event = args.into_event()?;
-            client.send_event(&event).await
+            send_incoming_event(&client, args.into_event()?).await
         }
         Commands::Setup { webhook } => {
             let mut editable = AppConfig::load_or_default(&config_path)?;
@@ -65,9 +72,7 @@ async fn real_main() -> Result<()> {
         }
         Commands::Send { channel, message } => {
             let client = DaemonClient::from_config(config.as_ref());
-            client
-                .send_event(&IncomingEvent::custom(channel, message))
-                .await
+            send_incoming_event(&client, IncomingEvent::custom(channel, message)).await
         }
         Commands::Git { command } => {
             let client = DaemonClient::from_config(config.as_ref());
@@ -86,7 +91,7 @@ async fn real_main() -> Result<()> {
                     channel,
                 } => IncomingEvent::git_branch_changed(repo, old_branch, new_branch, channel),
             };
-            client.send_event(&event).await
+            send_incoming_event(&client, event).await
         }
         Commands::Github { command } => {
             let client = DaemonClient::from_config(config.as_ref());
@@ -109,7 +114,7 @@ async fn real_main() -> Result<()> {
                     repo, number, title, old_status, new_status, url, channel,
                 ),
             };
-            client.send_event(&event).await
+            send_incoming_event(&client, event).await
         }
         Commands::Agent { command } => {
             let client = DaemonClient::from_config(config.as_ref());
@@ -152,7 +157,7 @@ async fn real_main() -> Result<()> {
                     args.event.channel,
                 ),
             };
-            client.send_event(&event).await
+            send_incoming_event(&client, event).await
         }
         Commands::Install { systemd } => lifecycle::install(systemd),
         Commands::Update { restart } => lifecycle::update(restart),
@@ -168,11 +173,11 @@ async fn real_main() -> Result<()> {
                 channel,
             } => {
                 let client = DaemonClient::from_config(config.as_ref());
-                client
-                    .send_event(&IncomingEvent::tmux_keyword(
-                        session, keyword, line, channel,
-                    ))
-                    .await
+                send_incoming_event(
+                    &client,
+                    IncomingEvent::tmux_keyword(session, keyword, line, channel),
+                )
+                .await
             }
             TmuxCommands::Stale {
                 session,
@@ -182,11 +187,11 @@ async fn real_main() -> Result<()> {
                 channel,
             } => {
                 let client = DaemonClient::from_config(config.as_ref());
-                client
-                    .send_event(&IncomingEvent::tmux_stale(
-                        session, pane, minutes, last_line, channel,
-                    ))
-                    .await
+                send_incoming_event(
+                    &client,
+                    IncomingEvent::tmux_stale(session, pane, minutes, last_line, channel),
+                )
+                .await
             }
             TmuxCommands::New(args) => tmux_wrapper::run(args, config.as_ref()).await,
             TmuxCommands::Watch(args) => tmux_wrapper::watch(args, config.as_ref()).await,
@@ -228,4 +233,9 @@ async fn real_main() -> Result<()> {
             }
         },
     }
+}
+
+async fn send_incoming_event(client: &DaemonClient, event: IncomingEvent) -> Result<()> {
+    let event = prepare_event(event)?;
+    client.send_event(&event).await
 }

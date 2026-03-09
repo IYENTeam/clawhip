@@ -14,6 +14,7 @@ use crate::Result;
 use crate::VERSION;
 use crate::config::AppConfig;
 use crate::discord::DiscordClient;
+use crate::event::compat::from_incoming_event;
 use crate::events::{IncomingEvent, normalize_event};
 use crate::monitor::{self, RegisteredTmuxSession, SharedTmuxRegistry};
 use crate::router::Router;
@@ -102,6 +103,13 @@ async fn post_event(
     Json(event): Json<IncomingEvent>,
 ) -> impl IntoResponse {
     let event = normalize_event(event);
+    if let Err(error) = from_incoming_event(&event) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": error.to_string()})),
+        )
+            .into_response();
+    }
     match state.router.dispatch(&event, state.discord.as_ref()).await {
         Ok(()) => (
             StatusCode::ACCEPTED,
@@ -162,7 +170,16 @@ async fn post_github(
                 .and_then(Value::as_str)
                 .unwrap_or("Untitled issue")
                 .to_string();
-            let event = IncomingEvent::github_issue_opened(repo, number, title, None);
+            let event = normalize_event(IncomingEvent::github_issue_opened(
+                repo, number, title, None,
+            ));
+            if let Err(error) = from_incoming_event(&event) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "error": error.to_string()})),
+                )
+                    .into_response();
+            }
             state.router.dispatch(&event, state.discord.as_ref()).await
         }
         "pull_request" => {
@@ -198,9 +215,16 @@ async fn post_github(
                 _ => None,
             };
             if let Some((old_status, new_status)) = transition {
-                let event = IncomingEvent::github_pr_status_changed(
+                let event = normalize_event(IncomingEvent::github_pr_status_changed(
                     repo, number, title, old_status, new_status, url, None,
-                );
+                ));
+                if let Err(error) = from_incoming_event(&event) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"ok": false, "error": error.to_string()})),
+                    )
+                        .into_response();
+                }
                 state.router.dispatch(&event, state.discord.as_ref()).await
             } else {
                 return (
