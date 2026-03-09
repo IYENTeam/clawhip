@@ -403,6 +403,7 @@ async fn poll_tmux(
                                         hit.line,
                                         registration.channel.clone(),
                                     )
+                                    .with_mention(registration.mention.clone())
                                     .with_format(registration.format.clone());
                                     if let Err(error) = dispatch_event(
                                         router,
@@ -439,6 +440,7 @@ async fn poll_tmux(
                                         latest_line,
                                         registration.channel.clone(),
                                     )
+                                    .with_mention(registration.mention.clone())
                                     .with_format(registration.format.clone());
                                     if let Err(error) = dispatch_event(
                                         router,
@@ -481,11 +483,13 @@ async fn dispatch_event(
     event: &IncomingEvent,
     mention: Option<&str>,
 ) -> Result<()> {
-    let (channel, _format, content) = router.preview(event).await?;
-    let content = match mention {
-        Some(mention) if !mention.trim().is_empty() => format!("{} {}", mention.trim(), content),
-        _ => content,
+    let event = match (event.mention.as_ref(), mention.map(str::trim)) {
+        (None, Some(mention)) if !mention.is_empty() => {
+            event.clone().with_mention(Some(mention.to_string()))
+        }
+        _ => event.clone(),
     };
+    let (channel, _format, content) = router.preview(&event).await?;
     discord.send_message(&channel, &content).await
 }
 

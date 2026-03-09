@@ -399,6 +399,11 @@ impl IncomingEvent {
         }
     }
 
+    pub fn with_mention(mut self, mention: Option<String>) -> Self {
+        self.mention = mention;
+        self
+    }
+
     pub fn with_format(mut self, format: Option<MessageFormat>) -> Self {
         self.format = format;
         self
@@ -804,6 +809,19 @@ mod tests {
             Some("alerts".into()),
         );
         assert_eq!(keyword.mention, None);
+    }
+
+    #[test]
+    fn with_mention_sets_top_level_mention() {
+        let event = IncomingEvent::tmux_keyword(
+            "issue-24".into(),
+            "error".into(),
+            "boom".into(),
+            Some("alerts".into()),
+        )
+        .with_mention(Some("<@123>".into()));
+
+        assert_eq!(event.mention.as_deref(), Some("<@123>"));
     }
 
     #[test]
