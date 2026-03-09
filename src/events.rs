@@ -98,6 +98,7 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn agent_event(
         kind: &str,
         status: &str,
@@ -210,6 +211,7 @@ impl IncomingEvent {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn agent_failed(
         agent_name: String,
         session_id: Option<String>,
