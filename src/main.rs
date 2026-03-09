@@ -5,6 +5,7 @@ mod daemon;
 mod discord;
 mod dynamic_tokens;
 mod events;
+mod keyword_window;
 mod lifecycle;
 mod monitor;
 mod plugins;

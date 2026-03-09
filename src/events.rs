@@ -416,13 +416,35 @@ impl IncomingEvent {
         line: String,
         channel: Option<String>,
     ) -> Self {
+        Self::tmux_keywords(session, vec![(keyword, line)], channel)
+    }
+
+    pub fn tmux_keywords(
+        session: String,
+        hits: Vec<(String, String)>,
+        channel: Option<String>,
+    ) -> Self {
+        let hit_count = hits.len();
+        let (keyword, line) = hits
+            .first()
+            .cloned()
+            .unwrap_or_else(|| (String::new(), String::new()));
         Self {
             kind: "tmux.keyword".to_string(),
             channel,
             mention: None,
             format: None,
             template: None,
-            payload: json!({ "session": session, "keyword": keyword, "line": line }),
+            payload: json!({
+                "session": session,
+                "keyword": keyword,
+                "line": line,
+                "hit_count": hit_count,
+                "hits": hits
+                    .into_iter()
+                    .map(|(keyword, line)| json!({ "keyword": keyword, "line": line }))
+                    .collect::<Vec<_>>(),
+            }),
         }
     }
 
@@ -470,6 +492,11 @@ impl IncomingEvent {
         let payload = &self.payload;
         if self.canonical_kind() == "git.commit"
             && let Some(rendered) = render_aggregated_git_commit(payload, format)?
+        {
+            return Ok(rendered);
+        }
+        if self.canonical_kind() == "tmux.keyword"
+            && let Some(rendered) = render_aggregated_tmux_keyword(payload, format)?
         {
             return Ok(rendered);
         }
@@ -846,6 +873,54 @@ fn render_aggregated_git_commit(payload: &Value, format: &MessageFormat) -> Resu
     Ok(Some(lines.join("\n")))
 }
 
+fn render_aggregated_tmux_keyword(
+    payload: &Value,
+    format: &MessageFormat,
+) -> Result<Option<String>> {
+    let Some(hits) = payload.get("hits").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if hits.len() <= 1 {
+        return Ok(None);
+    }
+
+    let session = string_field(payload, "session")?;
+    let hit_count = optional_u64_field(payload, "hit_count")
+        .map(|count| count as usize)
+        .unwrap_or(hits.len());
+    let summaries = hits
+        .iter()
+        .filter_map(|hit| {
+            let keyword = hit.get("keyword").and_then(Value::as_str)?.trim();
+            let line = hit.get("line").and_then(Value::as_str)?.trim();
+            if keyword.is_empty() || line.is_empty() {
+                None
+            } else {
+                Some(format!("'{keyword}': {line}"))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    match format {
+        MessageFormat::Compact | MessageFormat::Alert => {
+            let header = match format {
+                MessageFormat::Alert => {
+                    format!("🚨 tmux session {session} hit {hit_count} keyword matches:")
+                }
+                MessageFormat::Compact => {
+                    format!("tmux:{session} matched {hit_count} keyword hits:")
+                }
+                _ => unreachable!(),
+            };
+            let mut lines = vec![header];
+            lines.extend(summaries.into_iter().map(|summary| format!("- {summary}")));
+            Ok(Some(lines.join("\n")))
+        }
+        MessageFormat::Inline => Ok(Some(format!("[tmux:{session}] {}", summaries.join(" · ")))),
+        MessageFormat::Raw => Ok(None),
+    }
+}
+
 fn flatten_json(prefix: &str, value: &Value, out: &mut BTreeMap<String, String>) {
     match value {
         Value::Object(map) => {
@@ -1216,6 +1291,36 @@ mod tests {
         assert_eq!(
             event.render_default(&MessageFormat::Alert).unwrap(),
             "🚨 git:repo@main pushed 6 commits:\n- one\n- two\n- three\n... and 1 more\n- five\n- six"
+        );
+    }
+
+    #[test]
+    fn tmux_keyword_events_aggregate_multi_hit_windows() {
+        let event = IncomingEvent::tmux_keywords(
+            "issue-24".into(),
+            vec![
+                ("error".into(), "build failed".into()),
+                ("complete".into(), "job complete".into()),
+            ],
+            Some("alerts".into()),
+        );
+
+        assert_eq!(event.kind, "tmux.keyword");
+        assert_eq!(event.payload["keyword"], json!("error"));
+        assert_eq!(event.payload["line"], json!("build failed"));
+        assert_eq!(event.payload["hit_count"], json!(2));
+        assert_eq!(event.payload["hits"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            event.render_default(&MessageFormat::Compact).unwrap(),
+            "tmux:issue-24 matched 2 keyword hits:\n- 'error': build failed\n- 'complete': job complete"
+        );
+        assert_eq!(
+            event.render_default(&MessageFormat::Alert).unwrap(),
+            "🚨 tmux session issue-24 hit 2 keyword matches:\n- 'error': build failed\n- 'complete': job complete"
+        );
+        assert_eq!(
+            event.render_default(&MessageFormat::Inline).unwrap(),
+            "[tmux:issue-24] 'error': build failed · 'complete': job complete"
         );
     }
 }

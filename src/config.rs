@@ -161,6 +161,8 @@ pub struct TmuxSessionMonitor {
     pub session: String,
     #[serde(default)]
     pub keywords: Vec<String>,
+    #[serde(default = "default_keyword_window_secs")]
+    pub keyword_window_secs: u64,
     #[serde(default = "default_stale_minutes")]
     pub stale_minutes: u64,
     pub channel: Option<String>,
@@ -173,6 +175,7 @@ impl Default for TmuxSessionMonitor {
         Self {
             session: String::new(),
             keywords: Vec::new(),
+            keyword_window_secs: default_keyword_window_secs(),
             stale_minutes: default_stale_minutes(),
             channel: None,
             mention: None,
@@ -209,6 +212,9 @@ fn default_remote() -> String {
 }
 fn default_stale_minutes() -> u64 {
     10
+}
+fn default_keyword_window_secs() -> u64 {
+    30
 }
 fn default_true() -> bool {
     true
@@ -615,5 +621,11 @@ mod tests {
             Some("https://discord.com/api/webhooks/123/abc")
         );
         assert_eq!(config.routes[0].channel, None);
+    }
+
+    #[test]
+    fn tmux_session_monitor_defaults_keyword_window_to_thirty_seconds() {
+        let session = TmuxSessionMonitor::default();
+        assert_eq!(session.keyword_window_secs, 30);
     }
 }

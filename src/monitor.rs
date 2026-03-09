@@ -14,6 +14,7 @@ use crate::Result;
 use crate::config::{AppConfig, GitRepoMonitor, TmuxSessionMonitor};
 use crate::discord::DiscordClient;
 use crate::events::{IncomingEvent, MessageFormat};
+use crate::keyword_window::{PendingKeywordHits, collect_keyword_hits};
 use crate::router::Router;
 
 pub type SharedTmuxRegistry = Arc<RwLock<HashMap<String, RegisteredTmuxSession>>>;
@@ -25,6 +26,8 @@ pub struct RegisteredTmuxSession {
     pub mention: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    #[serde(default = "default_keyword_window_secs")]
+    pub keyword_window_secs: u64,
     pub stale_minutes: u64,
     pub format: Option<MessageFormat>,
     #[serde(default)]
@@ -38,6 +41,7 @@ impl From<&TmuxSessionMonitor> for RegisteredTmuxSession {
             channel: value.channel.clone(),
             mention: value.mention.clone(),
             keywords: value.keywords.clone(),
+            keyword_window_secs: value.keyword_window_secs,
             stale_minutes: value.stale_minutes,
             format: value.format.clone(),
             active_wrapper_monitor: false,
@@ -99,6 +103,7 @@ struct TmuxPaneState {
     content_hash: u64,
     last_change: Instant,
     last_stale_notification: Option<Instant>,
+    pending_keyword_hits: Option<PendingKeywordHits>,
 }
 
 #[derive(Clone)]
@@ -349,14 +354,31 @@ async fn poll_tmux(
     let mut active_panes = HashSet::new();
     let mut sessions_to_unregister = Vec::new();
 
-    for (session_name, registration) in sessions {
+    for (session_name, registration) in &sessions {
         if registration.active_wrapper_monitor {
             continue;
         }
-        match session_exists(&session_name).await {
+        match session_exists(session_name).await {
             Ok(false) => {
                 sessions_to_unregister.push(session_name.clone());
-                state.retain(|key, pane| !key.starts_with(&format!("{}::", pane.session)));
+                let keys_to_remove = state
+                    .iter()
+                    .filter(|(_, pane)| pane.session == *session_name)
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in keys_to_remove {
+                    if let Some(mut pane) = state.remove(&key) {
+                        flush_pending_keyword_hits(
+                            &mut pane,
+                            registration,
+                            router,
+                            discord,
+                            Instant::now(),
+                            true,
+                        )
+                        .await;
+                    }
+                }
                 continue;
             }
             Err(error) => {
@@ -369,7 +391,7 @@ async fn poll_tmux(
             Ok(true) => {}
         }
 
-        match snapshot_tmux_session(&session_name).await {
+        match snapshot_tmux_session(session_name).await {
             Ok(panes) => {
                 for pane in panes {
                     let pane_key = format!("{}::{}", pane.session, pane.pane_id);
@@ -388,37 +410,31 @@ async fn poll_tmux(
                                     content_hash: hash,
                                     last_change: now,
                                     last_stale_notification: None,
+                                    pending_keyword_hits: None,
                                 },
                             );
                         }
                         Some(existing) => {
+                            flush_pending_keyword_hits(
+                                existing,
+                                registration,
+                                router,
+                                discord,
+                                now,
+                                false,
+                            )
+                            .await;
                             if existing.content_hash != hash {
                                 let hits = collect_keyword_hits(
                                     &existing.snapshot,
                                     &pane.content,
                                     &registration.keywords,
                                 );
-                                for hit in hits {
-                                    let event = IncomingEvent::tmux_keyword(
-                                        pane.session.clone(),
-                                        hit.keyword,
-                                        hit.line,
-                                        registration.channel.clone(),
-                                    )
-                                    .with_mention(registration.mention.clone())
-                                    .with_format(registration.format.clone());
-                                    if let Err(error) = dispatch_event(
-                                        router,
-                                        discord,
-                                        &event,
-                                        registration.mention.as_deref(),
-                                    )
-                                    .await
-                                    {
-                                        eprintln!(
-                                            "clawhip monitor tmux keyword dispatch failed: {error}"
-                                        );
-                                    }
+                                if !hits.is_empty() {
+                                    existing
+                                        .pending_keyword_hits
+                                        .get_or_insert_with(|| PendingKeywordHits::new(now))
+                                        .push(hits);
                                 }
                                 existing.pane_name = pane.pane_name;
                                 existing.snapshot = pane.content;
@@ -470,12 +486,79 @@ async fn poll_tmux(
         }
     }
 
+    let keys_to_remove = state
+        .iter()
+        .filter(|(key, _)| !active_panes.contains(*key))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in keys_to_remove {
+        if let Some(mut pane) = state.remove(&key)
+            && let Some(registration) = sessions.get(&pane.session)
+        {
+            flush_pending_keyword_hits(
+                &mut pane,
+                registration,
+                router,
+                discord,
+                Instant::now(),
+                true,
+            )
+            .await;
+        }
+    }
     state.retain(|key, _| active_panes.contains(key));
     if !sessions_to_unregister.is_empty() {
         let mut write = registry.write().await;
         for session in sessions_to_unregister {
             write.remove(&session);
         }
+    }
+}
+
+async fn flush_pending_keyword_hits(
+    pane: &mut TmuxPaneState,
+    registration: &RegisteredTmuxSession,
+    router: &Router,
+    discord: &DiscordClient,
+    now: Instant,
+    force: bool,
+) {
+    let should_flush = pane
+        .pending_keyword_hits
+        .as_ref()
+        .map(|pending| {
+            force
+                || pending.ready_to_flush(
+                    now,
+                    Duration::from_secs(registration.keyword_window_secs.max(1)),
+                )
+        })
+        .unwrap_or(false);
+
+    if !should_flush {
+        return;
+    }
+
+    let Some(pending) = pane.pending_keyword_hits.take() else {
+        return;
+    };
+    let hits = pending
+        .into_hits()
+        .into_iter()
+        .map(|hit| (hit.keyword, hit.line))
+        .collect::<Vec<_>>();
+    if hits.is_empty() {
+        return;
+    }
+
+    let event =
+        IncomingEvent::tmux_keywords(pane.session.clone(), hits, registration.channel.clone())
+            .with_mention(registration.mention.clone())
+            .with_format(registration.format.clone());
+    if let Err(error) =
+        dispatch_event(router, discord, &event, registration.mention.as_deref()).await
+    {
+        eprintln!("clawhip monitor tmux keyword dispatch failed: {error}");
     }
 }
 
@@ -784,32 +867,6 @@ async fn run_command(binary: &str, args: &[&str]) -> Result<String> {
     }
 }
 
-fn collect_keyword_hits(previous: &str, current: &str, keywords: &[String]) -> Vec<KeywordHit> {
-    if keywords.is_empty() {
-        return Vec::new();
-    }
-    let previous_lines: HashSet<&str> = previous.lines().collect();
-    current
-        .lines()
-        .filter(|line| !previous_lines.contains(*line))
-        .flat_map(|line| {
-            keywords.iter().filter_map(move |keyword| {
-                if line
-                    .to_ascii_lowercase()
-                    .contains(&keyword.to_ascii_lowercase())
-                {
-                    Some(KeywordHit {
-                        keyword: keyword.clone(),
-                        line: line.to_string(),
-                    })
-                } else {
-                    None
-                }
-            })
-        })
-        .collect()
-}
-
 fn content_hash(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
@@ -848,11 +905,6 @@ fn parse_github_repo(remote: &str) -> Option<String> {
     None
 }
 
-struct KeywordHit {
-    keyword: String,
-    line: String,
-}
-
 #[derive(Deserialize)]
 struct GitHubIssue {
     number: u64,
@@ -882,6 +934,7 @@ struct GitHubPullRequest {
 mod tests {
     use super::*;
     use crate::config::{AppConfig, DefaultsConfig, RouteRule};
+    use crate::keyword_window::KeywordHit;
     use crate::router::Router;
 
     #[test]
@@ -1025,4 +1078,70 @@ mod tests {
         );
         assert_eq!(hits.len(), 2);
     }
+
+    #[tokio::test]
+    async fn flush_pending_keyword_hits_aggregates_unique_hits() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                format: MessageFormat::Compact,
+            },
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let discord = Arc::new(DiscordClient::from_config(Arc::new(AppConfig::default())).unwrap());
+        let registration = RegisteredTmuxSession {
+            session: "issue-24".into(),
+            channel: Some("alerts".into()),
+            mention: None,
+            keywords: vec!["error".into(), "complete".into()],
+            keyword_window_secs: 30,
+            stale_minutes: 10,
+            format: Some(MessageFormat::Compact),
+            active_wrapper_monitor: false,
+        };
+        let start = Instant::now();
+        let mut pane = TmuxPaneState {
+            session: "issue-24".into(),
+            pane_name: "0.0".into(),
+            snapshot: String::new(),
+            content_hash: 0,
+            last_change: start,
+            last_stale_notification: None,
+            pending_keyword_hits: Some({
+                let mut pending = PendingKeywordHits::new(start);
+                pending.push(vec![
+                    KeywordHit {
+                        keyword: "error".into(),
+                        line: "error: failed".into(),
+                    },
+                    KeywordHit {
+                        keyword: "error".into(),
+                        line: "error: failed".into(),
+                    },
+                    KeywordHit {
+                        keyword: "complete".into(),
+                        line: "complete".into(),
+                    },
+                ]);
+                pending
+            }),
+        };
+
+        flush_pending_keyword_hits(
+            &mut pane,
+            &registration,
+            &router,
+            discord.as_ref(),
+            start + Duration::from_secs(30),
+            false,
+        )
+        .await;
+
+        assert!(pane.pending_keyword_hits.is_none());
+    }
+}
+
+fn default_keyword_window_secs() -> u64 {
+    30
 }
