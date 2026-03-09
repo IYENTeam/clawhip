@@ -193,6 +193,38 @@ impl Renderer for DefaultRenderer {
                 serde_json::to_string_pretty(payload)?
             }
 
+            (
+                "github.ci-started"
+                | "github.ci-failed"
+                | "github.ci-passed"
+                | "github.ci-cancelled",
+                MessageFormat::Compact,
+            ) => render_github_ci(payload, event.canonical_kind(), true)?,
+            (
+                "github.ci-started"
+                | "github.ci-failed"
+                | "github.ci-passed"
+                | "github.ci-cancelled",
+                MessageFormat::Alert,
+            ) => format!(
+                "🚨 {}",
+                render_github_ci(payload, event.canonical_kind(), true)?
+            ),
+            (
+                "github.ci-started"
+                | "github.ci-failed"
+                | "github.ci-passed"
+                | "github.ci-cancelled",
+                MessageFormat::Inline,
+            ) => render_github_ci(payload, event.canonical_kind(), false)?,
+            (
+                "github.ci-started"
+                | "github.ci-failed"
+                | "github.ci-passed"
+                | "github.ci-cancelled",
+                MessageFormat::Raw,
+            ) => serde_json::to_string_pretty(payload)?,
+
             ("tmux.keyword", MessageFormat::Compact) => format!(
                 "tmux:{} matched '{}' => {}",
                 string_field(payload, "session")?,
@@ -316,6 +348,49 @@ fn agent_inline_suffix(payload: &Value) -> String {
     } else {
         format!(" · {}", parts.join(" · "))
     }
+}
+
+fn render_github_ci(payload: &Value, kind: &str, include_url: bool) -> Result<String> {
+    let workflow = string_field(payload, "workflow")?;
+    let state = optional_string_field(payload, "conclusion")
+        .or_else(|| optional_string_field(payload, "status"))
+        .ok_or_else(|| "missing GitHub CI state".to_string())?;
+    let sha = short_sha(&string_field(payload, "sha")?);
+    let mut parts = vec![
+        format!("CI {}", github_ci_action(kind)),
+        github_ci_target(payload)?,
+        workflow,
+        state,
+        sha,
+    ];
+
+    if include_url {
+        parts.push(string_field(payload, "url")?);
+    }
+
+    Ok(parts.join(" · "))
+}
+
+fn github_ci_action(kind: &str) -> &'static str {
+    match kind {
+        "github.ci-started" => "started",
+        "github.ci-failed" => "failed",
+        "github.ci-passed" => "passed",
+        "github.ci-cancelled" => "cancelled",
+        _ => "updated",
+    }
+}
+
+fn github_ci_target(payload: &Value) -> Result<String> {
+    let repo = string_field(payload, "repo")?;
+    Ok(match optional_u64_field(payload, "number") {
+        Some(number) => format!("{repo}#{number}"),
+        None => repo,
+    })
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 fn render_aggregated_git_commit(payload: &Value, format: &MessageFormat) -> Result<Option<String>> {

@@ -46,7 +46,6 @@ pub fn collect_keyword_hits(previous: &str, current: &str, keywords: &[String]) 
         return Vec::new();
     }
 
-    let previous_lines: HashSet<&str> = previous.lines().collect();
     let normalized_keywords = keywords
         .iter()
         .map(|keyword| (keyword.clone(), keyword.to_ascii_lowercase()))
@@ -54,10 +53,7 @@ pub fn collect_keyword_hits(previous: &str, current: &str, keywords: &[String]) 
     let mut seen = HashSet::new();
     let mut hits = Vec::new();
 
-    for line in current
-        .lines()
-        .filter(|line| !previous_lines.contains(*line))
-    {
+    for line in appended_lines(previous, current) {
         let lower_line = line.to_ascii_lowercase();
         for (keyword, lower_keyword) in &normalized_keywords {
             if lower_line.contains(lower_keyword) {
@@ -73,6 +69,26 @@ pub fn collect_keyword_hits(previous: &str, current: &str, keywords: &[String]) 
     }
 
     hits
+}
+
+fn appended_lines<'a>(previous: &'a str, current: &'a str) -> Vec<&'a str> {
+    let previous_lines = previous.lines().collect::<Vec<_>>();
+    let current_lines = current.lines().collect::<Vec<_>>();
+    let overlap = overlapping_suffix_prefix_len(&previous_lines, &current_lines);
+
+    current_lines.into_iter().skip(overlap).collect()
+}
+
+fn overlapping_suffix_prefix_len(previous: &[&str], current: &[&str]) -> usize {
+    let max_overlap = previous.len().min(current.len());
+
+    for overlap in (0..=max_overlap).rev() {
+        if previous[previous.len().saturating_sub(overlap)..] == current[..overlap] {
+            return overlap;
+        }
+    }
+
+    0
 }
 
 #[cfg(test)]
@@ -99,6 +115,40 @@ mod tests {
                     line: "ERROR: FAILED".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn collect_keyword_hits_detects_reappended_identical_lines() {
+        let hits = collect_keyword_hits(
+            "done\nerror: failed",
+            "done\nerror: failed\nerror: failed",
+            &["error".into()],
+        );
+
+        assert_eq!(
+            hits,
+            vec![KeywordHit {
+                keyword: "error".into(),
+                line: "error: failed".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn collect_keyword_hits_uses_snapshot_overlap_for_scrolling_history() {
+        let hits = collect_keyword_hits(
+            "one\ntwo\nthree",
+            "two\nthree\nerror: failed",
+            &["error".into()],
+        );
+
+        assert_eq!(
+            hits,
+            vec![KeywordHit {
+                keyword: "error".into(),
+                line: "error: failed".into(),
+            }]
         );
     }
 

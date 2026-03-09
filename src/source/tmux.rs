@@ -65,7 +65,7 @@ impl Source for TmuxSource {
     }
 
     async fn run(&self, tx: mpsc::Sender<IncomingEvent>) -> Result<()> {
-        let mut state = HashMap::new();
+        let mut state = TmuxMonitorState::default();
 
         loop {
             poll_tmux(self.config.as_ref(), &self.registry, &tx, &mut state).await?;
@@ -105,7 +105,12 @@ struct TmuxPaneState {
     content_hash: u64,
     last_change: Instant,
     last_stale_notification: Option<Instant>,
-    pending_keyword_hits: Option<PendingKeywordHits>,
+}
+
+#[derive(Default)]
+struct TmuxMonitorState {
+    panes: HashMap<String, TmuxPaneState>,
+    pending_keyword_hits: HashMap<String, PendingKeywordHits>,
 }
 
 struct TmuxPaneSnapshot {
@@ -119,36 +124,49 @@ pub async fn monitor_registered_session(
     registration: RegisteredTmuxSession,
     client: DaemonClient,
 ) -> Result<()> {
-    let mut state = HashMap::new();
+    let mut panes = HashMap::new();
+    let mut pending_keyword_hits = None;
     let poll_interval = Duration::from_secs(1);
 
     loop {
+        let now = Instant::now();
+        flush_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration,
+            &client,
+            &registration.session,
+            now,
+            Duration::from_secs(registration.keyword_window_secs.max(1)),
+            false,
+        )
+        .await?;
+
         if !session_exists(&registration.session).await? {
-            flush_removed_panes(
-                &mut state,
-                &HashSet::new(),
+            flush_pending_keyword_hits(
+                &mut pending_keyword_hits,
                 &registration,
                 &client,
-                Instant::now(),
+                &registration.session,
+                now,
+                Duration::from_secs(registration.keyword_window_secs.max(1)),
                 true,
             )
             .await?;
             break;
         }
 
-        let panes = snapshot_tmux_session(&registration.session).await?;
-        let mut active = HashSet::new();
-        let now = Instant::now();
+        let panes_snapshot = snapshot_tmux_session(&registration.session).await?;
+        let mut active_panes = HashSet::new();
 
-        for pane in panes {
-            active.insert(pane.pane_id.clone());
+        for pane in panes_snapshot {
+            active_panes.insert(pane.pane_id.clone());
             let pane_key = pane.pane_id.clone();
             let hash = content_hash(&pane.content);
             let latest_line = last_nonempty_line(&pane.content);
 
-            match state.get_mut(&pane_key) {
+            match panes.get_mut(&pane_key) {
                 None => {
-                    state.insert(
+                    panes.insert(
                         pane_key,
                         TmuxPaneState {
                             session: pane.session,
@@ -157,32 +175,17 @@ pub async fn monitor_registered_session(
                             snapshot: pane.content,
                             last_change: now,
                             last_stale_notification: None,
-                            pending_keyword_hits: None,
                         },
                     );
                 }
                 Some(existing) => {
-                    flush_pending_keyword_hits(
-                        existing,
-                        &registration,
-                        &client,
-                        now,
-                        Duration::from_secs(registration.keyword_window_secs.max(1)),
-                        false,
-                    )
-                    .await?;
                     if existing.content_hash != hash {
                         let hits = collect_keyword_hits(
                             &existing.snapshot,
                             &pane.content,
                             &registration.keywords,
                         );
-                        if !hits.is_empty() {
-                            existing
-                                .pending_keyword_hits
-                                .get_or_insert_with(|| PendingKeywordHits::new(now))
-                                .push(hits);
-                        }
+                        push_pending_keyword_hits(&mut pending_keyword_hits, now, hits);
 
                         existing.session = pane.session;
                         existing.pane_name = pane.pane_name;
@@ -205,8 +208,7 @@ pub async fn monitor_registered_session(
             }
         }
 
-        flush_removed_panes(&mut state, &active, &registration, &client, now, true).await?;
-        state.retain(|pane_id, _| active.contains(pane_id));
+        panes.retain(|pane_id, _| active_panes.contains(pane_id));
         sleep(poll_interval).await;
     }
 
@@ -217,7 +219,7 @@ async fn poll_tmux(
     config: &AppConfig,
     registry: &SharedTmuxRegistry,
     tx: &mpsc::Sender<IncomingEvent>,
-    state: &mut HashMap<String, TmuxPaneState>,
+    state: &mut TmuxMonitorState,
 ) -> Result<()> {
     let mut sessions: BTreeMap<String, RegisteredTmuxSession> = config
         .monitors
@@ -240,30 +242,34 @@ async fn poll_tmux(
 
     for (session_name, registration) in &sessions {
         if registration.active_wrapper_monitor {
+            state.pending_keyword_hits.remove(session_name);
             continue;
         }
+
+        let now = Instant::now();
+        flush_session_pending_keyword_hits(
+            &mut state.pending_keyword_hits,
+            session_name,
+            registration,
+            tx,
+            now,
+            false,
+        )
+        .await?;
 
         match session_exists(session_name).await {
             Ok(false) => {
                 sessions_to_unregister.push(session_name.clone());
-                let keys_to_remove = state
-                    .iter()
-                    .filter(|(_, pane)| pane.session == *session_name)
-                    .map(|(key, _)| key.clone())
-                    .collect::<Vec<_>>();
-                for key in keys_to_remove {
-                    if let Some(mut pane) = state.remove(&key) {
-                        flush_pending_keyword_hits(
-                            &mut pane,
-                            registration,
-                            tx,
-                            Instant::now(),
-                            Duration::from_secs(registration.keyword_window_secs.max(1)),
-                            true,
-                        )
-                        .await?;
-                    }
-                }
+                flush_session_pending_keyword_hits(
+                    &mut state.pending_keyword_hits,
+                    session_name,
+                    registration,
+                    tx,
+                    now,
+                    true,
+                )
+                .await?;
+                state.panes.retain(|_, pane| pane.session != *session_name);
                 continue;
             }
             Err(error) => {
@@ -285,9 +291,9 @@ async fn poll_tmux(
                     let hash = content_hash(&pane.content);
                     let latest_line = last_nonempty_line(&pane.content);
 
-                    match state.get_mut(&pane_key) {
+                    let hits = match state.panes.get_mut(&pane_key) {
                         None => {
-                            state.insert(
+                            state.panes.insert(
                                 pane_key,
                                 TmuxPaneState {
                                     session: pane.session,
@@ -296,48 +302,46 @@ async fn poll_tmux(
                                     content_hash: hash,
                                     last_change: now,
                                     last_stale_notification: None,
-                                    pending_keyword_hits: None,
                                 },
                             );
+                            None
                         }
                         Some(existing) => {
-                            flush_pending_keyword_hits(
-                                existing,
-                                registration,
-                                tx,
-                                now,
-                                Duration::from_secs(registration.keyword_window_secs.max(1)),
-                                false,
-                            )
-                            .await?;
                             if existing.content_hash != hash {
                                 let hits = collect_keyword_hits(
                                     &existing.snapshot,
                                     &pane.content,
                                     &registration.keywords,
                                 );
-                                if !hits.is_empty() {
-                                    existing
-                                        .pending_keyword_hits
-                                        .get_or_insert_with(|| PendingKeywordHits::new(now))
-                                        .push(hits);
-                                }
                                 existing.pane_name = pane.pane_name;
                                 existing.snapshot = pane.content;
                                 existing.content_hash = hash;
                                 existing.last_change = now;
                                 existing.last_stale_notification = None;
-                            } else if should_emit_stale(existing, now, registration.stale_minutes) {
-                                tx.emit(tmux_stale_event(
-                                    registration,
-                                    existing.session.clone(),
-                                    existing.pane_name.clone(),
-                                    latest_line,
-                                ))
-                                .await?;
-                                existing.last_stale_notification = Some(now);
+                                Some(hits)
+                            } else {
+                                if should_emit_stale(existing, now, registration.stale_minutes) {
+                                    tx.emit(tmux_stale_event(
+                                        registration,
+                                        existing.session.clone(),
+                                        existing.pane_name.clone(),
+                                        latest_line,
+                                    ))
+                                    .await?;
+                                    existing.last_stale_notification = Some(now);
+                                }
+                                None
                             }
                         }
+                    };
+
+                    if let Some(hits) = hits {
+                        push_session_pending_keyword_hits(
+                            &mut state.pending_keyword_hits,
+                            session_name,
+                            now,
+                            hits,
+                        );
                     }
                 }
             }
@@ -348,27 +352,7 @@ async fn poll_tmux(
         }
     }
 
-    let keys_to_remove = state
-        .iter()
-        .filter(|(key, _)| !active_panes.contains(*key))
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    for key in keys_to_remove {
-        if let Some(mut pane) = state.remove(&key)
-            && let Some(registration) = sessions.get(&pane.session)
-        {
-            flush_pending_keyword_hits(
-                &mut pane,
-                registration,
-                tx,
-                Instant::now(),
-                Duration::from_secs(registration.keyword_window_secs.max(1)),
-                true,
-            )
-            .await?;
-        }
-    }
-    state.retain(|key, _| active_panes.contains(key));
+    state.panes.retain(|key, _| active_panes.contains(key));
 
     if !sessions_to_unregister.is_empty() {
         let mut write = registry.write().await;
@@ -376,6 +360,10 @@ async fn poll_tmux(
             write.remove(&session);
         }
     }
+
+    state
+        .pending_keyword_hits
+        .retain(|session, _| sessions.contains_key(session));
 
     Ok(())
 }
@@ -394,7 +382,23 @@ fn tmux_keyword_event(
     session: String,
     hits: Vec<(String, String)>,
 ) -> IncomingEvent {
-    IncomingEvent::tmux_keywords(session, hits, registration.channel.clone())
+    let event = if hits.len() <= 1 {
+        match hits.into_iter().next() {
+            Some((keyword, line)) => {
+                IncomingEvent::tmux_keyword(session, keyword, line, registration.channel.clone())
+            }
+            None => IncomingEvent::tmux_keyword(
+                session,
+                String::new(),
+                String::new(),
+                registration.channel.clone(),
+            ),
+        }
+    } else {
+        IncomingEvent::tmux_keywords(session, hits, registration.channel.clone())
+    };
+
+    event
         .with_mention(registration.mention.clone())
         .with_format(registration.format.clone())
 }
@@ -417,15 +421,15 @@ fn tmux_stale_event(
 }
 
 async fn flush_pending_keyword_hits<E: EventEmitter>(
-    pane: &mut TmuxPaneState,
+    pending_keyword_hits: &mut Option<PendingKeywordHits>,
     registration: &RegisteredTmuxSession,
     emitter: &E,
+    session: &str,
     now: Instant,
     keyword_window: Duration,
     force: bool,
 ) -> Result<()> {
-    let should_flush = pane
-        .pending_keyword_hits
+    let should_flush = pending_keyword_hits
         .as_ref()
         .map(|pending| force || pending.ready_to_flush(now, keyword_window))
         .unwrap_or(false);
@@ -433,7 +437,7 @@ async fn flush_pending_keyword_hits<E: EventEmitter>(
         return Ok(());
     }
 
-    let Some(pending) = pane.pending_keyword_hits.take() else {
+    let Some(pending) = pending_keyword_hits.take() else {
         return Ok(());
     };
     let hits = pending
@@ -446,37 +450,63 @@ async fn flush_pending_keyword_hits<E: EventEmitter>(
     }
 
     emitter
-        .emit(tmux_keyword_event(registration, pane.session.clone(), hits))
+        .emit(tmux_keyword_event(registration, session.to_string(), hits))
         .await
 }
 
-async fn flush_removed_panes<E: EventEmitter>(
-    state: &mut HashMap<String, TmuxPaneState>,
-    active: &HashSet<String>,
+async fn flush_session_pending_keyword_hits<E: EventEmitter>(
+    pending_keyword_hits: &mut HashMap<String, PendingKeywordHits>,
+    session: &str,
     registration: &RegisteredTmuxSession,
     emitter: &E,
     now: Instant,
     force: bool,
 ) -> Result<()> {
-    let keys_to_remove = state
-        .keys()
-        .filter(|pane_id| !active.contains(*pane_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    for pane_id in keys_to_remove {
-        if let Some(mut pane) = state.remove(&pane_id) {
-            flush_pending_keyword_hits(
-                &mut pane,
-                registration,
-                emitter,
-                now,
-                Duration::from_secs(registration.keyword_window_secs.max(1)),
-                force,
-            )
-            .await?;
-        }
+    let mut pending = pending_keyword_hits.remove(session);
+    flush_pending_keyword_hits(
+        &mut pending,
+        registration,
+        emitter,
+        session,
+        now,
+        Duration::from_secs(registration.keyword_window_secs.max(1)),
+        force,
+    )
+    .await?;
+    if let Some(pending) = pending {
+        pending_keyword_hits.insert(session.to_string(), pending);
     }
     Ok(())
+}
+
+fn push_pending_keyword_hits(
+    pending_keyword_hits: &mut Option<PendingKeywordHits>,
+    now: Instant,
+    hits: Vec<crate::keyword_window::KeywordHit>,
+) {
+    if hits.is_empty() {
+        return;
+    }
+
+    pending_keyword_hits
+        .get_or_insert_with(|| PendingKeywordHits::new(now))
+        .push(hits);
+}
+
+fn push_session_pending_keyword_hits(
+    pending_keyword_hits: &mut HashMap<String, PendingKeywordHits>,
+    session: &str,
+    now: Instant,
+    hits: Vec<crate::keyword_window::KeywordHit>,
+) {
+    if hits.is_empty() {
+        return;
+    }
+
+    pending_keyword_hits
+        .entry(session.to_string())
+        .or_insert_with(|| PendingKeywordHits::new(now))
+        .push(hits);
 }
 
 pub(crate) async fn session_exists(session: &str) -> Result<bool> {
@@ -564,13 +594,31 @@ fn default_keyword_window_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{EventBody, compat::from_incoming_event};
     use crate::keyword_window::KeywordHit;
+
+    fn registration(keywords: Vec<&str>) -> RegisteredTmuxSession {
+        RegisteredTmuxSession {
+            session: "issue-24".into(),
+            channel: Some("alerts".into()),
+            mention: Some("<@123>".into()),
+            keywords: keywords.into_iter().map(str::to_string).collect(),
+            keyword_window_secs: 30,
+            stale_minutes: 15,
+            format: Some(MessageFormat::Compact),
+            active_wrapper_monitor: false,
+        }
+    }
 
     #[test]
     fn keyword_hits_only_emit_for_new_lines() {
         let hits = collect_keyword_hits(
-            "done\nall good",
-            "done\nall good\nerror: failed\nPR created #7",
+            "done
+all good",
+            "done
+all good
+error: failed
+PR created #7",
             &["error".into(), "PR created".into()],
         );
         assert_eq!(hits.len(), 2);
@@ -580,16 +628,8 @@ mod tests {
 
     #[test]
     fn tmux_keyword_event_inherits_channel_format_and_mention() {
-        let registration = RegisteredTmuxSession {
-            session: "issue-24".into(),
-            channel: Some("alerts".into()),
-            mention: Some("<@123>".into()),
-            keywords: vec!["error".into()],
-            keyword_window_secs: 30,
-            stale_minutes: 15,
-            format: Some(MessageFormat::Alert),
-            active_wrapper_monitor: false,
-        };
+        let mut registration = registration(vec!["error"]);
+        registration.format = Some(MessageFormat::Alert);
 
         let event = tmux_keyword_event(
             &registration,
@@ -603,20 +643,37 @@ mod tests {
         assert_eq!(event.payload["session"], "issue-24");
         assert_eq!(event.payload["keyword"], "error");
         assert_eq!(event.payload["line"], "boom");
+        assert_eq!(event.payload["hit_count"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn tmux_keyword_event_uses_aggregated_body_for_multi_hit_windows() {
+        let mut registration = registration(vec!["error", "complete"]);
+        registration.format = Some(MessageFormat::Alert);
+
+        let event = tmux_keyword_event(
+            &registration,
+            "issue-24".into(),
+            vec![
+                ("error".into(), "boom".into()),
+                ("complete".into(), "done".into()),
+            ],
+        );
+
+        match from_incoming_event(&event).unwrap().body {
+            EventBody::TmuxKeywordAggregated(body) => {
+                assert_eq!(body.session, "issue-24");
+                assert_eq!(body.hit_count, 2);
+                assert_eq!(body.hits.len(), 2);
+            }
+            other => panic!("expected aggregated tmux keyword body, got {other:?}"),
+        }
     }
 
     #[test]
     fn tmux_stale_event_inherits_channel_format_and_mention() {
-        let registration = RegisteredTmuxSession {
-            session: "issue-24".into(),
-            channel: Some("alerts".into()),
-            mention: Some("<@123>".into()),
-            keywords: vec!["error".into()],
-            keyword_window_secs: 30,
-            stale_minutes: 15,
-            format: Some(MessageFormat::Inline),
-            active_wrapper_monitor: false,
-        };
+        let mut registration = registration(vec!["error"]);
+        registration.format = Some(MessageFormat::Inline);
 
         let event = tmux_stale_event(
             &registration,
@@ -638,47 +695,35 @@ mod tests {
     async fn flush_pending_keyword_hits_aggregates_unique_hits() {
         let (tx, mut rx) = mpsc::channel(1);
         let registration = RegisteredTmuxSession {
-            session: "issue-24".into(),
-            channel: Some("alerts".into()),
-            mention: None,
-            keywords: vec!["error".into(), "complete".into()],
-            keyword_window_secs: 30,
-            stale_minutes: 10,
             format: Some(MessageFormat::Compact),
-            active_wrapper_monitor: false,
+            mention: None,
+            ..registration(vec!["error", "complete"])
         };
         let start = Instant::now();
-        let mut pane = TmuxPaneState {
-            session: "issue-24".into(),
-            pane_name: "0.0".into(),
-            snapshot: String::new(),
-            content_hash: 0,
-            last_change: start,
-            last_stale_notification: None,
-            pending_keyword_hits: Some({
-                let mut pending = PendingKeywordHits::new(start);
-                pending.push(vec![
-                    KeywordHit {
-                        keyword: "error".into(),
-                        line: "error: failed".into(),
-                    },
-                    KeywordHit {
-                        keyword: "error".into(),
-                        line: "error: failed".into(),
-                    },
-                    KeywordHit {
-                        keyword: "complete".into(),
-                        line: "complete".into(),
-                    },
-                ]);
-                pending
-            }),
-        };
+        let mut pending_keyword_hits = Some({
+            let mut pending = PendingKeywordHits::new(start);
+            pending.push(vec![
+                KeywordHit {
+                    keyword: "error".into(),
+                    line: "error: failed".into(),
+                },
+                KeywordHit {
+                    keyword: "error".into(),
+                    line: "error: failed".into(),
+                },
+                KeywordHit {
+                    keyword: "complete".into(),
+                    line: "complete".into(),
+                },
+            ]);
+            pending
+        });
 
         flush_pending_keyword_hits(
-            &mut pane,
+            &mut pending_keyword_hits,
             &registration,
             &tx,
+            &registration.session,
             start + Duration::from_secs(30),
             Duration::from_secs(30),
             false,
@@ -686,7 +731,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(pane.pending_keyword_hits.is_none());
+        assert!(pending_keyword_hits.is_none());
         let event = rx.recv().await.unwrap();
         assert_eq!(event.canonical_kind(), "tmux.keyword");
         assert_eq!(event.payload["hit_count"], 2);
@@ -697,37 +742,25 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let registration = RegisteredTmuxSession {
-            session: "issue-24".into(),
-            channel: Some("alerts".into()),
-            mention: None,
-            keywords: vec!["error".into(), "complete".into()],
-            keyword_window_secs: 30,
-            stale_minutes: 15,
             format: Some(MessageFormat::Compact),
-            active_wrapper_monitor: false,
+            mention: None,
+            ..registration(vec!["error", "complete"])
         };
         let start = Instant::now();
-        let mut pane = TmuxPaneState {
-            session: "issue-24".into(),
-            pane_name: "0.0".into(),
-            snapshot: String::new(),
-            content_hash: 0,
-            last_change: start,
-            last_stale_notification: None,
-            pending_keyword_hits: Some({
-                let mut pending = PendingKeywordHits::new(start);
-                pending.push(vec![KeywordHit {
-                    keyword: "error".into(),
-                    line: "boom".into(),
-                }]);
-                pending
-            }),
-        };
+        let mut pending_keyword_hits = Some({
+            let mut pending = PendingKeywordHits::new(start);
+            pending.push(vec![KeywordHit {
+                keyword: "error".into(),
+                line: "boom".into(),
+            }]);
+            pending
+        });
 
         let result = flush_pending_keyword_hits(
-            &mut pane,
+            &mut pending_keyword_hits,
             &registration,
             &tx,
+            &registration.session,
             start + Duration::from_secs(30),
             Duration::from_secs(30),
             false,
@@ -735,6 +768,177 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(pane.pending_keyword_hits.is_none());
+        assert!(pending_keyword_hits.is_none());
+    }
+
+    #[tokio::test]
+    async fn identical_keyword_lines_can_emit_again_after_window_flush() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let registration = RegisteredTmuxSession {
+            format: Some(MessageFormat::Compact),
+            mention: None,
+            ..registration(vec!["error"])
+        };
+        let start = Instant::now();
+        let mut snapshot = "done".to_string();
+        let mut pending_keyword_hits = None;
+
+        let first_snapshot = "done
+error: failed";
+        let first_hits = collect_keyword_hits(&snapshot, first_snapshot, &registration.keywords);
+        push_pending_keyword_hits(&mut pending_keyword_hits, start, first_hits);
+        snapshot = first_snapshot.into();
+
+        flush_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration,
+            &tx,
+            &registration.session,
+            start + Duration::from_secs(30),
+            Duration::from_secs(30),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let first_event = rx.recv().await.unwrap();
+        assert_eq!(first_event.payload["hit_count"], serde_json::Value::Null);
+        assert_eq!(first_event.payload["keyword"], "error");
+        assert_eq!(first_event.payload["line"], "error: failed");
+
+        let second_snapshot = "done
+error: failed
+error: failed";
+        let second_hits = collect_keyword_hits(&snapshot, second_snapshot, &registration.keywords);
+        push_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            start + Duration::from_secs(31),
+            second_hits,
+        );
+
+        flush_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration,
+            &tx,
+            &registration.session,
+            start + Duration::from_secs(61),
+            Duration::from_secs(30),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let second_event = rx.recv().await.unwrap();
+        assert_eq!(second_event.payload["hit_count"], serde_json::Value::Null);
+        assert_eq!(second_event.payload["keyword"], "error");
+        assert_eq!(second_event.payload["line"], "error: failed");
+    }
+
+    #[tokio::test]
+    async fn session_keyword_hits_aggregate_across_panes_and_dedup_within_window() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let registration = RegisteredTmuxSession {
+            format: Some(MessageFormat::Compact),
+            mention: None,
+            ..registration(vec!["error", "complete"])
+        };
+        let start = Instant::now();
+        let mut pending_keyword_hits = HashMap::new();
+
+        push_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            start,
+            vec![KeywordHit {
+                keyword: "error".into(),
+                line: "error: failed".into(),
+            }],
+        );
+        push_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            start + Duration::from_secs(5),
+            vec![
+                KeywordHit {
+                    keyword: "error".into(),
+                    line: "error: failed".into(),
+                },
+                KeywordHit {
+                    keyword: "complete".into(),
+                    line: "build complete".into(),
+                },
+            ],
+        );
+
+        flush_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            &registration,
+            &tx,
+            start + Duration::from_secs(30),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(pending_keyword_hits.is_empty());
+        let event = rx.recv().await.unwrap();
+        match from_incoming_event(&event).unwrap().body {
+            EventBody::TmuxKeywordAggregated(body) => {
+                assert_eq!(body.hit_count, 2);
+                assert_eq!(body.hits.len(), 2);
+            }
+            other => panic!("expected aggregated tmux keyword body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_keyword_hits_flush_when_window_expires() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let registration = RegisteredTmuxSession {
+            format: Some(MessageFormat::Compact),
+            mention: None,
+            ..registration(vec!["error"])
+        };
+        let start = Instant::now();
+        let mut pending_keyword_hits = HashMap::new();
+        push_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            start,
+            vec![KeywordHit {
+                keyword: "error".into(),
+                line: "error: failed".into(),
+            }],
+        );
+
+        flush_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            &registration,
+            &tx,
+            start + Duration::from_secs(29),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert!(pending_keyword_hits.contains_key(&registration.session));
+
+        flush_session_pending_keyword_hits(
+            &mut pending_keyword_hits,
+            &registration.session,
+            &registration,
+            &tx,
+            start + Duration::from_secs(30),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(pending_keyword_hits.is_empty());
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.payload["keyword"], "error");
+        assert_eq!(event.payload["line"], "error: failed");
     }
 }

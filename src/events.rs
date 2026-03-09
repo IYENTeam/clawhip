@@ -411,16 +411,81 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn github_ci(
+        kind: &str,
+        repo: String,
+        number: Option<u64>,
+        workflow: String,
+        status: String,
+        conclusion: Option<String>,
+        sha: String,
+        url: String,
+        branch: Option<String>,
+        channel: Option<String>,
+    ) -> Self {
+        let mut payload = Map::new();
+        payload.insert("repo".to_string(), json!(repo));
+        payload.insert("workflow".to_string(), json!(workflow));
+        payload.insert("status".to_string(), json!(status));
+        payload.insert("sha".to_string(), json!(sha));
+        payload.insert("url".to_string(), json!(url));
+        if let Some(number) = number {
+            payload.insert("number".to_string(), json!(number));
+        }
+        if let Some(conclusion) = conclusion {
+            payload.insert("conclusion".to_string(), json!(conclusion));
+        }
+        if let Some(branch) = branch {
+            payload.insert("branch".to_string(), json!(branch));
+        }
+
+        Self {
+            kind: kind.to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload: Value::Object(payload),
+        }
+    }
+
     pub fn tmux_keyword(
         session: String,
         keyword: String,
         line: String,
         channel: Option<String>,
     ) -> Self {
-        Self::tmux_keywords(session, vec![(keyword, line)], channel)
+        Self {
+            kind: "tmux.keyword".to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "session": session,
+                "keyword": keyword,
+                "line": line,
+            }),
+        }
     }
 
     pub fn tmux_keywords(
+        session: String,
+        hits: Vec<(String, String)>,
+        channel: Option<String>,
+    ) -> Self {
+        if hits.len() <= 1 {
+            let Some((keyword, line)) = hits.into_iter().next() else {
+                return Self::tmux_keyword(session, String::new(), String::new(), channel);
+            };
+            return Self::tmux_keyword(session, keyword, line, channel);
+        }
+
+        Self::tmux_keyword_aggregated(session, hits, channel)
+    }
+
+    pub fn tmux_keyword_aggregated(
         session: String,
         hits: Vec<(String, String)>,
         channel: Option<String>,
@@ -802,6 +867,57 @@ mod tests {
                 "summary": "after test run",
                 "error_message": "build failed"
             })
+        );
+    }
+
+    #[test]
+    fn renders_github_ci_failed_in_compact_and_alert_formats() {
+        let event = IncomingEvent::github_ci(
+            "github.ci-failed",
+            "clawhip".into(),
+            Some(58),
+            "CI / test".into(),
+            "completed".into(),
+            Some("failure".into()),
+            "abcdef1234567890".into(),
+            "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            Some("feat/branch".into()),
+            Some("alerts".into()),
+        );
+
+        assert_eq!(
+            event.render_default(&MessageFormat::Compact).unwrap(),
+            "CI failed · clawhip#58 · CI / test · failure · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
+        );
+        assert_eq!(
+            event.render_default(&MessageFormat::Alert).unwrap(),
+            "🚨 CI failed · clawhip#58 · CI / test · failure · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
+        );
+        assert_eq!(event.channel.as_deref(), Some("alerts"));
+    }
+
+    #[test]
+    fn renders_github_ci_started_with_status_details() {
+        let event = IncomingEvent::github_ci(
+            "github.ci-started",
+            "clawhip".into(),
+            Some(58),
+            "CI / test".into(),
+            "in_progress".into(),
+            None,
+            "abcdef1234567890".into(),
+            "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            event.render_default(&MessageFormat::Compact).unwrap(),
+            "CI started · clawhip#58 · CI / test · in_progress · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
+        );
+        assert_eq!(
+            event.render_default(&MessageFormat::Alert).unwrap(),
+            "🚨 CI started · clawhip#58 · CI / test · in_progress · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
         );
     }
 

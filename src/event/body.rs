@@ -53,9 +53,11 @@ pub struct GitHubPRStatusEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubCIEvent {
     pub repo: String,
+    pub number: Option<u64>,
     pub branch: Option<String>,
     pub sha: Option<String>,
     pub status: Option<String>,
+    pub conclusion: Option<String>,
     pub url: Option<String>,
     pub workflow: Option<String>,
     pub message: Option<String>,

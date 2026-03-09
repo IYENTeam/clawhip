@@ -58,9 +58,11 @@ fn body_for(kind: &str, payload: &Value) -> Result<EventBody> {
         "github.pr-status-changed" => github_pr_body(payload),
         "github.ci-failed" => Ok(EventBody::GitHubCIFailed(GitHubCIEvent {
             repo: string_field(payload, "repo")?,
+            number: payload.get("number").and_then(Value::as_u64),
             branch: optional_string_field(payload, "branch"),
             sha: optional_string_field(payload, "sha"),
             status: optional_string_field(payload, "status"),
+            conclusion: optional_string_field(payload, "conclusion"),
             url: optional_string_field(payload, "url"),
             workflow: optional_string_field(payload, "workflow"),
             message: optional_string_field(payload, "message"),
@@ -385,6 +387,40 @@ mod tests {
                 assert_eq!(body.payload.unwrap()["extra"], json!(true));
             }
             other => panic!("expected custom body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_github_ci_failed_route_compatibility_fields() {
+        let event = IncomingEvent::github_ci(
+            "github.ci-failed",
+            "clawhip".into(),
+            Some(58),
+            "CI / test".into(),
+            "completed".into(),
+            Some("failure".into()),
+            "abcdef1234567890".into(),
+            "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            Some("feat/branch".into()),
+            Some("alerts".into()),
+        );
+
+        let envelope = from_incoming_event(&event).unwrap();
+        assert_eq!(envelope.metadata.channel_hint.as_deref(), Some("alerts"));
+        match envelope.body {
+            EventBody::GitHubCIFailed(body) => {
+                assert_eq!(body.repo, "clawhip");
+                assert_eq!(body.number, Some(58));
+                assert_eq!(body.workflow.as_deref(), Some("CI / test"));
+                assert_eq!(body.status.as_deref(), Some("completed"));
+                assert_eq!(body.conclusion.as_deref(), Some("failure"));
+                assert_eq!(body.sha.as_deref(), Some("abcdef1234567890"));
+                assert_eq!(
+                    body.url.as_deref(),
+                    Some("https://github.com/Yeachan-Heo/clawhip/actions/runs/1")
+                );
+            }
+            other => panic!("expected GitHubCIFailed body, got {other:?}"),
         }
     }
 }

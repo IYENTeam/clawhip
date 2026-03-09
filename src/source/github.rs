@@ -58,6 +58,7 @@ impl Source for GitHubSource {
 struct GitHubRepoState {
     issues: HashMap<u64, IssueSnapshot>,
     prs: HashMap<u64, PullRequestSnapshot>,
+    ci: HashMap<String, GitHubCISnapshot>,
 }
 
 #[derive(Clone)]
@@ -72,6 +73,36 @@ struct PullRequestSnapshot {
     title: String,
     status: String,
     url: String,
+    head_branch: String,
+    head_sha: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitHubCISnapshot {
+    pr_number: Option<u64>,
+    workflow: String,
+    status: String,
+    conclusion: Option<String>,
+    sha: String,
+    url: String,
+    branch: Option<String>,
+}
+
+impl GitHubCISnapshot {
+    fn dedupe_key(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.pr_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            self.sha,
+            self.workflow
+        )
+    }
+
+    fn event_kind(&self) -> &'static str {
+        classify_ci_event_kind(&self.status, self.conclusion.as_deref())
+    }
 }
 
 async fn poll_github(
@@ -99,8 +130,10 @@ async fn poll_github(
         let previous = state.get(&repo.path);
         let issues = poll_issues(config, github_client, repo, &snapshot, previous, tx).await?;
         let prs = poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await?;
+        let ci =
+            poll_ci_statuses(config, github_client, repo, &snapshot, previous, &prs, tx).await?;
 
-        state.insert(repo.path.clone(), GitHubRepoState { issues, prs });
+        state.insert(repo.path.clone(), GitHubRepoState { issues, prs, ci });
     }
 
     Ok(())
@@ -204,6 +237,59 @@ async fn poll_pull_requests(
     }
 }
 
+async fn poll_ci_statuses(
+    config: &AppConfig,
+    github_client: Option<&reqwest::Client>,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    previous: Option<&GitHubRepoState>,
+    prs: &HashMap<u64, PullRequestSnapshot>,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<HashMap<String, GitHubCISnapshot>> {
+    if !repo.emit_pr_status {
+        return Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default());
+    }
+
+    let Some(client) = github_client else {
+        return Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default());
+    };
+
+    let open_prs = prs
+        .iter()
+        .filter(|(_, pr)| pr.status == "open")
+        .map(|(number, pr)| (*number, pr))
+        .collect::<Vec<_>>();
+    if open_prs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    match fetch_ci_statuses(
+        client,
+        &config.monitors.github_api_base,
+        repo,
+        snapshot,
+        &open_prs,
+    )
+    .await
+    {
+        Ok(ci) => {
+            let empty = HashMap::new();
+            let previous_ci = previous.map(|entry| &entry.ci).unwrap_or(&empty);
+            for event in collect_ci_events(repo, &snapshot.repo_name, previous_ci, &ci) {
+                send_event(tx, event).await?;
+            }
+            Ok(ci)
+        }
+        Err(error) => {
+            eprintln!(
+                "clawhip source GitHub CI polling failed for {}: {error}",
+                repo.path
+            );
+            Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default())
+        }
+    }
+}
+
 async fn send_event(tx: &mpsc::Sender<IncomingEvent>, event: IncomingEvent) -> Result<()> {
     tx.send(event)
         .await
@@ -258,6 +344,53 @@ fn collect_issue_events(
             }
         }
     }
+    events
+}
+
+fn collect_ci_events(
+    repo: &GitRepoMonitor,
+    repo_name: &str,
+    previous: &HashMap<String, GitHubCISnapshot>,
+    current: &HashMap<String, GitHubCISnapshot>,
+) -> Vec<IncomingEvent> {
+    let mut events = Vec::new();
+    for (key, ci) in current {
+        let changed = previous
+            .get(key)
+            .map(|old| old.status != ci.status || old.conclusion != ci.conclusion)
+            .unwrap_or(true);
+        if !changed {
+            continue;
+        }
+
+        events.push(
+            IncomingEvent::github_ci(
+                ci.event_kind(),
+                repo_name.to_string(),
+                ci.pr_number,
+                ci.workflow.clone(),
+                ci.status.clone(),
+                ci.conclusion.clone(),
+                ci.sha.clone(),
+                ci.url.clone(),
+                ci.branch.clone(),
+                repo.channel.clone(),
+            )
+            .with_mention(repo.mention.clone())
+            .with_format(repo.format.clone()),
+        );
+    }
+
+    events.sort_by(|left, right| {
+        left.payload["workflow"]
+            .as_str()
+            .cmp(&right.payload["workflow"].as_str())
+            .then_with(|| {
+                left.payload["number"]
+                    .as_u64()
+                    .cmp(&right.payload["number"].as_u64())
+            })
+    });
     events
 }
 
@@ -341,8 +474,71 @@ async fn fetch_pull_requests(
                     title: pull.title,
                     status,
                     url: pull.html_url,
+                    head_branch: pull.head.reference,
+                    head_sha: pull.head.sha,
                 },
             )
+        })
+        .collect())
+}
+
+async fn fetch_ci_statuses(
+    client: &reqwest::Client,
+    api_base: &str,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    open_prs: &[(u64, &PullRequestSnapshot)],
+) -> Result<HashMap<String, GitHubCISnapshot>> {
+    let github_repo = snapshot
+        .github_repo
+        .clone()
+        .ok_or_else(|| format!("no GitHub repo configured or inferred for {}", repo.path))?;
+    let mut check_runs = HashMap::new();
+
+    for (number, pr) in open_prs {
+        for check_run in fetch_check_runs(client, api_base, &github_repo, *number, pr).await? {
+            check_runs.insert(check_run.dedupe_key(), check_run);
+        }
+    }
+
+    Ok(check_runs)
+}
+
+async fn fetch_check_runs(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_repo: &str,
+    pr_number: u64,
+    pr: &PullRequestSnapshot,
+) -> Result<Vec<GitHubCISnapshot>> {
+    let response = client
+        .get(format!(
+            "{}/repos/{}/commits/{}/check-runs",
+            api_base.trim_end_matches('/'),
+            github_repo,
+            pr.head_sha
+        ))
+        .query(&[("per_page", "100")])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("GitHub API request failed with {status}: {body}").into());
+    }
+
+    let runs: GitHubCheckRunsResponse = response.json().await?;
+    Ok(runs
+        .check_runs
+        .into_iter()
+        .map(|check_run| GitHubCISnapshot {
+            pr_number: Some(pr_number),
+            workflow: check_run.name,
+            status: check_run.status,
+            conclusion: check_run.conclusion,
+            sha: check_run.head_sha,
+            url: check_run.details_url.unwrap_or_else(|| pr.url.clone()),
+            branch: Some(pr.head_branch.clone()),
         })
         .collect())
 }
@@ -388,6 +584,40 @@ struct GitHubPullRequest {
     state: String,
     html_url: String,
     merged_at: Option<String>,
+    head: GitHubPullRequestHead,
+}
+
+#[derive(Deserialize)]
+struct GitHubPullRequestHead {
+    #[serde(rename = "ref")]
+    reference: String,
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubCheckRunsResponse {
+    check_runs: Vec<GitHubCheckRun>,
+}
+
+#[derive(Deserialize)]
+struct GitHubCheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    details_url: Option<String>,
+    head_sha: String,
+}
+
+fn classify_ci_event_kind(status: &str, conclusion: Option<&str>) -> &'static str {
+    if status != "completed" {
+        return "github.ci-started";
+    }
+
+    match conclusion {
+        Some("success" | "neutral" | "skipped") => "github.ci-passed",
+        Some("cancelled") => "github.ci-cancelled",
+        _ => "github.ci-failed",
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +629,7 @@ mod tests {
     use crate::config::{DefaultsConfig, RouteRule};
     use crate::events::MessageFormat;
     use crate::router::Router;
+    use serde_json::json;
 
     #[tokio::test]
     async fn new_issue_events_match_repo_filter_and_route_mention() {
@@ -437,6 +668,7 @@ mod tests {
                     .collect(),
                 channel: Some("route-channel".into()),
                 webhook: None,
+                slack_webhook: None,
                 mention: Some("<@1465264645320474637>".into()),
                 allow_dynamic_tokens: false,
                 format: Some(MessageFormat::Alert),
@@ -489,6 +721,133 @@ mod tests {
                 .iter()
                 .any(|event| event.canonical_kind() == "github.issue-closed")
         );
+    }
+
+    fn ci_snapshot(
+        pr_number: u64,
+        workflow: &str,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> GitHubCISnapshot {
+        GitHubCISnapshot {
+            pr_number: Some(pr_number),
+            workflow: workflow.into(),
+            status: status.into(),
+            conclusion: conclusion.map(ToString::to_string),
+            sha: "abcdef1234567890".into(),
+            url: "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            branch: Some("feat/github-ci-events".into()),
+        }
+    }
+
+    #[test]
+    fn initial_ci_detection_emits_started_event_with_route_metadata() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            channel: Some("dev-channel".into()),
+            mention: Some("<@123>".into()),
+            format: Some(MessageFormat::Alert),
+            ..GitRepoMonitor::default()
+        };
+        let previous = HashMap::new();
+        let current_ci = ci_snapshot(58, "CI / test", "in_progress", None);
+        let current = [(current_ci.dedupe_key(), current_ci)]
+            .into_iter()
+            .collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.ci-started");
+        assert_eq!(events[0].channel.as_deref(), Some("dev-channel"));
+        assert_eq!(events[0].mention.as_deref(), Some("<@123>"));
+        assert_eq!(events[0].format, Some(MessageFormat::Alert));
+        assert_eq!(events[0].payload["repo"], json!("clawhip"));
+        assert_eq!(events[0].payload["number"], json!(58));
+        assert_eq!(events[0].payload["workflow"], json!("CI / test"));
+        assert_eq!(events[0].payload["status"], json!("in_progress"));
+        assert_eq!(events[0].payload["sha"], json!("abcdef1234567890"));
+        assert_eq!(
+            events[0].payload["url"],
+            json!("https://github.com/Yeachan-Heo/clawhip/actions/runs/1")
+        );
+    }
+
+    #[test]
+    fn unchanged_ci_state_is_suppressed() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let ci = ci_snapshot(58, "CI / test", "in_progress", None);
+        let previous = [(ci.dedupe_key(), ci.clone())].into_iter().collect();
+        let current = [(ci.dedupe_key(), ci)].into_iter().collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn ci_state_transition_to_failed_emits_failed_event() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
+        let current_ci = ci_snapshot(58, "CI / test", "completed", Some("failure"));
+        let previous = [(previous_ci.dedupe_key(), previous_ci)]
+            .into_iter()
+            .collect();
+        let current = [(current_ci.dedupe_key(), current_ci)]
+            .into_iter()
+            .collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.ci-failed");
+        assert_eq!(events[0].payload["workflow"], json!("CI / test"));
+        assert_eq!(events[0].payload["status"], json!("completed"));
+        assert_eq!(events[0].payload["conclusion"], json!("failure"));
+    }
+
+    #[test]
+    fn ci_state_transition_to_passed_emits_passed_event() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
+        let current_ci = ci_snapshot(58, "CI / test", "completed", Some("success"));
+        let previous = [(previous_ci.dedupe_key(), previous_ci)]
+            .into_iter()
+            .collect();
+        let current = [(current_ci.dedupe_key(), current_ci)]
+            .into_iter()
+            .collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.ci-passed");
+    }
+
+    #[test]
+    fn ci_state_transition_to_cancelled_emits_cancelled_event() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
+        let current_ci = ci_snapshot(58, "CI / test", "completed", Some("cancelled"));
+        let previous = [(previous_ci.dedupe_key(), previous_ci)]
+            .into_iter()
+            .collect();
+        let current = [(current_ci.dedupe_key(), current_ci)]
+            .into_iter()
+            .collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.ci-cancelled");
     }
 
     #[tokio::test]
