@@ -28,7 +28,7 @@ case "${1:-} ${2:-}" in
   "auth status")
     exit "${GH_AUTH_EXIT_CODE:-0}"
     ;;
-  "repo star")
+  "api --method")
     exit "${GH_STAR_EXIT_CODE:-0}"
     ;;
 esac
@@ -151,7 +151,10 @@ EOF_INPUT
 
     assert!(output.status.success(), "script failed: {output:?}");
     let gh_log = fs::read_to_string(temp.path().join("gh.log")).expect("gh log");
-    assert_eq!(gh_log.trim(), "repo star Yeachan-Heo/clawhip");
+    assert_eq!(
+        gh_log.trim(),
+        "api --method PUT /user/starred/Yeachan-Heo/clawhip --silent"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("thanks for starring"),

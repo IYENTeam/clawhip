@@ -65,6 +65,10 @@ can_use_github_cli_for_star() {
   command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null
 }
 
+star_repo_with_gh() {
+  gh api --method PUT "/user/starred/${GITHUB_REPO}" --silent &>/dev/null
+}
+
 prompt_to_star_repo() {
   local response
   printf '[clawhip] Would you like to star %s on GitHub with gh? [y/N]: ' "$GITHUB_REPO"
@@ -72,7 +76,7 @@ prompt_to_star_repo() {
 
   case "$response" in
     [yY]|[yY][eE][sS])
-      if gh repo star "${GITHUB_REPO}" 2>/dev/null; then
+      if star_repo_with_gh; then
         log "thanks for starring ${GITHUB_REPO}"
       else
         log "unable to star ${GITHUB_REPO} with gh; continuing without it"

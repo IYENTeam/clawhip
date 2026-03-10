@@ -158,7 +158,7 @@ where
 
     match response.trim() {
         "y" | "Y" | "yes" | "Yes" | "YES" => {
-            if gh_command_succeeds(&["repo", "star", GITHUB_REPO]) {
+            if gh_star_repo_succeeds_with(&mut gh_command_succeeds) {
                 writeln!(output, "[clawhip] thanks for starring {GITHUB_REPO}")?;
             } else {
                 writeln!(
@@ -181,6 +181,14 @@ fn star_prompt_disabled(skip_star_prompt: bool, env_skip_star_prompt: Option<&st
 
 fn is_truthy(value: &str) -> bool {
     matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+}
+
+fn gh_star_repo_succeeds_with<F>(gh_command_succeeds: &mut F) -> bool
+where
+    F: FnMut(&[&str]) -> bool,
+{
+    let endpoint = format!("/user/starred/{GITHUB_REPO}");
+    gh_command_succeeds(&["api", "--method", "PUT", endpoint.as_str(), "--silent"])
 }
 
 fn gh_command_succeeds(args: &[&str]) -> bool {
@@ -330,9 +338,11 @@ mod tests {
             vec![
                 vec![String::from("auth"), String::from("status")],
                 vec![
-                    String::from("repo"),
-                    String::from("star"),
-                    String::from(GITHUB_REPO),
+                    String::from("api"),
+                    String::from("--method"),
+                    String::from("PUT"),
+                    String::from(format!("/user/starred/{GITHUB_REPO}")),
+                    String::from("--silent"),
                 ],
             ]
         );
@@ -349,7 +359,11 @@ mod tests {
 
         maybe_prompt_to_star_repo_with(false, None, true, &mut input, &mut output, |args| {
             gh_calls.push(args.iter().map(|arg| (*arg).to_string()).collect());
-            !matches!(args, ["repo", "star", GITHUB_REPO])
+            !matches!(
+                args,
+                ["api", "--method", "PUT", endpoint, "--silent"]
+                    if *endpoint == format!("/user/starred/{GITHUB_REPO}")
+            )
         })
         .expect("star failure should not fail install");
 
@@ -358,9 +372,11 @@ mod tests {
             vec![
                 vec![String::from("auth"), String::from("status")],
                 vec![
-                    String::from("repo"),
-                    String::from("star"),
-                    String::from(GITHUB_REPO),
+                    String::from("api"),
+                    String::from("--method"),
+                    String::from("PUT"),
+                    String::from(format!("/user/starred/{GITHUB_REPO}")),
+                    String::from("--silent"),
                 ],
             ]
         );

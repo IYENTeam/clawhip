@@ -14,10 +14,10 @@ Use this repo as:
 
 ## Prerequisites
 
-⭐ If you want to support clawhip, star this repository. The interactive repo-local installer and `clawhip install` can offer an optional post-install `gh repo star` prompt when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `CLAWHIP_SKIP_STAR_PROMPT=1`.
+⭐ If you want to support clawhip, star this repository. The interactive repo-local installer and `clawhip install` can offer an optional post-install GitHub star prompt via authenticated `gh api` access when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `CLAWHIP_SKIP_STAR_PROMPT=1`.
 
 ```bash
-gh repo star Yeachan-Heo/clawhip
+gh api --method PUT /user/starred/Yeachan-Heo/clawhip --silent
 ```
 
 ## Primary install flow
