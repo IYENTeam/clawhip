@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub routes: Vec<RouteRule>,
     #[serde(default)]
     pub monitors: MonitorConfig,
+    #[serde(default, skip_serializing_if = "CronConfig::is_empty")]
+    pub cron: CronConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -324,6 +326,50 @@ impl Default for WorkspaceMonitor {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronConfig {
+    #[serde(default = "default_cron_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default)]
+    pub jobs: Vec<CronJob>,
+}
+
+impl Default for CronConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_cron_poll_interval_secs(),
+            jobs: Vec::new(),
+        }
+    }
+}
+
+impl CronConfig {
+    fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJob {
+    pub id: String,
+    pub schedule: String,
+    #[serde(default = "default_cron_timezone")]
+    pub timezone: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub channel: Option<String>,
+    pub mention: Option<String>,
+    pub format: Option<MessageFormat>,
+    #[serde(flatten)]
+    pub kind: CronJobKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CronJobKind {
+    CustomMessage { message: String },
+}
+
 pub fn default_config_path() -> PathBuf {
     if let Ok(override_path) = env::var("CLAWHIP_CONFIG") {
         return PathBuf::from(override_path);
@@ -358,6 +404,12 @@ fn default_ci_batch_window_secs() -> u64 {
 }
 fn default_keyword_window_secs() -> u64 {
     30
+}
+fn default_cron_poll_interval_secs() -> u64 {
+    30
+}
+fn default_cron_timezone() -> String {
+    "UTC".to_string()
 }
 fn default_true() -> bool {
     true
@@ -522,6 +574,9 @@ impl AppConfig {
         if self.dispatch.ci_batch_window_secs == 0 {
             return Err("dispatch.ci_batch_window_secs must be at least 1".into());
         }
+        if self.cron.poll_interval_secs == 0 {
+            return Err("cron.poll_interval_secs must be at least 1".into());
+        }
 
         for (index, route) in self.routes.iter().enumerate() {
             let sink = route.effective_sink();
@@ -606,6 +661,15 @@ impl AppConfig {
                     index + 1
                 )
                 .into());
+            }
+        }
+
+        let mut cron_ids = std::collections::BTreeSet::new();
+        for (index, job) in self.cron.jobs.iter().enumerate() {
+            crate::cron::validate_job(job)
+                .map_err(|error| format!("cron job #{}: {error}", index + 1))?;
+            if !cron_ids.insert(job.id.as_str()) {
+                return Err(format!("duplicate cron job id '{}'", job.id).into());
             }
         }
 
@@ -723,12 +787,13 @@ impl AppConfig {
         println!("  Git monitors: {}", self.monitors.git.repos.len());
         println!("  Tmux monitors: {}", self.monitors.tmux.sessions.len());
         println!("  Workspace monitors: {}", self.monitors.workspace.len());
+        println!("  Cron jobs: {}", self.cron.jobs.len());
     }
 
     fn print_template_hint(&self) {
         println!("Edit the config file directly for routes and monitor definitions.");
         println!(
-            "Sections: [providers.discord], [dispatch], [daemon], [[routes]], [[monitors.git.repos]], [[monitors.tmux.sessions]], [[monitors.workspace]]"
+            "Sections: [providers.discord], [dispatch], [daemon], [cron], [[cron.jobs]], [[routes]], [[monitors.git.repos]], [[monitors.tmux.sessions]], [[monitors.workspace]]"
         );
         println!(
             "Routes may set either channel = \"...\" or webhook = \"https://discord.com/api/webhooks/...\"."
@@ -789,6 +854,20 @@ impl AppConfig {
                 .collect();
             workspace.debounce_ms = workspace.debounce_ms.max(1);
             workspace.poll_interval_secs = workspace.poll_interval_secs.map(|secs| secs.max(1));
+        }
+
+        for job in &mut self.cron.jobs {
+            job.id = normalize_text(Some(job.id.clone())).unwrap_or_default();
+            job.schedule = normalize_text(Some(job.schedule.clone())).unwrap_or_default();
+            job.timezone =
+                normalize_text(Some(job.timezone.clone())).unwrap_or_else(default_cron_timezone);
+            job.channel = normalize_text(job.channel.clone());
+            job.mention = normalize_text(job.mention.clone());
+            match &mut job.kind {
+                CronJobKind::CustomMessage { message } => {
+                    *message = normalize_text(Some(message.clone())).unwrap_or_default();
+                }
+            }
         }
     }
 
@@ -1060,6 +1139,13 @@ mod tests {
     }
 
     #[test]
+    fn cron_config_defaults_are_backward_compatible() {
+        let config = AppConfig::default();
+        assert_eq!(config.cron.poll_interval_secs, 30);
+        assert!(config.cron.jobs.is_empty());
+    }
+
+    #[test]
     fn load_or_default_parses_dispatch_ci_batch_window_secs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1101,6 +1187,91 @@ mod tests {
         assert_eq!(config.dispatch.ci_batch_window_secs, 0);
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("dispatch.ci_batch_window_secs must be at least 1"));
+    }
+
+    #[test]
+    fn load_or_default_parses_cron_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"[providers.discord]
+token = "abc"
+
+[cron]
+poll_interval_secs = 15
+
+[[cron.jobs]]
+id = "dev-followup"
+schedule = "*/30 * * * *"
+channel = "ops"
+mention = " <@1> "
+kind = "custom-message"
+message = " ping "
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+
+        assert_eq!(config.cron.poll_interval_secs, 15);
+        assert_eq!(config.cron.jobs.len(), 1);
+        let job = &config.cron.jobs[0];
+        assert_eq!(job.id, "dev-followup");
+        assert_eq!(job.schedule, "*/30 * * * *");
+        assert_eq!(job.channel.as_deref(), Some("ops"));
+        assert_eq!(job.mention.as_deref(), Some("<@1>"));
+        assert_eq!(job.timezone, "UTC");
+        match &job.kind {
+            CronJobKind::CustomMessage { message } => assert_eq!(message, "ping"),
+        }
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cron_validation_rejects_duplicate_ids() {
+        let config = AppConfig {
+            providers: ProvidersConfig {
+                discord: DiscordConfig {
+                    bot_token: Some("token".into()),
+                    legacy_default_channel: None,
+                },
+                slack: SlackConfig::default(),
+            },
+            cron: CronConfig {
+                poll_interval_secs: 30,
+                jobs: vec![
+                    CronJob {
+                        id: "dup".into(),
+                        schedule: "*/5 * * * *".into(),
+                        timezone: "UTC".into(),
+                        enabled: true,
+                        channel: Some("ops".into()),
+                        mention: None,
+                        format: None,
+                        kind: CronJobKind::CustomMessage {
+                            message: "first".into(),
+                        },
+                    },
+                    CronJob {
+                        id: "dup".into(),
+                        schedule: "0 * * * *".into(),
+                        timezone: "UTC".into(),
+                        enabled: true,
+                        channel: Some("ops".into()),
+                        mention: None,
+                        format: None,
+                        kind: CronJobKind::CustomMessage {
+                            message: "second".into(),
+                        },
+                    },
+                ],
+            },
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("duplicate cron job id 'dup'"));
     }
 
     #[test]

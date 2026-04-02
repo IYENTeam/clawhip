@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod config;
 mod core;
+mod cron;
 mod daemon;
 mod discord;
 mod dispatch;
@@ -24,8 +25,8 @@ use std::sync::Arc;
 use clap::Parser;
 
 use crate::cli::{
-    AgentCommands, Cli, Commands, ConfigCommand, GitCommands, GithubCommands, MemoryCommands,
-    OmxCommands, PluginCommands, TmuxCommands,
+    AgentCommands, Cli, Commands, ConfigCommand, CronCommands, GitCommands, GithubCommands,
+    MemoryCommands, OmxCommands, PluginCommands, TmuxCommands,
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
@@ -211,6 +212,13 @@ async fn real_main() -> Result<()> {
                 let payload = args.read_payload(&mut std::io::stdin())?;
                 let response = client.send_omx_hook(&payload).await?;
                 println!("{}", serde_json::to_string(&response)?);
+                Ok(())
+            }
+        },
+        Commands::Cron { command } => match command {
+            CronCommands::Run { id } => {
+                crate::cron::run_configured_job(config.as_ref(), &id).await?;
+                println!("Ran cron job {id}");
                 Ok(())
             }
         },

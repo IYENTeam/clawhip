@@ -34,7 +34,7 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Start the daemon (HTTP server + git/tmux monitors).
+    /// Start the daemon (HTTP server + monitors + managed cron jobs).
     #[command(alias = "serve")]
     Start {
         #[arg(long)]
@@ -80,6 +80,11 @@ pub enum Commands {
     Omx {
         #[command(subcommand)]
         command: OmxCommands,
+    },
+    /// Run configured cron jobs via clawhip.
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
     },
     /// Install clawhip from the current git clone.
     Install {
@@ -290,6 +295,15 @@ pub enum PluginCommands {
 pub enum OmxCommands {
     /// Forward an OMX v1 hook envelope to clawhip.
     Hook(OmxHookArgs),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CronCommands {
+    /// Run one configured cron job immediately, which is useful for native system-cron entrypoints.
+    Run {
+        /// Cron job id from [[cron.jobs]].id.
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -806,6 +820,18 @@ mod tests {
             args.file.as_deref(),
             Some(PathBuf::from("payload.json").as_path())
         );
+    }
+
+    #[test]
+    fn parses_cron_run_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "cron", "run", "dev-followup"]);
+
+        let Commands::Cron { command } = cli.command.expect("cron command") else {
+            panic!("expected cron command");
+        };
+        let CronCommands::Run { id } = command;
+
+        assert_eq!(id, "dev-followup");
     }
 
     #[test]

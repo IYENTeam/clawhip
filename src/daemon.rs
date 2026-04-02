@@ -13,6 +13,7 @@ use tokio::sync::{RwLock, mpsc};
 use crate::Result;
 use crate::VERSION;
 use crate::config::AppConfig;
+use crate::cron::CronSource;
 use crate::dispatch::Dispatcher;
 use crate::event::compat::{from_incoming_event, incoming_event_from_omx_hook_envelope_json};
 use crate::events::{IncomingEvent, normalize_event};
@@ -64,6 +65,7 @@ pub async fn run(config: Arc<AppConfig>, port_override: Option<u16>) -> Result<(
         tx.clone(),
     );
     spawn_source(WorkspaceSource::new(config.clone()), tx.clone());
+    spawn_source(CronSource::new(config.clone()), tx.clone());
 
     let app = AxumRouter::new()
         .route("/health", get(health))
@@ -125,6 +127,7 @@ fn health_payload(config: &AppConfig, port: u16, registered_tmux_sessions: usize
         "configured_git_monitors": config.monitors.git.repos.len(),
         "configured_tmux_monitors": config.monitors.tmux.sessions.len(),
         "configured_workspace_monitors": config.monitors.workspace.len(),
+        "configured_cron_jobs": config.cron.jobs.len(),
         "registered_tmux_sessions": registered_tmux_sessions,
     })
 }
