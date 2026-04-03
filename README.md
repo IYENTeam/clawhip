@@ -27,15 +27,15 @@ Then OpenClaw should:
 - start the daemon
 - run live verification for issue / PR / git / tmux / install flows
 
-## What shipped in v0.3.0
+## What shipped in v0.4.0
 
-- **Typed event model** — incoming events are normalized and validated into typed envelopes before dispatch.
-- **Multi-delivery router** — one event can resolve to zero, one, or many deliveries instead of stopping at the first match.
-- **Source extraction** — git, GitHub, and tmux monitoring now run as explicit sources feeding the daemon queue.
-- **Sink/render split** — rendering is separated from transport; v0.3.0 ships with the Discord sink and default renderer.
-- **Config compatibility** — `[providers.discord]` is the preferred config surface, while legacy `[discord]` still loads.
+- **Install lifecycle polish** — repo-local installs, `clawhip install`, `clawhip update`, and `clawhip uninstall` are documented and aligned for clone-local operator workflows.
+- **Optional GitHub support prompt** — interactive install flows can offer an explicit opt-in GitHub star prompt, with `--skip-star-prompt` and `CLAWHIP_SKIP_STAR_PROMPT=1` available on both installer surfaces.
+- **Filesystem memory scaffolds** — `clawhip memory init` and `clawhip memory status` bootstrap and inspect the filesystem-offloaded memory layout for repos and workspaces.
+- **Native session contract polish** — OMC/OMX payload normalization now prefers the lower-noise `session.*` route family while keeping legacy `agent.*` compatibility.
+- **Config compatibility** — `[providers.discord]` remains the preferred config surface, while legacy `[discord]` still loads.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the release architecture that ships in v0.3.0.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the release architecture that ships in v0.4.0.
 
 ## Good to use together
 
@@ -365,7 +365,7 @@ format = "alert"
               -> [Discord REST / Slack webhook delivery]
 ```
 
-Input sources in v0.3.0:
+Input sources in v0.4.0:
 - CLI thin clients and custom events
 - GitHub webhook ingress plus GitHub polling source
 - git monitor source

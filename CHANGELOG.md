@@ -15,6 +15,23 @@
 - native OMX hook-bridge + SDK setup (`integrations/omx/`, `clawhip omx hook`, `/api/omx/hook`) is the default/recommended integration path
 - no config migration is required for this patch release
 
+## 0.4.0 - 2026-03-11
+
+### Highlights
+
+- added clone-local install lifecycle polish: repo-local `install.sh`, `clawhip install`, and `clawhip update`/`uninstall` now cover the current dev build workflow more cleanly
+- added an optional post-install GitHub star prompt for interactive installs, with explicit opt-in only and skip controls for both the shell installer and CLI install path
+- shipped `clawhip memory init` and `clawhip memory status` for filesystem-offloaded memory scaffolds in repos and workspaces
+- normalized native OMC/OMX payloads into the lower-noise `session.*` contract while keeping legacy `agent.*` compatibility
+- refreshed live verification guidance around daemon health/status and custom send delivery
+
+### Upgrade notes
+
+- crate version is now `0.4.0`
+- interactive install flows may offer a GitHub star prompt only when `gh` is installed and authenticated; disable it with `--skip-star-prompt` or `CLAWHIP_SKIP_STAR_PROMPT=1`
+- runtime memory scaffolds can now be bootstrapped and inspected with `clawhip memory init` and `clawhip memory status`
+- existing config remains compatible; no config migration is required for this release
+
 ## 0.3.0 - 2026-03-09
 
 ### Highlights
