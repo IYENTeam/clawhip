@@ -122,25 +122,34 @@ impl Router {
         delivery: &ResolvedDelivery,
         renderer: &R,
     ) -> Result<String> {
-        let content = if let Some(template) = delivery.template.as_deref() {
-            dynamic_tokens::render_template(
-                template,
-                &event.template_context(),
-                delivery.allow_dynamic_tokens,
-            )
-            .await
-        } else {
-            let rendered = renderer.render(event, &delivery.format)?;
-            if delivery.allow_dynamic_tokens {
-                dynamic_tokens::render_template(&rendered, &event.template_context(), true).await
-            } else {
-                rendered
-            }
-        };
+        let content = self.render_delivery_body(event, delivery, renderer).await?;
 
         match delivery.mention.as_deref().map(str::trim) {
             Some(mention) if !mention.is_empty() => Ok(format!("{mention} {content}")),
             _ => Ok(content),
+        }
+    }
+
+    pub async fn render_delivery_body<R: Renderer + ?Sized>(
+        &self,
+        event: &IncomingEvent,
+        delivery: &ResolvedDelivery,
+        renderer: &R,
+    ) -> Result<String> {
+        if let Some(template) = delivery.template.as_deref() {
+            return Ok(dynamic_tokens::render_template(
+                template,
+                &event.template_context(),
+                delivery.allow_dynamic_tokens,
+            )
+            .await);
+        }
+
+        let rendered = renderer.render(event, &delivery.format)?;
+        if delivery.allow_dynamic_tokens {
+            Ok(dynamic_tokens::render_template(&rendered, &event.template_context(), true).await)
+        } else {
+            Ok(rendered)
         }
     }
 

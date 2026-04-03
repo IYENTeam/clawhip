@@ -57,8 +57,16 @@ pub async fn run(
     let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
 
     let ci_batch_window = config.dispatch.ci_batch_window();
+    let routine_batch_window = config.dispatch.routine_batch_window();
     tokio::spawn(async move {
-        let mut dispatcher = Dispatcher::new(rx, router, renderer, sinks, ci_batch_window);
+        let mut dispatcher = Dispatcher::new(
+            rx,
+            router,
+            renderer,
+            sinks,
+            ci_batch_window,
+            routine_batch_window,
+        );
         if let Err(error) = dispatcher.run().await {
             eprintln!("clawhip dispatcher stopped: {error}");
         }

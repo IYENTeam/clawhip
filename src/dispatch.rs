@@ -9,8 +9,8 @@ use crate::Result;
 use crate::core::timer_wheel::{DelayedEntry, TimerWheel};
 use crate::events::IncomingEvent;
 use crate::render::Renderer;
-use crate::router::Router;
-use crate::sink::{Sink, SinkMessage};
+use crate::router::{ResolvedDelivery, Router};
+use crate::sink::{Sink, SinkMessage, SinkTarget};
 
 const DEFAULT_BATCH_TICK: Duration = Duration::from_secs(1);
 
@@ -20,6 +20,7 @@ pub struct Dispatcher {
     renderer: Box<dyn Renderer>,
     sinks: HashMap<String, Box<dyn Sink>>,
     ci_batcher: GitHubCiBatcher,
+    routine_batcher: Option<RoutineDeliveryBatcher>,
     batch_tick: Duration,
 }
 
@@ -30,6 +31,7 @@ impl Dispatcher {
         renderer: Box<dyn Renderer>,
         sinks: HashMap<String, Box<dyn Sink>>,
         ci_batch_window: Duration,
+        routine_batch_window: Option<Duration>,
     ) -> Self {
         Self {
             rx,
@@ -37,6 +39,7 @@ impl Dispatcher {
             renderer,
             sinks,
             ci_batcher: GitHubCiBatcher::new(ci_batch_window),
+            routine_batcher: routine_batch_window.map(RoutineDeliveryBatcher::new),
             batch_tick: DEFAULT_BATCH_TICK,
         }
     }
@@ -44,6 +47,12 @@ impl Dispatcher {
     #[cfg(test)]
     fn with_ci_batch_window(mut self, window: Duration) -> Self {
         self.ci_batcher = GitHubCiBatcher::new(window);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_routine_batch_window(mut self, window: Option<Duration>) -> Self {
+        self.routine_batcher = window.map(RoutineDeliveryBatcher::new);
         self
     }
 
@@ -60,25 +69,27 @@ impl Dispatcher {
                 maybe_event = self.rx.recv() => {
                     match maybe_event {
                         Some(event) => {
-                            self.flush_due_batches().await?;
+                            let now_ms = now_ms();
+                            self.flush_due_batches(now_ms).await?;
                             if self.is_ci_event(&event) {
-                                for flushed in self.ci_batcher.observe(event, now_ms()) {
+                                for flushed in self.ci_batcher.observe(event, now_ms) {
                                     self.deliver_event(flushed).await;
                                 }
                             } else {
-                                self.deliver_event(event).await;
+                                self.resolve_and_dispatch(event, now_ms).await;
                             }
                         }
                         None => {
                             for event in self.ci_batcher.flush_all() {
                                 self.deliver_event(event).await;
                             }
+                            self.flush_all_routine_batches().await;
                             break;
                         }
                     }
                 }
                 _ = ticker.tick() => {
-                    self.flush_due_batches().await?;
+                    self.flush_due_batches(now_ms()).await?;
                 }
             }
         }
@@ -86,9 +97,14 @@ impl Dispatcher {
         Ok(())
     }
 
-    async fn flush_due_batches(&mut self) -> Result<()> {
-        for event in self.ci_batcher.flush_due(now_ms()) {
+    async fn flush_due_batches(&mut self, now_ms: u64) -> Result<()> {
+        for event in self.ci_batcher.flush_due(now_ms) {
             self.deliver_event(event).await;
+        }
+        if let Some(routine_batcher) = self.routine_batcher.as_mut() {
+            for batch in routine_batcher.flush_due(now_ms) {
+                self.send_routine_batch(batch).await;
+            }
         }
         Ok(())
     }
@@ -113,45 +129,167 @@ impl Dispatcher {
         };
 
         for delivery in deliveries {
-            let Some(sink) = self.sinks.get(delivery.sink.as_str()) else {
+            self.send_delivery(&event, &delivery).await;
+        }
+    }
+
+    async fn resolve_and_dispatch(&mut self, event: IncomingEvent, now_ms: u64) {
+        let deliveries = match self.router.resolve(&event).await {
+            Ok(deliveries) => deliveries,
+            Err(error) => {
                 eprintln!(
-                    "clawhip dispatcher missing sink '{}' for target {:?}",
-                    delivery.sink, delivery.target
+                    "clawhip dispatcher failed to resolve {}: {error}",
+                    event.canonical_kind()
+                );
+                return;
+            }
+        };
+
+        for delivery in deliveries {
+            if self.should_batch_routine_delivery(&event, &delivery)
+                && let Some(routine_batcher) = self.routine_batcher.as_mut()
+            {
+                routine_batcher.observe(
+                    QueuedRoutineDelivery {
+                        event: event.clone(),
+                        delivery,
+                    },
+                    now_ms,
                 );
                 continue;
-            };
+            }
 
-            let content = match self
-                .router
-                .render_delivery(&event, &delivery, self.renderer.as_ref())
-                .await
-            {
-                Ok(content) => content,
-                Err(error) => {
-                    eprintln!(
-                        "clawhip dispatcher failed to render {} for {}/ {:?}: {error}",
-                        event.canonical_kind(),
-                        delivery.sink,
-                        delivery.target
-                    );
-                    continue;
-                }
-            };
+            self.send_delivery(&event, &delivery).await;
+        }
+    }
 
-            let message = SinkMessage {
+    async fn send_delivery(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) {
+        let Some(sink) = self.sinks.get(delivery.sink.as_str()) else {
+            eprintln!(
+                "clawhip dispatcher missing sink '{}' for target {:?}",
+                delivery.sink, delivery.target
+            );
+            return;
+        };
+
+        let content = match self
+            .router
+            .render_delivery(event, delivery, self.renderer.as_ref())
+            .await
+        {
+            Ok(content) => content,
+            Err(error) => {
+                eprintln!(
+                    "clawhip dispatcher failed to render {} for {}/ {:?}: {error}",
+                    event.canonical_kind(),
+                    delivery.sink,
+                    delivery.target
+                );
+                return;
+            }
+        };
+
+        self.send_sink_message(
+            sink.as_ref(),
+            &delivery.target,
+            SinkMessage {
                 event_kind: event.canonical_kind().to_string(),
                 format: delivery.format.clone(),
                 content,
                 payload: event.payload.clone(),
-            };
+            },
+        )
+        .await;
+    }
 
-            if let Err(error) = sink.send(&delivery.target, &message).await {
-                eprintln!(
-                    "clawhip dispatcher delivery failed to {}/ {:?}: {error}",
-                    delivery.sink, delivery.target
-                );
+    async fn send_routine_batch(&self, batch: FlushedRoutineDeliveryBatch) {
+        let Some(first) = batch.items.first() else {
+            return;
+        };
+        if batch.items.len() == 1 {
+            self.send_delivery(&first.event, &first.delivery).await;
+            return;
+        }
+
+        let Some(sink) = self.sinks.get(first.delivery.sink.as_str()) else {
+            eprintln!(
+                "clawhip dispatcher missing sink '{}' for batched target {:?}",
+                first.delivery.sink, first.delivery.target
+            );
+            return;
+        };
+
+        let mut contents = Vec::new();
+        let mut event_kinds = Vec::new();
+        for item in &batch.items {
+            match self
+                .router
+                .render_delivery_body(&item.event, &item.delivery, self.renderer.as_ref())
+                .await
+            {
+                Ok(content) => {
+                    contents.push(content);
+                    event_kinds.push(item.event.canonical_kind().to_string());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "clawhip dispatcher failed to render batched {} for {}/ {:?}: {error}",
+                        item.event.canonical_kind(),
+                        item.delivery.sink,
+                        item.delivery.target
+                    );
+                }
             }
         }
+
+        if contents.is_empty() {
+            return;
+        }
+
+        self.send_sink_message(
+            sink.as_ref(),
+            &first.delivery.target,
+            SinkMessage {
+                event_kind: "dispatch.routine-batched".to_string(),
+                format: first.delivery.format.clone(),
+                content: contents.join("\n"),
+                payload: json!({
+                    "batched": true,
+                    "count": contents.len(),
+                    "event_kinds": event_kinds,
+                }),
+            },
+        )
+        .await;
+    }
+
+    async fn send_sink_message(&self, sink: &dyn Sink, target: &SinkTarget, message: SinkMessage) {
+        if let Err(error) = sink.send(target, &message).await {
+            eprintln!(
+                "clawhip dispatcher delivery failed to {:?}: {error}",
+                target
+            );
+        }
+    }
+
+    async fn flush_all_routine_batches(&mut self) {
+        let Some(routine_batcher) = self.routine_batcher.as_mut() else {
+            return;
+        };
+        for batch in routine_batcher.flush_all() {
+            self.send_routine_batch(batch).await;
+        }
+    }
+
+    fn should_batch_routine_delivery(
+        &self,
+        event: &IncomingEvent,
+        delivery: &ResolvedDelivery,
+    ) -> bool {
+        self.routine_batcher.is_some()
+            && delivery.sink == "discord"
+            && !self.is_ci_event(event)
+            && !should_bypass_routine_batch(event)
     }
 }
 
@@ -192,6 +330,94 @@ struct BatchedCiJob {
     status: String,
     conclusion: Option<String>,
     url: String,
+}
+
+#[derive(Debug, Clone)]
+struct RoutineDeliveryBatcher {
+    pending: HashMap<String, PendingRoutineDeliveryBatch>,
+    timer_wheel: TimerWheel,
+    window: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRoutineDeliveryBatch {
+    items: Vec<QueuedRoutineDelivery>,
+    deliver_at_ms: u64,
+    version: u64,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedRoutineDelivery {
+    event: IncomingEvent,
+    delivery: ResolvedDelivery,
+}
+
+#[derive(Debug, Clone)]
+struct FlushedRoutineDeliveryBatch {
+    items: Vec<QueuedRoutineDelivery>,
+}
+
+impl RoutineDeliveryBatcher {
+    fn new(window: Duration) -> Self {
+        Self {
+            pending: HashMap::new(),
+            timer_wheel: TimerWheel::new(now_ms()),
+            window,
+        }
+    }
+
+    fn observe(&mut self, delivery: QueuedRoutineDelivery, now_ms: u64) {
+        let key = routine_batch_key(&delivery.delivery);
+        let batch =
+            self.pending
+                .entry(key.clone())
+                .or_insert_with(|| PendingRoutineDeliveryBatch {
+                    items: Vec::new(),
+                    deliver_at_ms: now_ms + self.window.as_millis() as u64,
+                    version: 0,
+                });
+        batch.items.push(delivery);
+        batch.version += 1;
+        self.timer_wheel.schedule(DelayedEntry {
+            deliver_at_ms: batch.deliver_at_ms,
+            record: serde_json::to_vec(&ScheduledBatchKey {
+                key,
+                version: batch.version,
+            })
+            .unwrap_or_default(),
+        });
+    }
+
+    fn flush_due(&mut self, now_ms: u64) -> Vec<FlushedRoutineDeliveryBatch> {
+        let mut batches = Vec::new();
+        for entry in self.timer_wheel.tick(now_ms) {
+            let Some(scheduled) = serde_json::from_slice::<ScheduledBatchKey>(&entry.record).ok()
+            else {
+                continue;
+            };
+            let is_current = self
+                .pending
+                .get(&scheduled.key)
+                .map(|batch| batch.version == scheduled.version)
+                .unwrap_or(false);
+            if is_current && let Some(batch) = self.flush_batch(&scheduled.key) {
+                batches.push(batch);
+            }
+        }
+        batches
+    }
+
+    fn flush_all(&mut self) -> Vec<FlushedRoutineDeliveryBatch> {
+        let keys = self.pending.keys().cloned().collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| self.flush_batch(&key))
+            .collect()
+    }
+
+    fn flush_batch(&mut self, key: &str) -> Option<FlushedRoutineDeliveryBatch> {
+        let batch = self.pending.remove(key)?;
+        Some(FlushedRoutineDeliveryBatch { items: batch.items })
+    }
 }
 
 impl GitHubCiBatcher {
@@ -457,6 +683,44 @@ fn ci_run_job_count(payload: &Value) -> usize {
         .unwrap_or(1)
 }
 
+fn should_bypass_routine_batch(event: &IncomingEvent) -> bool {
+    let kind = event.canonical_kind();
+    kind.ends_with(".failed")
+        || kind.ends_with(".blocked")
+        || kind == "tmux.stale"
+        || kind.starts_with("github.ci-")
+}
+
+fn routine_batch_key(delivery: &ResolvedDelivery) -> String {
+    let mention = normalized_delivery_text(delivery.mention.as_deref());
+    let template = normalized_delivery_text(delivery.template.as_deref());
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        delivery.sink,
+        sink_target_key(&delivery.target),
+        delivery.format.as_str(),
+        mention,
+        template,
+        delivery.allow_dynamic_tokens
+    )
+}
+
+fn normalized_delivery_text(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn sink_target_key(target: &SinkTarget) -> String {
+    match target {
+        SinkTarget::DiscordChannel(channel) => format!("discord-channel:{channel}"),
+        SinkTarget::DiscordWebhook(webhook) => format!("discord-webhook:{webhook}"),
+        SinkTarget::SlackWebhook(webhook) => format!("slack-webhook:{webhook}"),
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -487,7 +751,39 @@ mod tests {
             Box::new(DefaultRenderer),
             sinks,
             Duration::from_secs(30),
+            None,
         )
+    }
+
+    async fn spawn_webhook_collector(
+        expected_requests: usize,
+    ) -> (
+        String,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel(expected_requests);
+        let handle = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0_u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap();
+                request_tx
+                    .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+
+        (format!("http://{addr}/webhook"), request_rx, handle)
     }
 
     #[tokio::test]
@@ -701,6 +997,285 @@ mod tests {
         assert!(requests[0].contains("Build, Test"));
     }
 
+    #[tokio::test]
+    async fn dispatcher_batches_routine_discord_deliveries_into_single_send() {
+        use tokio::time::{Duration, timeout};
+
+        let (webhook, mut requests, server) = spawn_webhook_collector(1).await;
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "tmux.keyword".into(),
+                sink: "discord".into(),
+                webhook: Some(webhook),
+                mention: Some("<@ops>".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(4);
+        let router = Router::new(Arc::new(config));
+        let mut dispatcher = test_dispatcher(rx, router)
+            .with_routine_batch_window(Some(Duration::from_millis(20)))
+            .with_batch_tick(Duration::from_millis(5));
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent::tmux_keyword(
+            "issue-122".into(),
+            "error".into(),
+            "first".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+        tx.send(IncomingEvent::tmux_keyword(
+            "issue-122".into(),
+            "warn".into(),
+            "second".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let request = timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        task.await.unwrap();
+        server.await.unwrap();
+
+        assert!(request.contains("tmux:issue-122 matched 'error' => first"));
+        assert!(request.contains("tmux:issue-122 matched 'warn' => second"));
+        assert!(!request.contains("<@ops>"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_flushes_single_routine_delivery_on_shutdown_and_preserves_mention() {
+        use tokio::time::{Duration, timeout};
+
+        let (webhook, mut requests, server) = spawn_webhook_collector(1).await;
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "tmux.keyword".into(),
+                sink: "discord".into(),
+                webhook: Some(webhook),
+                mention: Some("<@ops>".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(1);
+        let router = Router::new(Arc::new(config));
+        let mut dispatcher = test_dispatcher(rx, router)
+            .with_routine_batch_window(Some(Duration::from_secs(30)))
+            .with_batch_tick(Duration::from_millis(5));
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent::tmux_keyword(
+            "issue-122".into(),
+            "error".into(),
+            "only".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let request = timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap();
+        server.await.unwrap();
+
+        assert!(request.contains("<@ops> tmux:issue-122 matched 'error' => only"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_sends_bypass_events_immediately_while_routine_delivery_waits() {
+        use tokio::time::{Duration, timeout};
+
+        let (webhook, mut requests, server) = spawn_webhook_collector(2).await;
+        let config = AppConfig {
+            routes: vec![
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    webhook: Some(webhook.clone()),
+                    ..RouteRule::default()
+                },
+                RouteRule {
+                    event: "agent.failed".into(),
+                    sink: "discord".into(),
+                    webhook: Some(webhook),
+                    ..RouteRule::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(4);
+        let router = Router::new(Arc::new(config));
+        let mut dispatcher = test_dispatcher(rx, router)
+            .with_routine_batch_window(Some(Duration::from_millis(80)))
+            .with_batch_tick(Duration::from_millis(5));
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent::tmux_keyword(
+            "issue-122".into(),
+            "error".into(),
+            "queued".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+        tx.send(IncomingEvent::agent_failed(
+            "codex".into(),
+            Some("session-1".into()),
+            Some("clawhip".into()),
+            Some(3),
+            Some("boom".into()),
+            "stacktrace".into(),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let first = timeout(Duration::from_millis(40), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.contains("agent codex"));
+        assert!(first.contains("failed"));
+
+        assert!(
+            timeout(Duration::from_millis(30), requests.recv())
+                .await
+                .is_err()
+        );
+
+        drop(tx);
+        let second = timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap();
+        server.await.unwrap();
+
+        assert!(second.contains("tmux:issue-122 matched 'error' => queued"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_keeps_ci_events_off_routine_batcher() {
+        use tokio::time::{Duration, timeout};
+
+        let (webhook, mut requests, server) = spawn_webhook_collector(1).await;
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "github.ci-*".into(),
+                sink: "discord".into(),
+                webhook: Some(webhook),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(4);
+        let router = Router::new(Arc::new(config));
+        let mut dispatcher = test_dispatcher(rx, router)
+            .with_ci_batch_window(Duration::from_millis(20))
+            .with_routine_batch_window(Some(Duration::from_millis(200)))
+            .with_batch_tick(Duration::from_millis(5));
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        for workflow in ["Build", "Test"] {
+            let mut event = IncomingEvent::github_ci(
+                "github.ci-passed",
+                "clawhip".into(),
+                Some(122),
+                workflow.into(),
+                "completed".into(),
+                Some("success".into()),
+                "abcdef1234567".into(),
+                format!("https://github.com/Yeachan-Heo/clawhip/actions/runs/456/jobs/{workflow}"),
+                Some("feat/routine-batch".into()),
+                None,
+            );
+            event.payload["run_job_count"] = json!(2);
+            event.payload["run_all_terminal"] = json!(true);
+            tx.send(event).await.unwrap();
+        }
+
+        let request = timeout(Duration::from_millis(90), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(tx);
+        task.await.unwrap();
+        server.await.unwrap();
+
+        assert!(request.contains("2/2 passed"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_keeps_distinct_delivery_signatures_in_separate_batches() {
+        use tokio::time::{Duration, timeout};
+
+        let (webhook, mut requests, server) = spawn_webhook_collector(2).await;
+        let config = AppConfig {
+            routes: vec![
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    webhook: Some(webhook.clone()),
+                    template: Some("first".into()),
+                    ..RouteRule::default()
+                },
+                RouteRule {
+                    event: "tmux.keyword".into(),
+                    sink: "discord".into(),
+                    webhook: Some(webhook),
+                    template: Some("second".into()),
+                    ..RouteRule::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(1);
+        let router = Router::new(Arc::new(config));
+        let mut dispatcher = test_dispatcher(rx, router)
+            .with_routine_batch_window(Some(Duration::from_secs(30)))
+            .with_batch_tick(Duration::from_millis(5));
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent::tmux_keyword(
+            "issue-122".into(),
+            "error".into(),
+            "boom".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let first = timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap();
+        server.await.unwrap();
+
+        assert!(
+            first.contains("\"content\":\"first\"") || second.contains("\"content\":\"first\"")
+        );
+        assert!(
+            first.contains("\"content\":\"second\"") || second.contains("\"content\":\"second\"")
+        );
+    }
+
     #[test]
     fn batch_key_prefers_workflow_run_id() {
         let payload = json!({
@@ -722,6 +1297,7 @@ mod tests {
             Box::new(DefaultRenderer),
             HashMap::new(),
             Duration::from_secs(90),
+            None,
         );
 
         assert_eq!(dispatcher.ci_batcher.window, Duration::from_secs(90));
@@ -797,6 +1373,7 @@ mod tests {
         let config = AppConfig {
             dispatch: crate::config::DispatchConfig {
                 ci_batch_window_secs: 90,
+                routine_batch_window_secs: 5,
             },
             ..AppConfig::default()
         };
@@ -807,6 +1384,7 @@ mod tests {
             Box::new(DefaultRenderer),
             sinks,
             Duration::from_secs(config.dispatch.ci_batch_window_secs),
+            config.dispatch.routine_batch_window(),
         );
 
         assert_eq!(

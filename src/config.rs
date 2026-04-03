@@ -86,12 +86,15 @@ impl Default for DaemonConfig {
 pub struct DispatchConfig {
     #[serde(default = "default_ci_batch_window_secs")]
     pub ci_batch_window_secs: u64,
+    #[serde(default = "default_routine_batch_window_secs")]
+    pub routine_batch_window_secs: u64,
 }
 
 impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
             ci_batch_window_secs: default_ci_batch_window_secs(),
+            routine_batch_window_secs: default_routine_batch_window_secs(),
         }
     }
 }
@@ -99,6 +102,11 @@ impl Default for DispatchConfig {
 impl DispatchConfig {
     pub fn ci_batch_window(&self) -> Duration {
         Duration::from_secs(self.ci_batch_window_secs.max(1))
+    }
+
+    pub fn routine_batch_window(&self) -> Option<Duration> {
+        (self.routine_batch_window_secs > 0)
+            .then(|| Duration::from_secs(self.routine_batch_window_secs))
     }
 }
 
@@ -401,6 +409,9 @@ fn default_stale_minutes() -> u64 {
 }
 fn default_ci_batch_window_secs() -> u64 {
     30
+}
+fn default_routine_batch_window_secs() -> u64 {
+    5
 }
 fn default_keyword_window_secs() -> u64 {
     30
@@ -778,6 +789,13 @@ impl AppConfig {
         );
         println!("  CI batch window: {}s", self.dispatch.ci_batch_window_secs);
         println!(
+            "  Routine batch window: {}",
+            self.dispatch
+                .routine_batch_window()
+                .map(|window| format!("{}s", window.as_secs()))
+                .unwrap_or_else(|| "disabled".to_string())
+        );
+        println!(
             "  Default channel: {}",
             self.defaults.channel.as_deref().unwrap_or("<unset>")
         );
@@ -1139,6 +1157,16 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_config_defaults_routine_batch_window_to_five_seconds() {
+        let config = AppConfig::default();
+        assert_eq!(config.dispatch.routine_batch_window_secs, 5);
+        assert_eq!(
+            config.dispatch.routine_batch_window(),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
     fn cron_config_defaults_are_backward_compatible() {
         let config = AppConfig::default();
         assert_eq!(config.cron.poll_interval_secs, 30);
@@ -1162,6 +1190,26 @@ mod tests {
     }
 
     #[test]
+    fn load_or_default_parses_dispatch_routine_batch_window_secs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nroutine_batch_window_secs = 9\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+
+        assert_eq!(config.dispatch.routine_batch_window_secs, 9);
+        assert_eq!(
+            config.dispatch.routine_batch_window(),
+            Some(Duration::from_secs(9))
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn load_or_default_defaults_dispatch_ci_batch_window_when_omitted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1170,6 +1218,22 @@ mod tests {
         let config = AppConfig::load_or_default(&path).unwrap();
 
         assert_eq!(config.dispatch.ci_batch_window_secs, 30);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn load_or_default_defaults_routine_batch_window_when_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[providers.discord]\ntoken = \"abc\"\n").unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+
+        assert_eq!(config.dispatch.routine_batch_window_secs, 5);
+        assert_eq!(
+            config.dispatch.routine_batch_window(),
+            Some(Duration::from_secs(5))
+        );
         assert!(config.validate().is_ok());
     }
 
@@ -1187,6 +1251,22 @@ mod tests {
         assert_eq!(config.dispatch.ci_batch_window_secs, 0);
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("dispatch.ci_batch_window_secs must be at least 1"));
+    }
+
+    #[test]
+    fn load_or_default_allows_zero_dispatch_routine_batch_window_secs_to_disable_batching() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nroutine_batch_window_secs = 0\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.dispatch.routine_batch_window_secs, 0);
+        assert_eq!(config.dispatch.routine_batch_window(), None);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
