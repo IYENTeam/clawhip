@@ -1,2 +1,0 @@
-{"timestamp":"2026-04-04T07:37:42.587Z","type":"hook_plugin_dispatch","event":"session-start","source":"native","plugin":"clawhip-sdk","file":"clawhip-sdk.mjs","ok":false,"status":"invalid_export","reason":"invalid_export","duration_ms":52}
-{"timestamp":"2026-04-04T07:37:42.678Z","type":"hook_plugin_dispatch","event":"session-start","source":"native","plugin":"clawhip","file":"clawhip.mjs","ok":true,"status":"ok","reason":"ok","duration_ms":91}

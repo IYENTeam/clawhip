@@ -1,2 +1,0 @@
-{"timestamp":"2026-04-04T07:37:42.586Z","type":"watcher_start","cwd":"/home/bellman/Workspace/clawhip","notify_script":"/home/bellman/Workspace/oh-my-codex/dist/scripts/notify-hook.js","authority_only":false,"poll_ms":250,"once":false,"parent_pid":188518,"pid_file":"/home/bellman/Workspace/clawhip/.omx/state/notify-fallback.pid","max_lifetime_ms":21600000}
-{"timestamp":"2026-04-04T07:37:52.525Z","type":"watcher_stop","signal":null,"reason":"parent_gone","parent_pid":188518,"pid_file":"/home/bellman/Workspace/clawhip/.omx/state/notify-fallback.pid"}

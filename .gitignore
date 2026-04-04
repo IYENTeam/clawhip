@@ -1,2 +1,6 @@
 /target
 target/
+
+.omc/
+.omx/
+.claude/worktrees/
