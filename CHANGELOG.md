@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.3 - 2026-04-04
+
+### Highlights
+
+- fix `clawhip send --channel` being overridden by route or default channel config
+- for `custom` events, the explicit event channel now takes highest priority over route and default channels
+
+### Upgrade notes
+
+- crate version is now `0.5.3`
+- existing config remains compatible; no migration required
+- if you relied on a catch-all `event = "custom"` route to redirect all `clawhip send` traffic to a specific channel, that route channel will now only apply when `--channel` is not specified
+
 ## 0.5.2 - 2026-04-04
 
 ### Highlights

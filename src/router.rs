@@ -204,13 +204,24 @@ impl Router {
                     return Ok(SinkTarget::DiscordWebhook(webhook.to_string()));
                 }
 
-                let channel = route
-                    .and_then(|route| route.channel.clone())
-                    .or_else(|| event.channel.clone())
-                    .or_else(|| self.config.defaults.channel.clone())
-                    .ok_or_else(|| {
-                        format!("no channel configured for event {}", event.canonical_kind())
-                    })?;
+                // For custom events (e.g. `clawhip send --channel X`), the
+                // event-level channel represents explicit user intent and must
+                // take highest priority — above both route and default channels.
+                let channel = if event.canonical_kind() == "custom" {
+                    event
+                        .channel
+                        .clone()
+                        .or_else(|| route.and_then(|route| route.channel.clone()))
+                        .or_else(|| self.config.defaults.channel.clone())
+                } else {
+                    route
+                        .and_then(|route| route.channel.clone())
+                        .or_else(|| event.channel.clone())
+                        .or_else(|| self.config.defaults.channel.clone())
+                }
+                .ok_or_else(|| {
+                    format!("no channel configured for event {}", event.canonical_kind())
+                })?;
 
                 Ok(SinkTarget::DiscordChannel(channel))
             }
@@ -1412,6 +1423,72 @@ mod tests {
         assert_eq!(
             delivery.target,
             SinkTarget::DiscordChannel("monitor-channel".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_event_channel_takes_precedence_over_route_channel() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default-ch".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "custom".into(),
+                sink: "discord".into(),
+                filter: Default::default(),
+                channel: Some("route-ch".into()),
+                webhook: None,
+                slack_webhook: None,
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: None,
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+
+        // clawhip send --channel user-target --message "hello"
+        let event = IncomingEvent::custom(Some("user-target".into()), "hello".into());
+        let delivery = router.preview_delivery(&event).await.unwrap();
+        assert_eq!(
+            delivery.target,
+            SinkTarget::DiscordChannel("user-target".into()),
+            "custom event channel (from --channel flag) must override route channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_event_without_channel_falls_back_to_route_then_default() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default-ch".into()),
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "custom".into(),
+                sink: "discord".into(),
+                filter: Default::default(),
+                channel: Some("route-ch".into()),
+                webhook: None,
+                slack_webhook: None,
+                mention: None,
+                allow_dynamic_tokens: false,
+                format: None,
+                template: None,
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+
+        // clawhip send --message "hello" (no --channel)
+        let event = IncomingEvent::custom(None, "hello".into());
+        let delivery = router.preview_delivery(&event).await.unwrap();
+        assert_eq!(
+            delivery.target,
+            SinkTarget::DiscordChannel("route-ch".into()),
+            "custom event without explicit channel should fall back to route channel"
         );
     }
 
