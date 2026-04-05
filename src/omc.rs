@@ -170,7 +170,8 @@ cleanup() {{
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 clawhip emit agent.started --agent omc --session {session_esc} --project {project_esc}{emit_suffix} || true
-{env_prefix}omc {omc_flags} --worktree {workdir_esc}"#,
+cd {workdir_esc}
+{env_prefix}omc {omc_flags}"#,
         session_esc = shell_escape(session),
         project_esc = shell_escape(project),
         workdir_esc = shell_escape(&workdir.to_string_lossy()),
@@ -345,6 +346,34 @@ mod tests {
     fn shell_escape_quotes_strings_with_special_chars() {
         assert_eq!(shell_escape("hello world"), "'hello world'");
         assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn build_omc_shell_command_launches_from_workdir_without_worktree_flag() {
+        let args = OmcArgs {
+            prompt: Some("fix it".into()),
+            session: None,
+            workdir: None,
+            channel: Some("alerts".into()),
+            mention: Some("@ops".into()),
+            keywords: Vec::new(),
+            stale_minutes: None,
+            omc_flags: Some("--openclaw --madmax --foo".into()),
+            attach: false,
+            skip_hook_check: false,
+        };
+        let command = build_omc_shell_command(
+            "issue-9001",
+            "clawhip",
+            Path::new("/tmp/native launcher"),
+            "--openclaw --madmax --foo",
+            &args,
+        );
+
+        assert!(command.contains("cd '/tmp/native launcher'"));
+        assert!(command.contains("omc --openclaw --madmax --foo"));
+        assert!(!command.contains("--worktree"));
+        assert!(!command.contains("fix it"));
     }
 
     #[test]
