@@ -6,8 +6,8 @@ use crate::Result;
 use crate::event::{
     AgentEvent, CustomEvent, EventBody, EventEnvelope, EventMetadata, EventPriority,
     GitBranchChangedEvent, GitCommitAggregatedEvent, GitCommitEvent, GitHubCIEvent,
-    GitHubIssueEvent, GitHubPREvent, GitHubPRStatusEvent, TmuxKeywordAggregatedEvent,
-    TmuxKeywordEvent, TmuxStaleEvent, WorkspaceEvent,
+    GitHubIssueEvent, GitHubPREvent, GitHubPRStatusEvent, GitHubReleaseEvent,
+    TmuxKeywordAggregatedEvent, TmuxKeywordEvent, TmuxStaleEvent, WorkspaceEvent,
 };
 use crate::events::{IncomingEvent, normalize_event};
 
@@ -104,6 +104,15 @@ fn body_for(kind: &str, payload: &Value) -> Result<EventBody> {
         )?)),
         "github.issue-closed" => Ok(EventBody::GitHubIssueClosed(github_issue_event(payload)?)),
         "github.pr-status-changed" => github_pr_body(payload),
+        "github.release-published" => Ok(EventBody::GitHubReleasePublished(github_release_event(
+            payload,
+        )?)),
+        "github.release-prereleased" => Ok(EventBody::GitHubReleasePrereleased(
+            github_release_event(payload)?,
+        )),
+        "github.release-edited" => Ok(EventBody::GitHubReleaseEdited(github_release_event(
+            payload,
+        )?)),
         "github.ci-failed" => Ok(EventBody::GitHubCIFailed(GitHubCIEvent {
             repo: string_field(payload, "repo")?,
             number: payload.get("number").and_then(Value::as_u64),
@@ -225,6 +234,21 @@ fn github_issue_event(payload: &Value) -> Result<GitHubIssueEvent> {
         number: u64_field(payload, "number")?,
         title: string_field(payload, "title")?,
         comments: payload.get("comments").and_then(Value::as_u64),
+    })
+}
+
+fn github_release_event(payload: &Value) -> Result<GitHubReleaseEvent> {
+    Ok(GitHubReleaseEvent {
+        repo: string_field(payload, "repo")?,
+        tag: string_field(payload, "tag")?,
+        name: optional_string_field(payload, "name").unwrap_or_default(),
+        action: optional_string_field(payload, "action").unwrap_or_else(|| "published".to_string()),
+        is_prerelease: payload
+            .get("is_prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        url: optional_string_field(payload, "url").unwrap_or_default(),
+        actor: optional_string_field(payload, "actor"),
     })
 }
 
@@ -401,6 +425,7 @@ fn priority_for(kind: &str, payload: &Value) -> EventPriority {
         | "session.handoff-needed"
         | "tmux.stale"
         | "workspace.session.blocked" => EventPriority::High,
+        "github.release-published" | "github.release-prereleased" => EventPriority::High,
         "github.pr-status-changed"
             if optional_string_field(payload, "new_status")
                 .map(|status| status == "merged" || status == "closed")
@@ -860,5 +885,77 @@ mod tests {
 
         let envelope = from_incoming_event(&event).unwrap();
         assert_eq!(envelope.metadata.priority, EventPriority::High);
+    }
+
+    #[test]
+    fn maps_github_release_published_event() {
+        let event = IncomingEvent::github_release(
+            "published",
+            "Yeachan-Heo/clawhip".into(),
+            "v0.6.0".into(),
+            "clawhip 0.6.0".into(),
+            false,
+            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.0".into(),
+            Some("Yeachan-Heo".into()),
+            Some("releases".into()),
+        );
+
+        let envelope = from_incoming_event(&event).unwrap();
+        assert_eq!(envelope.source, "github");
+        assert_eq!(envelope.metadata.channel_hint.as_deref(), Some("releases"));
+        assert_eq!(envelope.metadata.priority, EventPriority::High);
+        match envelope.body {
+            EventBody::GitHubReleasePublished(body) => {
+                assert_eq!(body.repo, "Yeachan-Heo/clawhip");
+                assert_eq!(body.tag, "v0.6.0");
+                assert_eq!(body.name, "clawhip 0.6.0");
+                assert!(!body.is_prerelease);
+                assert_eq!(body.actor.as_deref(), Some("Yeachan-Heo"));
+            }
+            other => panic!("expected GitHubReleasePublished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_github_release_prereleased_event() {
+        let event = IncomingEvent::github_release(
+            "prereleased",
+            "Yeachan-Heo/clawhip".into(),
+            "v0.6.0-rc.1".into(),
+            "clawhip 0.6.0-rc.1".into(),
+            true,
+            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.0-rc.1".into(),
+            None,
+            None,
+        );
+
+        let envelope = from_incoming_event(&event).unwrap();
+        assert_eq!(envelope.metadata.priority, EventPriority::High);
+        match envelope.body {
+            EventBody::GitHubReleasePrereleased(body) => {
+                assert!(body.is_prerelease);
+                assert_eq!(body.tag, "v0.6.0-rc.1");
+                assert!(body.actor.is_none());
+            }
+            other => panic!("expected GitHubReleasePrereleased, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_github_release_edited_event() {
+        let event = IncomingEvent::github_release(
+            "edited",
+            "Yeachan-Heo/clawhip".into(),
+            "v0.5.4".into(),
+            "clawhip 0.5.4".into(),
+            false,
+            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.5.4".into(),
+            Some("Yeachan-Heo".into()),
+            None,
+        );
+
+        let envelope = from_incoming_event(&event).unwrap();
+        assert_eq!(envelope.metadata.priority, EventPriority::Normal);
+        assert!(matches!(envelope.body, EventBody::GitHubReleaseEdited(_)));
     }
 }

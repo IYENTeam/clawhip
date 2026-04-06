@@ -292,6 +292,47 @@ async fn post_github(
                 None,
             )))
         }
+        "release" if matches!(action, "published" | "released" | "prereleased" | "edited") => {
+            let repo = payload
+                .pointer("/repository/full_name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown/unknown")
+                .to_string();
+            let tag = payload
+                .pointer("/release/tag_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let name = payload
+                .pointer("/release/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let is_prerelease = payload
+                .pointer("/release/prerelease")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let url = payload
+                .pointer("/release/html_url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let actor = payload
+                .pointer("/sender/login")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+
+            Some(normalize_event(IncomingEvent::github_release(
+                action,
+                repo,
+                tag,
+                name,
+                is_prerelease,
+                url,
+                actor,
+                None,
+            )))
+        }
         "pull_request" => {
             let repo = payload
                 .pointer("/repository/full_name")

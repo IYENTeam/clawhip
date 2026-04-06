@@ -464,6 +464,43 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn github_release(
+        action: &str,
+        repo: String,
+        tag: String,
+        name: String,
+        is_prerelease: bool,
+        url: String,
+        actor: Option<String>,
+        channel: Option<String>,
+    ) -> Self {
+        let kind = match action {
+            "prereleased" => "github.release-prereleased",
+            "edited" => "github.release-edited",
+            _ => "github.release-published",
+        };
+        let mut payload = Map::new();
+        payload.insert("repo".to_string(), json!(repo));
+        payload.insert("tag".to_string(), json!(tag));
+        payload.insert("name".to_string(), json!(name));
+        payload.insert("action".to_string(), json!(action));
+        payload.insert("is_prerelease".to_string(), json!(is_prerelease));
+        payload.insert("url".to_string(), json!(url));
+        if let Some(actor) = actor {
+            payload.insert("actor".to_string(), json!(actor));
+        }
+
+        Self {
+            kind: kind.to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload: Value::Object(payload),
+        }
+    }
+
     pub fn tmux_keyword(
         session: String,
         keyword: String,
