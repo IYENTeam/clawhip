@@ -122,6 +122,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
+    /// Install and manage provider-native hook forwarding for Codex and Claude Code.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommands,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -346,19 +351,6 @@ impl NativeHookArgs {
     }
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct NativeInstallArgs {
-    /// Which provider config to install.
-    #[arg(long, value_enum, default_value = "all")]
-    pub provider: crate::native_hooks::NativeProvider,
-    /// Whether to install project-local or user-global provider files.
-    #[arg(long, value_enum, default_value = "project")]
-    pub scope: crate::native_hooks::NativeInstallScope,
-    /// Project root for project-scope installs (defaults to current directory).
-    #[arg(long)]
-    pub root: Option<PathBuf>,
-}
-
 #[derive(Debug, Clone, Subcommand)]
 pub enum CronCommands {
     /// Run one configured cron job immediately, which is useful for native system-cron entrypoints.
@@ -512,6 +504,53 @@ pub struct MemoryStatusArgs {
     /// Daily shard name to inspect under memory/daily/ (YYYY-MM-DD).
     #[arg(long)]
     pub date: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookProvider {
+    Codex,
+    #[value(name = "claude-code", alias = "claude")]
+    ClaudeCode,
+}
+
+impl HookProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookInstallScope {
+    Project,
+    Global,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum HooksCommands {
+    /// Install provider-native hook forwarding for Codex and/or Claude Code.
+    Install(HooksInstallArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HooksInstallArgs {
+    /// Install all supported providers.
+    #[arg(long, default_value_t = false)]
+    pub all: bool,
+    /// Install only the selected provider(s). Repeat to install multiple.
+    #[arg(long, value_enum, action = ArgAction::Append)]
+    pub provider: Vec<HookProvider>,
+    /// Install at the project root or in the user's global provider config.
+    #[arg(long, value_enum, default_value_t = HookInstallScope::Project)]
+    pub scope: HookInstallScope,
+    /// Project root for project-scoped install. Defaults to the current directory.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Overwrite clawhip-managed generated files when they already exist.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Default, Subcommand)]

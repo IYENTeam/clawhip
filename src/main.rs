@@ -27,7 +27,7 @@ use clap::Parser;
 
 use crate::cli::{
     AgentCommands, Cli, Commands, ConfigCommand, CronCommands, GitCommands, GithubCommands,
-    MemoryCommands, NativeCommands, PluginCommands, TmuxCommands,
+    HooksCommands, MemoryCommands, NativeCommands, PluginCommands, TmuxCommands,
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
@@ -234,7 +234,6 @@ async fn real_main() -> Result<()> {
                 println!("{}", serde_json::to_string(&response)?);
                 Ok(())
             }
-            NativeCommands::Install(args) => native_hooks::install(args),
         },
         Commands::Cron { command } => match command {
             CronCommands::Run { id } => {
@@ -282,6 +281,9 @@ async fn real_main() -> Result<()> {
         Commands::Memory { command } => match command {
             MemoryCommands::Init(args) => memory::init(args),
             MemoryCommands::Status(args) => memory::status(args),
+        },
+        Commands::Hooks { command } => match command {
+            HooksCommands::Install(args) => hooks::install(args),
         },
     }
 }
