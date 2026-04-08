@@ -81,11 +81,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: NativeCommands,
     },
-    /// Send native OMX hook-envelope events to the local daemon.
-    Omx {
-        #[command(subcommand)]
-        command: OmxCommands,
-    },
     /// Run configured cron jobs via clawhip.
     Cron {
         #[command(subcommand)]
@@ -124,8 +119,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: PluginCommands,
     },
-    /// Launch an OMC (oh-my-claudecode) session with clawhip monitoring.
-    Omc(OmcArgs),
     /// Manage configuration.
     Config {
         #[command(subcommand)]
@@ -136,13 +129,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Install and manage native OMC/OMX hooks.
+    /// Install and manage provider-native hook forwarding for Codex and Claude Code.
     Hooks {
         #[command(subcommand)]
         command: HooksCommands,
     },
-    /// Enable repo-local native hook forwarding for Claude Code and Codex.
-    EnableHook(EnableHookArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -365,21 +356,6 @@ impl NativeHookArgs {
     }
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct EnableHookArgs {
-    /// Repo root / current project directory (defaults to current directory).
-    #[arg(long)]
-    pub root: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Subcommand)]
-pub enum OmxCommands {
-    /// Forward an OMX v1 hook envelope to clawhip.
-    Hook(OmxHookArgs),
-    /// Launch an OMX session with clawhip monitoring.
-    Launch(OmxLaunchArgs),
-}
-
 #[derive(Debug, Clone, Subcommand)]
 pub enum CronCommands {
     /// Run one configured cron job immediately, which is useful for native system-cron entrypoints.
@@ -400,48 +376,6 @@ pub enum UpdateCommands {
     /// Show the current pending-update status from the daemon.
     Status,
 }
-
-#[derive(Debug, Clone, Args)]
-pub struct OmxHookArgs {
-    /// Provide the hook-envelope JSON inline.
-    #[arg(long)]
-    pub payload: Option<String>,
-    /// Read hook-envelope JSON from a file. Use "-" or omit to read stdin.
-    #[arg(long)]
-    pub file: Option<PathBuf>,
-}
-
-#[cfg_attr(test, allow(dead_code))]
-impl OmxHookArgs {
-    pub fn read_payload(&self, stdin: &mut dyn Read) -> crate::Result<serde_json::Value> {
-        match (&self.payload, &self.file) {
-            (Some(_), Some(_)) => {
-                Err("provide either --payload or --file for clawhip omx hook, not both".into())
-            }
-            (Some(payload), None) => Ok(serde_json::from_str(payload)?),
-            (None, Some(path)) => {
-                if path.as_os_str() == "-" {
-                    return Self::read_payload_from_stdin(stdin);
-                }
-                Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
-            }
-            (None, None) => Self::read_payload_from_stdin(stdin),
-        }
-    }
-
-    fn read_payload_from_stdin(stdin: &mut dyn Read) -> crate::Result<serde_json::Value> {
-        let mut buffer = String::new();
-        stdin.read_to_string(&mut buffer)?;
-        let trimmed = buffer.trim();
-        if trimmed.is_empty() {
-            return Err(
-                "clawhip omx hook expects a JSON payload via stdin, --payload, or --file".into(),
-            );
-        }
-        Ok(serde_json::from_str(trimmed)?)
-    }
-}
-
 #[derive(Debug, Subcommand)]
 pub enum TmuxCommands {
     Keyword {
@@ -588,95 +522,51 @@ pub struct MemoryStatusArgs {
     pub date: Option<String>,
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct OmcArgs {
-    /// The prompt to send to the OMC session after initialization.
-    pub prompt: Option<String>,
-    /// Tmux session name (defaults to worktree/directory basename).
-    #[arg(short = 's', long)]
-    pub session: Option<String>,
-    /// Working directory or worktree path (defaults to git toplevel or CWD).
-    #[arg(short = 'w', long)]
-    pub workdir: Option<PathBuf>,
-    /// Discord channel override.
-    #[arg(long)]
-    pub channel: Option<String>,
-    /// Discord mention override.
-    #[arg(long)]
-    pub mention: Option<String>,
-    /// Comma-separated keywords to monitor.
-    #[arg(long, value_delimiter = ',')]
-    pub keywords: Vec<String>,
-    /// Minutes before stale alert.
-    #[arg(long)]
-    pub stale_minutes: Option<u64>,
-    /// Extra flags passed to `omc` (default: --openclaw --madmax).
-    #[arg(long)]
-    pub omc_flags: Option<String>,
-    /// Attach to the tmux session after creation.
-    #[arg(long, default_value_t = false)]
-    pub attach: bool,
-    /// Skip the hook installation check.
-    #[arg(long, default_value_t = false)]
-    pub skip_hook_check: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookProvider {
+    Codex,
+    #[value(name = "claude-code", alias = "claude")]
+    ClaudeCode,
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct OmxLaunchArgs {
-    /// The prompt to send to the OMX session after initialization.
-    pub prompt: Option<String>,
-    /// Tmux session name (defaults to worktree/directory basename).
-    #[arg(short = 's', long)]
-    pub session: Option<String>,
-    /// Working directory or worktree path (defaults to git toplevel or CWD).
-    #[arg(short = 'w', long)]
-    pub workdir: Option<PathBuf>,
-    /// Discord channel override.
-    #[arg(long)]
-    pub channel: Option<String>,
-    /// Discord mention override.
-    #[arg(long)]
-    pub mention: Option<String>,
-    /// Comma-separated keywords to monitor.
-    #[arg(long, value_delimiter = ',')]
-    pub keywords: Vec<String>,
-    /// Minutes before stale alert.
-    #[arg(long)]
-    pub stale_minutes: Option<u64>,
-    /// Extra flags passed to `omx` (default: --madmax).
-    #[arg(long)]
-    pub omx_flags: Option<String>,
-    /// Attach to the tmux session after creation.
-    #[arg(long, default_value_t = false)]
-    pub attach: bool,
-    /// Skip the hook installation check.
-    #[arg(long, default_value_t = false)]
-    pub skip_hook_check: bool,
+impl HookProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookInstallScope {
+    Project,
+    Global,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum HooksCommands {
-    /// Install native hooks for OMC and/or OMX.
+    /// Install provider-native hook forwarding for Codex and/or Claude Code.
     Install(HooksInstallArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct HooksInstallArgs {
-    /// Install OMC hooks to ~/.claude/hooks/.
-    #[arg(long, default_value_t = false)]
-    pub omc: bool,
-    /// Install OMX hooks to .omx/hooks/.
-    #[arg(long, default_value_t = false)]
-    pub omx: bool,
-    /// Install both OMC and OMX hooks.
+    /// Install all supported providers.
     #[arg(long, default_value_t = false)]
     pub all: bool,
-    /// Override OMC hooks destination directory.
+    /// Install only the selected provider(s). Repeat to install multiple.
+    #[arg(long, value_enum, action = ArgAction::Append)]
+    pub provider: Vec<HookProvider>,
+    /// Install at the project root or in the user's global provider config.
+    #[arg(long, value_enum, default_value_t = HookInstallScope::Project)]
+    pub scope: HookInstallScope,
+    /// Project root for project-scoped install. Defaults to the current directory.
     #[arg(long)]
-    pub omc_dir: Option<PathBuf>,
-    /// Override OMX hooks destination directory.
-    #[arg(long)]
-    pub omx_dir: Option<PathBuf>,
+    pub root: Option<PathBuf>,
+    /// Overwrite clawhip-managed generated files when they already exist.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Default, Subcommand)]
@@ -1006,17 +896,24 @@ mod tests {
     }
 
     #[test]
-    fn parses_omx_hook_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "omx", "hook", "--file", "payload.json"]);
+    fn parses_native_hook_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "native",
+            "hook",
+            "--provider",
+            "codex",
+            "--file",
+            "payload.json",
+        ]);
 
-        let Commands::Omx { command } = cli.command.expect("omx command") else {
-            panic!("expected omx command");
+        let Commands::Native { command } = cli.command.expect("native command") else {
+            panic!("expected native command");
         };
 
-        let OmxCommands::Hook(args) = command else {
-            panic!("expected omx hook command");
-        };
+        let NativeCommands::Hook(args) = command;
 
+        assert_eq!(args.provider.as_deref(), Some("codex"));
         assert_eq!(
             args.file.as_deref(),
             Some(PathBuf::from("payload.json").as_path())
@@ -1036,11 +933,11 @@ mod tests {
     }
 
     #[test]
-    fn omx_hook_args_read_payload_from_inline_json() {
-        let args = OmxHookArgs {
-            payload: Some(
-                r#"{"schema_version":"1","context":{"normalized_event":"started"}}"#.into(),
-            ),
+    fn native_hook_args_read_payload_from_inline_json() {
+        let args = NativeHookArgs {
+            provider: None,
+            source: None,
+            payload: Some(r#"{"event_name":"SessionStart"}"#.into()),
             file: None,
         };
 
@@ -1048,16 +945,14 @@ mod tests {
             .read_payload(&mut std::io::Cursor::new(Vec::<u8>::new()))
             .expect("inline json payload");
 
-        assert_eq!(payload["schema_version"], serde_json::json!("1"));
-        assert_eq!(
-            payload["context"]["normalized_event"],
-            serde_json::json!("started")
-        );
+        assert_eq!(payload["event_name"], serde_json::json!("SessionStart"));
     }
 
     #[test]
-    fn omx_hook_args_reject_empty_input() {
-        let args = OmxHookArgs {
+    fn native_hook_args_reject_empty_input() {
+        let args = NativeHookArgs {
+            provider: None,
+            source: None,
             payload: None,
             file: None,
         };
@@ -1069,7 +964,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("clawhip omx hook expects a JSON payload")
+                .contains("clawhip native hook expects a JSON payload")
         );
     }
 
@@ -1155,7 +1050,19 @@ mod tests {
 
     #[test]
     fn parses_hooks_install_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "hooks", "install", "--omc", "--omx"]);
+        let cli = Cli::parse_from([
+            "clawhip",
+            "hooks",
+            "install",
+            "--provider",
+            "codex",
+            "--provider",
+            "claude-code",
+            "--scope",
+            "project",
+            "--root",
+            "/tmp/repo",
+        ]);
 
         let Commands::Hooks { command } = cli.command.expect("hooks command") else {
             panic!("expected hooks command");
@@ -1163,8 +1070,12 @@ mod tests {
 
         let HooksCommands::Install(args) = command;
 
-        assert!(args.omc);
-        assert!(args.omx);
+        assert_eq!(
+            args.provider,
+            vec![HookProvider::Codex, HookProvider::ClaudeCode]
+        );
+        assert_eq!(args.scope, HookInstallScope::Project);
+        assert_eq!(args.root, Some(PathBuf::from("/tmp/repo")));
         assert!(!args.all);
     }
 
@@ -1178,23 +1089,21 @@ mod tests {
 
         let HooksCommands::Install(args) = command;
 
-        assert!(!args.omc);
-        assert!(!args.omx);
+        assert!(args.provider.is_empty());
         assert!(args.all);
     }
 
     #[test]
-    fn parses_hooks_install_with_dir_overrides() {
+    fn parses_hooks_install_with_global_scope_and_force() {
         let cli = Cli::parse_from([
             "clawhip",
             "hooks",
             "install",
-            "--omc",
-            "--omc-dir",
-            "/tmp/claude-hooks",
-            "--omx",
-            "--omx-dir",
-            "/tmp/omx-hooks",
+            "--provider",
+            "claude",
+            "--scope",
+            "global",
+            "--force",
         ]);
 
         let Commands::Hooks { command } = cli.command.expect("hooks command") else {
@@ -1203,10 +1112,9 @@ mod tests {
 
         let HooksCommands::Install(args) = command;
 
-        assert!(args.omc);
-        assert!(args.omx);
-        assert_eq!(args.omc_dir, Some(PathBuf::from("/tmp/claude-hooks")));
-        assert_eq!(args.omx_dir, Some(PathBuf::from("/tmp/omx-hooks")));
+        assert_eq!(args.provider, vec![HookProvider::ClaudeCode]);
+        assert_eq!(args.scope, HookInstallScope::Global);
+        assert!(args.force);
     }
 
     #[test]

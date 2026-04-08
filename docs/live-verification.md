@@ -54,52 +54,38 @@ Operational flow:
 6. Confirm the merged status message arrives.
 7. Delete temporary branches if desired.
 
-### Native OMC / OMX contract
+### Provider-native Codex + Claude contract
 
-- legacy wrapper `agent.*` emits
-- normalized `session.*` contract from OMC/OMX payloads
+- shared event set: `SessionStart`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`
+- generic ingestion via `clawhip native hook --provider <codex|claude>`
 
 Operational flow:
 
-1. Emit a legacy compatibility event such as `clawhip emit agent.finished --agent omx --session issue-65 --project clawhip --elapsed 42`.
-2. Confirm clawhip accepts it and renders a stable lifecycle message.
-3. Post one representative OMC payload carrying `signal.routeKey` to `/event`.
-4. Confirm clawhip normalizes it into the expected `session.*` route family.
-5. Post one representative OMX payload carrying `context.normalized_event` to `/event`.
-6. Confirm the rendered message stays low-noise and includes normalized metadata like repo/session/issue/PR when present.
-7. Pipe the same OMX payload through the native OMX CLI ingress and confirm acceptance:
+1. Enable provider-native hooks at project or global scope in a real Codex workspace.
+2. Pipe one representative Codex payload through the generic native ingress:
 
 ```bash
 printf '%s\n' '{
-  "schema_version": "1",
-  "event": "session-start",
-  "timestamp": "2026-04-01T22:00:00Z",
-  "context": {
-    "normalized_event": "started",
-    "agent_name": "omx",
-    "session_name": "issue-65-native-sdk",
-    "status": "started"
-  }
-}' | clawhip omx hook
+  "session_id": "sess-65",
+  "cwd": "/repo/clawhip",
+  "event": "SessionStart"
+}' | clawhip native hook --provider codex
 ```
 
-8. Post the same OMX payload to the native OMX daemon ingress and confirm acceptance:
+3. Confirm clawhip accepts it and renders a stable lifecycle message with project/repo context.
+4. Repeat with a representative Claude payload:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:25294/api/omx/hook \
-  -H 'content-type: application/json' \
-  -d '{
-    "schema_version": "1",
-    "event": "session-start",
-    "timestamp": "2026-04-01T22:00:00Z",
-    "context": {
-      "normalized_event": "started",
-      "agent_name": "omx",
-      "session_name": "issue-65-native-sdk",
-      "status": "started"
-    }
-  }'
+printf '%s\n' '{
+  "session_id": "sess-65",
+  "cwd": "/repo/clawhip",
+  "event": "SessionStart"
+}' | clawhip native hook --provider claude
 ```
+
+5. Confirm both providers normalize into the same shared route family.
+6. Send representative payloads for `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `Stop`.
+7. Confirm additive augmentation still preserves the base routing keys when `.clawhip/hooks/` is enabled.
 
 ### tmux presets
 
@@ -109,7 +95,7 @@ curl -sS -X POST http://127.0.0.1:25294/api/omx/hook \
 
 Operational flow:
 
-1. Launch a native session via `clawhip omx launch ...` or `clawhip omc ...`.
+1. Launch a real Codex or Claude session with provider-native hooks enabled.
 2. Verify the pane is actually alive before trusting any `agent.started` message.
 3. Confirm routed delivery in Discord.
 4. Print a configured keyword (`error`, `FAILED`, `PR created`, etc) only when intentionally testing keyword behavior.

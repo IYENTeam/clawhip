@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- replace provider-specific wrapper/launcher docs with the shared provider-native Codex + Claude hook surface
+- document `clawhip native hook` as the generic ingress for shared hook payload verification
+- move public guidance to provider-native installation, `.clawhip/project.json`, and additive `.clawhip/hooks/` augmentation
+
+### Upgrade notes
+
+- if you were using wrapper-specific launch flows, migrate to provider-owned hook registration plus `clawhip native hook` for local testing
+- the shared v1 contract now documents only `SessionStart`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `Stop`
+
 ## 0.5.4 - 2026-04-05
 
 ### Highlights

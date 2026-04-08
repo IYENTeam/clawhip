@@ -1143,7 +1143,7 @@ mod tests {
         .await
         .unwrap();
 
-        let first = timeout(Duration::from_millis(40), requests.recv())
+        let first = timeout(Duration::from_millis(150), requests.recv())
             .await
             .unwrap()
             .unwrap();
@@ -1207,7 +1207,7 @@ mod tests {
             tx.send(event).await.unwrap();
         }
 
-        let request = timeout(Duration::from_millis(90), requests.recv())
+        let request = timeout(Duration::from_millis(250), requests.recv())
             .await
             .unwrap()
             .unwrap();

@@ -1,281 +1,267 @@
-#[allow(dead_code)]
-pub mod prompt_deliver;
-
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use serde_json::{Map, Value, json};
 
 use crate::Result;
-use crate::cli::HooksInstallArgs;
-
-const OMC_HOOK_PREFIX: &str = "clawhip-";
-const OMX_HOOK_NAME: &str = "clawhip.mjs";
-const OMX_SDK_NAME: &str = "clawhip-sdk.mjs";
-const HOOKS_TOML_NAME: &str = "hooks.toml";
+use crate::cli::{HookInstallScope, HookProvider, HooksInstallArgs};
+use crate::native_hooks::{
+    CLAUDE_SETTINGS_FILE, CLAWHIP_PROJECT_FILE, CODEX_HOOKS_FILE, HOOK_SCRIPT, SHARED_HOOK_EVENTS,
+    generated_hook_script,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallReport {
-    pub omc_files: Vec<PathBuf>,
-    pub omx_files: Vec<PathBuf>,
-    pub config_path: Option<PathBuf>,
+    pub generated_files: Vec<PathBuf>,
 }
 
 pub fn install(args: HooksInstallArgs) -> Result<()> {
-    let targets = resolve_targets(&args)?;
-    let report = run_install(&targets, &args)?;
+    let report = run_install(&args)?;
 
-    if !report.omc_files.is_empty() {
-        println!("Installed OMC hooks to {}:", targets.omc_dir.display());
-        for path in &report.omc_files {
-            println!("  {}", path.display());
-        }
+    println!("Installed provider-native hook forwarding:");
+    for path in &report.generated_files {
+        println!("  {}", path.display());
     }
-
-    if !report.omx_files.is_empty() {
-        println!("Installed OMX hooks to {}:", targets.omx_dir.display());
-        for path in &report.omx_files {
-            println!("  {}", path.display());
-        }
-    }
-
-    if let Some(config_path) = &report.config_path {
-        println!("Generated config: {}", config_path.display());
-    }
-
-    if report.omc_files.is_empty() && report.omx_files.is_empty() {
-        println!("Nothing installed. Use --omc, --omx, or --all to select targets.");
-    }
+    println!("Supported shared events: {}", SHARED_HOOK_EVENTS.join(", "));
+    println!("Ingress: clawhip native hook --provider <codex|claude-code>");
 
     Ok(())
 }
 
-struct InstallTargets {
-    install_omc: bool,
-    install_omx: bool,
-    omc_dir: PathBuf,
-    omx_dir: PathBuf,
-    config_dir: PathBuf,
-}
+fn run_install(args: &HooksInstallArgs) -> Result<InstallReport> {
+    let root = resolve_install_root(args)?;
+    let providers = selected_providers(args);
+    let mut generated_files = Vec::new();
 
-fn resolve_targets(args: &HooksInstallArgs) -> Result<InstallTargets> {
-    let install_omc = args.all || args.omc;
-    let install_omx = args.all || args.omx;
+    let hook_script_path = root.join(HOOK_SCRIPT);
+    write_generated_file(&hook_script_path, generated_hook_script(), args.force)?;
+    generated_files.push(hook_script_path.clone());
 
-    let home = home_dir()?;
-
-    let omc_dir = args
-        .omc_dir
-        .clone()
-        .unwrap_or_else(|| home.join(".claude").join("hooks"));
-
-    let omx_dir = args
-        .omx_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(".omx").join("hooks"));
-
-    let config_dir = home.join(".clawhip");
-
-    Ok(InstallTargets {
-        install_omc,
-        install_omx,
-        omc_dir,
-        omx_dir,
-        config_dir,
-    })
-}
-
-fn run_install(targets: &InstallTargets, _args: &HooksInstallArgs) -> Result<InstallReport> {
-    let mut report = InstallReport {
-        omc_files: Vec::new(),
-        omx_files: Vec::new(),
-        config_path: None,
-    };
-
-    if targets.install_omc {
-        report.omc_files = install_omc_hooks(&targets.omc_dir)?;
+    if args.scope == HookInstallScope::Project {
+        let metadata_path = ensure_project_metadata(&root, args.force)?;
+        generated_files.push(metadata_path);
     }
 
-    if targets.install_omx {
-        report.omx_files = install_omx_hooks(&targets.omx_dir)?;
+    for provider in providers {
+        let path = match provider {
+            HookProvider::Codex => write_codex_hooks(&root, &hook_script_path)?,
+            HookProvider::ClaudeCode => write_claude_settings(&root, &hook_script_path)?,
+        };
+        generated_files.push(path);
     }
 
-    if targets.install_omc || targets.install_omx {
-        report.config_path = Some(generate_hooks_config(&targets.config_dir)?);
-    }
-
-    Ok(report)
+    Ok(InstallReport { generated_files })
 }
 
-fn install_omc_hooks(dest: &Path) -> Result<Vec<PathBuf>> {
-    fs::create_dir_all(dest)?;
-
-    let hooks = [
-        (
-            format!("{OMC_HOOK_PREFIX}session-init.sh"),
-            omc_session_init_hook(),
-        ),
-        (
-            format!("{OMC_HOOK_PREFIX}session-stop.sh"),
-            omc_session_stop_hook(),
-        ),
-    ];
-
-    let mut installed = Vec::new();
-    for (name, content) in &hooks {
-        let path = dest.join(name);
-        fs::write(&path, content)?;
-        #[cfg(unix)]
-        set_executable(&path)?;
-        installed.push(path);
+fn resolve_install_root(args: &HooksInstallArgs) -> Result<PathBuf> {
+    match args.scope {
+        HookInstallScope::Project => Ok(args
+            .root
+            .clone()
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()?),
+        HookInstallScope::Global => home_dir(),
     }
-
-    Ok(installed)
 }
 
-fn install_omx_hooks(dest: &Path) -> Result<Vec<PathBuf>> {
-    fs::create_dir_all(dest)?;
-
-    let source_dir = bundled_omx_integrations_dir();
-    let mut installed = Vec::new();
-
-    let hook_path = dest.join(OMX_HOOK_NAME);
-    if source_dir.join("clawhip-hook.mjs").is_file() {
-        fs::copy(source_dir.join("clawhip-hook.mjs"), &hook_path)?;
+fn selected_providers(args: &HooksInstallArgs) -> Vec<HookProvider> {
+    if args.all || args.provider.is_empty() {
+        vec![HookProvider::Codex, HookProvider::ClaudeCode]
     } else {
-        fs::write(&hook_path, omx_hook_fallback())?;
+        args.provider.clone()
     }
-    installed.push(hook_path);
-
-    let lib_dir = dest.join("lib");
-    fs::create_dir_all(&lib_dir)?;
-    let sdk_path = lib_dir.join(OMX_SDK_NAME);
-    if source_dir.join("clawhip-sdk.mjs").is_file() {
-        fs::copy(source_dir.join("clawhip-sdk.mjs"), &sdk_path)?;
-    } else {
-        fs::write(&sdk_path, omx_sdk_fallback())?;
-    }
-    installed.push(sdk_path);
-
-    Ok(installed)
 }
 
-fn generate_hooks_config(config_dir: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(config_dir)?;
-    let config_path = config_dir.join(HOOKS_TOML_NAME);
+fn write_codex_hooks(root: &Path, hook_script_path: &Path) -> Result<PathBuf> {
+    let path = root.join(CODEX_HOOKS_FILE);
+    let mut document = read_json_object(&path)?;
+    let hooks = ensure_child_object(&mut document, "hooks")?;
+    let command = hook_command(hook_script_path, HookProvider::Codex);
 
-    if config_path.exists() {
-        return Ok(config_path);
+    for event in SHARED_HOOK_EVENTS {
+        upsert_hook_event(hooks, event, &command, codex_matcher_for(event));
     }
 
-    fs::write(&config_path, default_hooks_toml())?;
-    Ok(config_path)
+    write_json(&path, Value::Object(document))?;
+    Ok(path)
 }
 
-fn default_hooks_toml() -> &'static str {
-    r#"# clawhip hooks configuration
-# Generated by `clawhip hooks install`
+fn write_claude_settings(root: &Path, hook_script_path: &Path) -> Result<PathBuf> {
+    let path = root.join(CLAUDE_SETTINGS_FILE);
+    let mut document = read_json_object(&path)?;
+    let hooks = ensure_child_object(&mut document, "hooks")?;
+    let command = hook_command(hook_script_path, HookProvider::ClaudeCode);
 
-[hooks]
-enabled = ["session-init", "session-stop"]
+    for event in SHARED_HOOK_EVENTS {
+        upsert_hook_event(hooks, event, &command, claude_matcher_for(event));
+    }
 
-[hooks.session-idle]
-threshold_minutes = 30
-
-[discord]
-bidirectional = false
-"#
+    write_json(&path, Value::Object(document))?;
+    Ok(path)
 }
 
-fn omc_session_init_hook() -> &'static str {
-    r#"#!/usr/bin/env bash
-# clawhip OMC session-init hook
-# Emits session.started to the clawhip daemon
-set -euo pipefail
-
-CLAWHIP="${CLAWHIP_BIN:-clawhip}"
-
-if ! command -v "$CLAWHIP" &>/dev/null; then
-    exit 0
-fi
-
-SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
-PROJECT="$(basename "${PWD}")"
-
-"$CLAWHIP" emit session.started \
-    --agent omc \
-    --session "$SESSION_ID" \
-    --project "$PROJECT" 2>/dev/null || true
-"#
+fn codex_matcher_for(event: &str) -> Option<&'static str> {
+    match event {
+        "PreToolUse" | "PostToolUse" => Some(".*"),
+        _ => None,
+    }
 }
 
-fn omc_session_stop_hook() -> &'static str {
-    r#"#!/usr/bin/env bash
-# clawhip OMC session-stop hook
-# Emits session.finished to the clawhip daemon
-set -euo pipefail
-
-CLAWHIP="${CLAWHIP_BIN:-clawhip}"
-
-if ! command -v "$CLAWHIP" &>/dev/null; then
-    exit 0
-fi
-
-SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
-PROJECT="$(basename "${PWD}")"
-
-"$CLAWHIP" emit session.finished \
-    --agent omc \
-    --session "$SESSION_ID" \
-    --project "$PROJECT" 2>/dev/null || true
-"#
+fn claude_matcher_for(event: &str) -> Option<&'static str> {
+    match event {
+        "PreToolUse" | "PostToolUse" => Some(".*"),
+        _ => None,
+    }
 }
 
-fn omx_hook_fallback() -> &'static str {
-    r#"import { createClawhipOmxClient } from './lib/clawhip-sdk.mjs';
-
-const clientPromise = createClawhipOmxClient();
-
-export async function onHookEvent(event, sdk) {
-  const client = await clientPromise;
-  const result = await client.emitFromHookEvent(event, {
-    context: { agent_name: 'omx' },
-  });
-  return result;
-}
-"#
+fn hook_command(hook_script_path: &Path, provider: HookProvider) -> String {
+    format!(
+        "node {} --provider {}",
+        shell_escape(&hook_script_path.display().to_string()),
+        provider.as_str()
+    )
 }
 
-fn omx_sdk_fallback() -> &'static str {
-    r#"// clawhip OMX SDK — fallback stub
-// Install the full SDK with: clawhip hooks install --omx
-export function createClawhipOmxClient() {
-  const baseUrl = process.env.CLAWHIP_BASE_URL || 'http://127.0.0.1:3838';
-  return {
-    async emitFromHookEvent(event, opts) {
-      try {
-        const resp = await fetch(`${baseUrl}/api/omx/hook`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...event, ...opts }),
-        });
-        return await resp.json();
-      } catch { return { skipped: true, reason: 'clawhip unreachable' }; }
-    },
-  };
-}
-"#
+fn upsert_hook_event(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    command: &str,
+    matcher: Option<&str>,
+) {
+    let entry = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let groups = entry.as_array_mut().expect("hook event groups array");
+
+    if let Some(existing_group) = groups
+        .iter_mut()
+        .find(|group| matcher_matches(group, matcher))
+    {
+        let hooks = ensure_group_hooks(existing_group);
+        if !hooks.iter().any(|hook| hook_command_matches(hook, command)) {
+            hooks.push(json!({
+                "type": "command",
+                "command": command,
+            }));
+        }
+        return;
+    }
+
+    let mut group = Map::new();
+    if let Some(matcher) = matcher {
+        group.insert("matcher".into(), json!(matcher));
+    }
+    group.insert(
+        "hooks".into(),
+        json!([
+            {
+                "type": "command",
+                "command": command,
+            }
+        ]),
+    );
+    groups.push(Value::Object(group));
 }
 
-fn bundled_omx_integrations_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("integrations")
-        .join("omx")
+fn matcher_matches(group: &Value, matcher: Option<&str>) -> bool {
+    match (group.get("matcher").and_then(Value::as_str), matcher) {
+        (None, None) => true,
+        (Some(existing), Some(expected)) => existing == expected,
+        _ => false,
+    }
+}
+
+fn ensure_group_hooks(group: &mut Value) -> &mut Vec<Value> {
+    let object = group.as_object_mut().expect("hook event group object");
+    object
+        .entry("hooks")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("hooks array")
+}
+
+fn hook_command_matches(hook: &Value, command: &str) -> bool {
+    hook.get("type").and_then(Value::as_str) == Some("command")
+        && hook.get("command").and_then(Value::as_str) == Some(command)
+}
+
+fn ensure_project_metadata(root: &Path, force: bool) -> Result<PathBuf> {
+    let path = root.join(CLAWHIP_PROJECT_FILE);
+    let project_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let content = serde_json::to_string_pretty(&json!({
+        "project": project_name,
+        "repo_name": project_name,
+    }))? + "\n";
+    write_generated_file(&path, &content, force)?;
+    Ok(path)
+}
+
+fn write_generated_file(path: &Path, content: &str, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    #[cfg(unix)]
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext == "mjs")
+    {
+        set_executable(path)?;
+    }
+    Ok(())
+}
+
+fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
+    if !path.exists() {
+        return Ok(Map::new());
+    }
+
+    let content = fs::read_to_string(path)?;
+    let value: Value = serde_json::from_str(&content)?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("{} must contain a JSON object", path.display()).into())
+}
+
+fn ensure_child_object<'a>(
+    object: &'a mut Map<String, Value>,
+    key: &str,
+) -> Result<&'a mut Map<String, Value>> {
+    let entry = object
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    entry
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{key} must be a JSON object").into())
+}
+
+fn write_json(path: &Path, value: Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&value)? + "\n")?;
+    Ok(())
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn home_dir() -> Result<PathBuf> {
-    env::var("HOME")
+    std::env::var("HOME")
         .map(PathBuf::from)
         .map_err(|_| anyhow!("HOME environment variable not set").into())
 }
@@ -292,122 +278,61 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
-    fn temp_install_targets(dir: &Path) -> InstallTargets {
-        InstallTargets {
-            install_omc: true,
-            install_omx: true,
-            omc_dir: dir.join("claude-hooks"),
-            omx_dir: dir.join("omx-hooks"),
-            config_dir: dir.join("clawhip-config"),
+    #[test]
+    fn install_project_scope_writes_generic_provider_files() {
+        let dir = tempdir().expect("tempdir");
+        let report = run_install(&HooksInstallArgs {
+            all: true,
+            provider: Vec::new(),
+            scope: HookInstallScope::Project,
+            root: Some(dir.path().to_path_buf()),
+            force: false,
+        })
+        .expect("install");
+
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(HOOK_SCRIPT))
+        );
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(CLAWHIP_PROJECT_FILE))
+        );
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(CODEX_HOOKS_FILE))
+        );
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(CLAUDE_SETTINGS_FILE))
+        );
+    }
+
+    #[test]
+    fn codex_install_writes_shared_events() {
+        let dir = tempdir().expect("tempdir");
+        let path =
+            write_codex_hooks(dir.path(), &dir.path().join(HOOK_SCRIPT)).expect("codex hooks");
+        let document: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        for event in SHARED_HOOK_EVENTS {
+            assert!(document["hooks"][event].is_array(), "missing {event}");
         }
     }
 
     #[test]
-    fn install_omc_hooks_creates_shell_scripts() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let dest = tempdir.path().join("claude-hooks");
-
-        let installed = install_omc_hooks(&dest).expect("install omc hooks");
-
-        assert_eq!(installed.len(), 2);
-        assert!(dest.join("clawhip-session-init.sh").is_file());
-        assert!(dest.join("clawhip-session-stop.sh").is_file());
-
-        let content = fs::read_to_string(dest.join("clawhip-session-init.sh")).unwrap();
-        assert!(content.contains("session.started"));
-        assert!(content.contains("#!/usr/bin/env bash"));
-    }
-
-    #[test]
-    fn install_omx_hooks_creates_mjs_files() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let dest = tempdir.path().join("omx-hooks");
-
-        let installed = install_omx_hooks(&dest).expect("install omx hooks");
-
-        assert_eq!(installed.len(), 2);
-        assert!(dest.join("clawhip.mjs").is_file());
-        assert!(dest.join("lib").join("clawhip-sdk.mjs").is_file());
-    }
-
-    #[test]
-    fn generate_hooks_config_creates_toml() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let config_dir = tempdir.path().join("clawhip-config");
-
-        let path = generate_hooks_config(&config_dir).expect("generate config");
-
-        assert_eq!(path, config_dir.join("hooks.toml"));
-        assert!(path.is_file());
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("[hooks]"));
-        assert!(content.contains("session-init"));
-        assert!(content.contains("bidirectional = false"));
-    }
-
-    #[test]
-    fn generate_hooks_config_preserves_existing() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let config_dir = tempdir.path().join("clawhip-config");
-        fs::create_dir_all(&config_dir).unwrap();
-
-        let config_path = config_dir.join("hooks.toml");
-        fs::write(&config_path, "# custom config\n").unwrap();
-
-        let path = generate_hooks_config(&config_dir).expect("generate config");
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "# custom config\n");
-    }
-
-    #[test]
-    fn run_install_installs_both_targets() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let targets = temp_install_targets(tempdir.path());
-        let args = HooksInstallArgs {
-            omc: true,
-            omx: true,
-            all: false,
-            omc_dir: None,
-            omx_dir: None,
-        };
-
-        let report = run_install(&targets, &args).expect("run install");
-
-        assert!(!report.omc_files.is_empty());
-        assert!(!report.omx_files.is_empty());
-        assert!(report.config_path.is_some());
-    }
-
-    #[test]
-    fn resolve_targets_defaults_without_flags() {
-        let args = HooksInstallArgs {
-            omc: false,
-            omx: false,
-            all: false,
-            omc_dir: None,
-            omx_dir: None,
-        };
-
-        let targets = resolve_targets(&args).expect("resolve targets");
-        assert!(!targets.install_omc);
-        assert!(!targets.install_omx);
-    }
-
-    #[test]
-    fn resolve_targets_all_enables_both() {
-        let args = HooksInstallArgs {
-            omc: false,
-            omx: false,
-            all: true,
-            omc_dir: None,
-            omx_dir: None,
-        };
-
-        let targets = resolve_targets(&args).expect("resolve targets");
-        assert!(targets.install_omc);
-        assert!(targets.install_omx);
+    fn claude_install_writes_shared_events() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_claude_settings(dir.path(), &dir.path().join(HOOK_SCRIPT))
+            .expect("claude settings");
+        let document: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        for event in SHARED_HOOK_EVENTS {
+            assert!(document["hooks"][event].is_array(), "missing {event}");
+        }
     }
 }

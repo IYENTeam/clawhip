@@ -14,8 +14,6 @@ mod keyword_window;
 mod lifecycle;
 mod memory;
 mod native_hooks;
-mod omc;
-mod omx;
 mod plugins;
 mod render;
 mod router;
@@ -31,8 +29,7 @@ use clap::Parser;
 
 use crate::cli::{
     AgentCommands, Cli, Commands, ConfigCommand, CronCommands, GitCommands, GithubCommands,
-    HooksCommands, MemoryCommands, NativeCommands, OmxCommands, PluginCommands, TmuxCommands,
-    UpdateCommands,
+    HooksCommands, MemoryCommands, NativeCommands, PluginCommands, TmuxCommands, UpdateCommands,
 };
 use crate::client::DaemonClient;
 use crate::config::AppConfig;
@@ -256,7 +253,6 @@ async fn real_main() -> Result<()> {
                 Ok(())
             }
         },
-        Commands::Omc(args) => omc::run(args, config.as_ref()).await,
         Commands::Native { command } => match command {
             NativeCommands::Hook(args) => {
                 let client = DaemonClient::from_config(config.as_ref());
@@ -277,16 +273,6 @@ async fn real_main() -> Result<()> {
                 println!("{}", serde_json::to_string(&response)?);
                 Ok(())
             }
-        },
-        Commands::Omx { command } => match command {
-            OmxCommands::Hook(args) => {
-                let client = DaemonClient::from_config(config.as_ref());
-                let payload = args.read_payload(&mut std::io::stdin())?;
-                let response = client.send_omx_hook(&payload).await?;
-                println!("{}", serde_json::to_string(&response)?);
-                Ok(())
-            }
-            OmxCommands::Launch(args) => omx::run(args, config.as_ref()).await,
         },
         Commands::Cron { command } => match command {
             CronCommands::Run { id } => {
@@ -338,7 +324,6 @@ async fn real_main() -> Result<()> {
         Commands::Hooks { command } => match command {
             HooksCommands::Install(args) => hooks::install(args),
         },
-        Commands::EnableHook(args) => native_hooks::enable(args),
     }
 }
 

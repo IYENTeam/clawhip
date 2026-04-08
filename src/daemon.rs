@@ -16,7 +16,7 @@ use crate::VERSION;
 use crate::config::AppConfig;
 use crate::cron::CronSource;
 use crate::dispatch::Dispatcher;
-use crate::event::compat::{from_incoming_event, incoming_event_from_omx_hook_envelope_json};
+use crate::event::compat::from_incoming_event;
 use crate::events::{IncomingEvent, MessageFormat, normalize_event};
 use crate::native_hooks::incoming_event_from_native_hook_json;
 use crate::render::{DefaultRenderer, Renderer};
@@ -101,8 +101,6 @@ pub async fn run(
         .route("/events", post(post_event))
         .route("/native/hook", post(post_native_hook))
         .route("/api/native/hook", post(post_native_hook))
-        .route("/omx/hook", post(post_omx_hook))
-        .route("/api/omx/hook", post(post_omx_hook))
         .route("/api/tmux/register", post(register_tmux))
         .route("/api/tmux", get(list_tmux))
         .route("/github", post(post_github))
@@ -207,24 +205,6 @@ async fn post_native_hook(
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     let event = match incoming_event_from_native_hook_json(&payload) {
-        Ok(event) => normalize_event(event),
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"ok": false, "error": error.to_string()})),
-            )
-                .into_response();
-        }
-    };
-
-    accept_event(&state, event).await
-}
-
-async fn post_omx_hook(
-    State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> impl IntoResponse {
-    let event = match incoming_event_from_omx_hook_envelope_json(&payload) {
         Ok(event) => normalize_event(event),
         Err(error) => {
             return (
@@ -663,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_omx_hook_accepts_native_hook_envelope_and_queues_normalized_event() {
+    async fn post_native_hook_accepts_codex_payload_and_queues_normalized_event() {
         let (tx, mut rx) = mpsc::channel(1);
         let state = AppState {
             config: Arc::new(AppConfig::default()),
@@ -673,20 +653,17 @@ mod tests {
             pending_update: update::new_shared_pending_update(),
         };
         let payload = json!({
-            "schema_version": "1",
-            "event": "session-start",
-            "timestamp": "2026-04-01T22:00:00Z",
-            "context": {
-                "normalized_event": "started",
-                "agent_name": "omx",
-                "session_name": "issue-65-native-sdk",
-                "status": "started",
-                "repo_path": "/repo/clawhip",
-                "branch": "feat/issue-65-native-sdk"
+            "provider": "codex",
+            "event_name": "SessionStart",
+            "directory": "/repo/clawhip",
+            "cwd": "/repo/clawhip",
+            "event_payload": {
+                "session_id": "sess-65",
+                "cwd": "/repo/clawhip"
             }
         });
 
-        let response = post_omx_hook(State(state), Json(payload))
+        let response = post_native_hook(State(state), Json(payload))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -699,16 +676,13 @@ mod tests {
 
         let queued = rx.recv().await.unwrap();
         assert_eq!(queued.kind, "session.started");
-        assert_eq!(queued.payload["tool"], Value::from("omx"));
-        assert_eq!(
-            queued.payload["session_name"],
-            Value::from("issue-65-native-sdk")
-        );
+        assert_eq!(queued.payload["tool"], Value::from("codex"));
+        assert_eq!(queued.payload["session_id"], Value::from("sess-65"));
         assert_eq!(queued.payload["event_id"], Value::from(event_id));
     }
 
     #[tokio::test]
-    async fn post_omx_hook_rejects_missing_normalized_event() {
+    async fn post_native_hook_rejects_unsupported_event() {
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState {
             config: Arc::new(AppConfig::default()),
@@ -718,15 +692,13 @@ mod tests {
             pending_update: update::new_shared_pending_update(),
         };
         let payload = json!({
-            "schema_version": "1",
-            "event": "session-start",
-            "context": {
-                "agent_name": "omx",
-                "status": "started"
-            }
+            "provider": "claude-code",
+            "event_name": "Notification",
+            "directory": "/repo/clawhip",
+            "event_payload": {}
         });
 
-        let response = post_omx_hook(State(state), Json(payload))
+        let response = post_native_hook(State(state), Json(payload))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -736,7 +708,7 @@ mod tests {
         assert!(
             response_json["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("context.normalized_event"))
+                .is_some_and(|error| error.contains("unsupported native hook event"))
         );
     }
 
