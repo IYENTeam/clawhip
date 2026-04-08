@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_native_hook_accepts_provider_native_payload_and_queues_normalized_event() {
+    async fn post_native_hook_accepts_codex_payload_and_queues_normalized_event() {
         let (tx, mut rx) = mpsc::channel(1);
         let state = AppState {
             config: Arc::new(AppConfig::default()),
@@ -576,13 +576,11 @@ mod tests {
         let payload = json!({
             "provider": "codex",
             "event_name": "SessionStart",
-            "repo_path": "/repo/clawhip",
-            "worktree_path": "/repo/clawhip/.worktrees/issue-65-native-sdk",
-            "repo_name": "clawhip",
-            "project": "clawhip",
-            "session_id": "issue-65-native-sdk",
+            "directory": "/repo/clawhip",
+            "cwd": "/repo/clawhip",
             "event_payload": {
-                "source": "startup"
+                "session_id": "sess-65",
+                "cwd": "/repo/clawhip"
             }
         });
 
@@ -600,12 +598,12 @@ mod tests {
         let queued = rx.recv().await.unwrap();
         assert_eq!(queued.kind, "session.started");
         assert_eq!(queued.payload["tool"], Value::from("codex"));
-        assert_eq!(queued.payload["session_id"], Value::from("issue-65-native-sdk"));
+        assert_eq!(queued.payload["session_id"], Value::from("sess-65"));
         assert_eq!(queued.payload["event_id"], Value::from(event_id));
     }
 
     #[tokio::test]
-    async fn post_native_hook_rejects_missing_event_name() {
+    async fn post_native_hook_rejects_unsupported_event() {
         let (tx, _rx) = mpsc::channel(1);
         let state = AppState {
             config: Arc::new(AppConfig::default()),
@@ -614,7 +612,10 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
         };
         let payload = json!({
-            "provider": "claude"
+            "provider": "claude-code",
+            "event_name": "Notification",
+            "directory": "/repo/clawhip",
+            "event_payload": {}
         });
 
         let response = post_native_hook(State(state), Json(payload))
@@ -627,7 +628,7 @@ mod tests {
         assert!(
             response_json["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("event name"))
+                .is_some_and(|error| error.contains("unsupported native hook event"))
         );
     }
 
