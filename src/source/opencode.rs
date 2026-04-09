@@ -210,16 +210,18 @@ async fn poll_opencode(
 
         let snap = state.known_sessions.get_mut(&session.id).unwrap();
 
-        // Check for updates
+        // Check for updates — only clear idle alert if there are actually new messages
         if session.time.updated > snap.updated_ms {
+            let mut had_new_messages;
             snap.updated_ms = session.time.updated;
             snap.title = session.title.clone();
-            state.idle_alerted.remove(&session.id);
 
             // Fetch messages to see what changed
+            had_new_messages = false;
             if let Ok(messages) = fetch_messages(client, base_url, &session.id).await {
                 let new_count = messages.len();
                 if new_count > snap.message_count {
+                    had_new_messages = true;
                     // Report new messages
                     for msg in messages.iter().skip(snap.message_count) {
                         if msg.role == "assistant" {
@@ -281,6 +283,11 @@ async fn poll_opencode(
                     }
                     snap.message_count = new_count;
                 }
+            }
+
+            // Only clear idle alert if there were actually new messages
+            if had_new_messages {
+                state.idle_alerted.remove(&session.id);
             }
         }
 
