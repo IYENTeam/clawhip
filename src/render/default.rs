@@ -334,6 +334,19 @@ fn optional_u64_field(payload: &Value, key: &str) -> Option<u64> {
     payload.get(key).and_then(Value::as_u64)
 }
 
+fn optional_bool_field(payload: &Value, key: &str) -> Option<bool> {
+    match payload.get(key) {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(Value::Number(value)) => value.as_u64().map(|number| number != 0),
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "attached" => Some(true),
+            "0" | "false" | "no" | "detached" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn agent_optional_mention_prefix(payload: &Value) -> String {
     optional_string_field(payload, "mention")
         .map(|mention| format!("{mention} "))
@@ -459,6 +472,22 @@ fn session_detail_suffix(payload: &Value) -> String {
     if let Some(error_message) = optional_string_field(payload, "error_message") {
         parts.push(format!("error={error_message}"));
     }
+    if let Some(tmux_identity) = tmux_identity(payload) {
+        parts.push(format!("tmux={tmux_identity}"));
+    }
+    if let Some(tmux_pane_tty) = optional_string_field(payload, "tmux_pane_tty") {
+        parts.push(format!("pane_tty={tmux_pane_tty}"));
+    }
+    if let Some(tmux_client_count) = optional_u64_field(payload, "tmux_client_count") {
+        parts.push(format!("clients={tmux_client_count}"));
+    }
+    if let Some(tmux_attached) = optional_bool_field(payload, "tmux_attached") {
+        parts.push(if tmux_attached {
+            "attached".to_string()
+        } else {
+            "detached".to_string()
+        });
+    }
 
     if parts.is_empty() {
         String::new()
@@ -496,11 +525,46 @@ fn session_inline_suffix(payload: &Value) -> String {
     if let Some(error_message) = optional_string_field(payload, "error_message") {
         parts.push(format!("error: {error_message}"));
     }
+    if let Some(tmux_identity) = tmux_identity(payload) {
+        parts.push(format!("tmux {tmux_identity}"));
+    }
+    if let Some(tmux_pane_tty) = optional_string_field(payload, "tmux_pane_tty") {
+        parts.push(tmux_pane_tty);
+    }
+    if let Some(tmux_client_count) = optional_u64_field(payload, "tmux_client_count") {
+        parts.push(format!("{tmux_client_count} clients"));
+    }
+    if let Some(tmux_attached) = optional_bool_field(payload, "tmux_attached") {
+        parts.push(if tmux_attached {
+            "attached".to_string()
+        } else {
+            "detached".to_string()
+        });
+    }
 
     if parts.is_empty() {
         String::new()
     } else {
         format!(" · {}", parts.join(" · "))
+    }
+}
+
+fn tmux_identity(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(session) = optional_string_field(payload, "tmux_session") {
+        parts.push(session);
+    }
+    if let Some(window) = optional_string_field(payload, "tmux_window") {
+        parts.push(window);
+    }
+    if let Some(pane) = optional_string_field(payload, "tmux_pane") {
+        parts.push(pane);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(":"))
     }
 }
 
