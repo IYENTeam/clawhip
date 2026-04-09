@@ -904,20 +904,28 @@ fn render_opencode_event(kind: &str, payload: &Value, format: &MessageFormat) ->
         _ => "📋",
     };
 
+    let short_id = if session_id.len() > 12 { &session_id[..12] } else { &session_id };
+    let kind_label = kind.strip_prefix("opencode.").unwrap_or(kind);
+
     match format {
         MessageFormat::Compact => {
-            let short_id = if session_id.len() > 12 { &session_id[..12] } else { &session_id };
-            Ok(format!("{emoji} [{short_id}] {summary}"))
-        }
-        MessageFormat::Alert => {
-            let mut lines = vec![format!("{emoji} **{kind}**")];
+            let mut lines = vec![format!("{emoji} **{kind_label}**")];
             if !title.is_empty() {
                 lines.push(format!("📋 {title}"));
             }
+            lines.push(format!("🆔 `{short_id}`"));
+            Ok(lines.join("\n"))
+        }
+        MessageFormat::Alert => {
+            let mut lines = vec![format!("{emoji} **{kind_label}**")];
+            if !title.is_empty() {
+                lines.push(format!("📋 {title}"));
+            }
+            lines.push(format!("🆔 `{short_id}`"));
             lines.push(summary);
             Ok(lines.join("\n"))
         }
-        MessageFormat::Inline => Ok(format!("{emoji} {summary}")),
+        MessageFormat::Inline => Ok(format!("{emoji} [{short_id}] {summary}")),
         MessageFormat::Raw => Ok(serde_json::to_string_pretty(payload)?),
     }
 }
