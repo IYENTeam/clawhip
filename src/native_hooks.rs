@@ -889,6 +889,30 @@ mod tests {
     }
 
     #[test]
+    fn preserves_tmux_pane_metadata_from_native_hook_payloads() {
+        let event = incoming_event_from_native_hook_json(&json!({
+            "provider": "codex",
+            "directory": "/repo/clawhip",
+            "event_name": "SessionStart",
+            "tmux_session": "issue-180",
+            "tmux_window": "2",
+            "tmux_pane": "%11",
+            "tmux_pane_tty": "/dev/pts/42",
+            "tmux_attached": true,
+            "tmux_client_count": 3,
+            "event_payload": {}
+        }))
+        .expect("event");
+
+        assert_eq!(event.payload["tmux_session"], json!("issue-180"));
+        assert_eq!(event.payload["tmux_window"], json!("2"));
+        assert_eq!(event.payload["tmux_pane"], json!("%11"));
+        assert_eq!(event.payload["tmux_pane_tty"], json!("/dev/pts/42"));
+        assert_eq!(event.payload["tmux_attached"], json!(true));
+        assert_eq!(event.payload["tmux_client_count"], json!(3));
+    }
+
+    #[test]
     fn augmentation_can_add_context_without_overriding_base_fields() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "claude-code",
@@ -922,6 +946,8 @@ mod tests {
         let script = generated_hook_script();
         assert!(script.contains(".clawhip/hooks/augment"));
         assert!(script.contains("clawhip', ['native', 'hook'"));
+        assert!(script.contains("TMUX_PANE"));
+        assert!(script.contains("session_attached"));
     }
 
     #[test]
