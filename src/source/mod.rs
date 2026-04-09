@@ -5,11 +5,13 @@ use crate::events::IncomingEvent;
 
 pub mod git;
 pub mod github;
+pub mod opencode;
 pub mod tmux;
 pub mod workspace;
 
 pub use git::GitSource;
 pub use github::GitHubSource;
+pub use opencode::OpenCodeSource;
 pub use tmux::{
     RegisteredTmuxSession, SharedTmuxRegistry, TmuxSource, list_active_tmux_registrations,
 };

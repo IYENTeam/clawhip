@@ -210,6 +210,8 @@ pub struct MonitorConfig {
     pub tmux: TmuxMonitorConfig,
     #[serde(default)]
     pub workspace: Vec<WorkspaceMonitor>,
+    #[serde(default)]
+    pub opencode: OpenCodeMonitorConfig,
 }
 
 impl Default for MonitorConfig {
@@ -221,6 +223,7 @@ impl Default for MonitorConfig {
             git: GitMonitorConfig::default(),
             tmux: TmuxMonitorConfig::default(),
             workspace: Vec::new(),
+            opencode: OpenCodeMonitorConfig::default(),
         }
     }
 }
@@ -335,6 +338,21 @@ impl Default for WorkspaceMonitor {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenCodeMonitorConfig {
+    pub url: Option<String>,
+    #[serde(default = "default_opencode_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_opencode_idle_threshold")]
+    pub idle_threshold_secs: u64,
+    pub channel: Option<String>,
+    pub mention: Option<String>,
+    pub format: Option<MessageFormat>,
+}
+
+fn default_opencode_poll_interval() -> u64 { 10 }
+fn default_opencode_idle_threshold() -> u64 { 600 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronConfig {

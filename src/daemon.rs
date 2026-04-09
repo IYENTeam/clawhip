@@ -24,7 +24,7 @@ use crate::router::Router;
 use crate::sink::{DiscordSink, Sink, SlackSink};
 use crate::source::{
     GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
-    WorkspaceSource, list_active_tmux_registrations,
+    OpenCodeSource, WorkspaceSource, list_active_tmux_registrations,
 };
 use crate::update::{self, SharedPendingUpdate};
 
@@ -81,6 +81,7 @@ pub async fn run(
         tx.clone(),
     );
     spawn_source(WorkspaceSource::new(config.clone()), tx.clone());
+    spawn_source(OpenCodeSource::new(config.clone()), tx.clone());
     spawn_source(CronSource::new(config.clone(), cron_state_path), tx.clone());
 
     let pending_update = update::new_shared_pending_update();
