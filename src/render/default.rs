@@ -19,6 +19,9 @@ impl Renderer for DefaultRenderer {
         if event.canonical_kind().starts_with("workspace.") {
             return render_workspace_event(event.canonical_kind(), payload, format);
         }
+        if event.canonical_kind().starts_with("opencode.") {
+            return render_opencode_event(event.canonical_kind(), payload, format);
+        }
         if event.canonical_kind() == "git.commit"
             && let Some(rendered) = render_aggregated_git_commit(payload, format)?
         {
@@ -884,6 +887,38 @@ fn render_workspace_event(kind: &str, payload: &Value, format: &MessageFormat) -
             tool, workspace, state_file, session_suffix
         )),
         MessageFormat::Raw => serde_json::to_string_pretty(payload).map_err(Into::into),
+    }
+}
+
+fn render_opencode_event(kind: &str, payload: &Value, format: &MessageFormat) -> Result<String> {
+    let session_id = optional_string_field(payload, "session_id").unwrap_or_default();
+    let title = optional_string_field(payload, "title").unwrap_or_default();
+    let summary = optional_string_field(payload, "summary").unwrap_or_else(|| kind.to_string());
+
+    let emoji = match kind {
+        "opencode.session.created" => "🟢",
+        "opencode.session.ended" => "🔴",
+        "opencode.session.idle" => "💤",
+        "opencode.message.assistant" => "🤖",
+        "opencode.message.tool" => "🔧",
+        _ => "📋",
+    };
+
+    match format {
+        MessageFormat::Compact => {
+            let short_id = if session_id.len() > 12 { &session_id[..12] } else { &session_id };
+            Ok(format!("{emoji} [{short_id}] {summary}"))
+        }
+        MessageFormat::Alert => {
+            let mut lines = vec![format!("{emoji} **{kind}**")];
+            if !title.is_empty() {
+                lines.push(format!("📋 {title}"));
+            }
+            lines.push(summary);
+            Ok(lines.join("\n"))
+        }
+        MessageFormat::Inline => Ok(format!("{emoji} {summary}")),
+        MessageFormat::Raw => Ok(serde_json::to_string_pretty(payload)?),
     }
 }
 
