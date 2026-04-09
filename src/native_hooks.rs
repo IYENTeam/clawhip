@@ -15,8 +15,6 @@ pub const PROJECT_METADATA_RELATIVE_PATH: &str = CLAWHIP_PROJECT_FILE;
 #[allow(dead_code)]
 pub const NATIVE_HOOK_SCRIPT_RELATIVE_PATH: &str = HOOK_SCRIPT;
 pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
-#[allow(dead_code)]
-pub const CODEX_CONFIG_FILE: &str = ".codex/config.toml";
 pub const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
 pub const SHARED_HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
@@ -233,7 +231,6 @@ pub fn native_hooks_installed(workdir: &Path) -> bool {
     workdir.join(HOOK_SCRIPT).is_file()
         || workdir.join(CLAUDE_SETTINGS_FILE).is_file()
         || workdir.join(CODEX_HOOKS_FILE).is_file()
-        || workdir.join(CODEX_CONFIG_FILE).is_file()
 }
 
 pub fn generated_hook_script() -> &'static str {
@@ -648,5 +645,25 @@ mod tests {
         let script = generated_hook_script();
         assert!(script.contains(".clawhip/hooks/augment"));
         assert!(script.contains("clawhip', ['native', 'hook'"));
+    }
+
+    #[test]
+    fn native_hooks_installed_accepts_codex_hooks_json() {
+        let dir = tempdir().expect("tempdir");
+        let codex_hooks = dir.path().join(CODEX_HOOKS_FILE);
+        fs::create_dir_all(codex_hooks.parent().expect("parent")).unwrap();
+        fs::write(&codex_hooks, "{}\n").unwrap();
+
+        assert!(native_hooks_installed(dir.path()));
+    }
+
+    #[test]
+    fn native_hooks_installed_rejects_codex_config_toml_alone() {
+        let dir = tempdir().expect("tempdir");
+        let codex_config = dir.path().join(".codex/config.toml");
+        fs::create_dir_all(codex_config.parent().expect("parent")).unwrap();
+        fs::write(&codex_config, "[projects]\n").unwrap();
+
+        assert!(!native_hooks_installed(dir.path()));
     }
 }
