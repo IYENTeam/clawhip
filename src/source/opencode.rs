@@ -68,6 +68,7 @@ impl Source for OpenCodeSource {
 struct OpenCodeState {
     known_sessions: HashMap<String, SessionSnapshot>,
     idle_alerted: HashSet<String>,
+    warmed_up: bool,
 }
 
 struct SessionSnapshot {
@@ -134,26 +135,30 @@ async fn poll_opencode(
 
     let current_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
 
-    // Detect ended sessions
-    let ended: Vec<String> = state.known_sessions.keys()
-        .filter(|id| !current_ids.contains(*id))
-        .cloned()
-        .collect();
-    for id in ended {
-        let snap = state.known_sessions.remove(&id).unwrap();
-        state.idle_alerted.remove(&id);
-        let event = make_event(
-            "opencode.session.ended",
-            json!({
-                "session_id": id,
-                "title": snap.title,
-                "summary": "opencode session ended",
-            }),
-            channel,
-            mention,
-            format,
-        );
-        let _ = tx.send(event).await;
+    let is_warmup = !state.warmed_up;
+
+    // Detect ended sessions (skip during warmup)
+    if !is_warmup {
+        let ended: Vec<String> = state.known_sessions.keys()
+            .filter(|id| !current_ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in ended {
+            let snap = state.known_sessions.remove(&id).unwrap();
+            state.idle_alerted.remove(&id);
+            let event = make_event(
+                "opencode.session.ended",
+                json!({
+                    "session_id": id,
+                    "title": snap.title,
+                    "summary": "opencode session ended",
+                }),
+                channel,
+                mention,
+                format,
+            );
+            let _ = tx.send(event).await;
+        }
     }
 
     let now_ms = std::time::SystemTime::now()
@@ -165,25 +170,42 @@ async fn poll_opencode(
         let is_new = !state.known_sessions.contains_key(&session.id);
 
         if is_new {
-            // New session
             state.idle_alerted.remove(&session.id);
-            let event = make_event(
-                "opencode.session.created",
-                json!({
-                    "session_id": &session.id,
-                    "title": &session.title,
-                    "summary": format!("new session: {}", session.title),
-                }),
-                channel,
-                mention,
-                format,
-            );
-            let _ = tx.send(event).await;
+
+            // Only emit created event after warmup
+            if !is_warmup {
+                let event = make_event(
+                    "opencode.session.created",
+                    json!({
+                        "session_id": &session.id,
+                        "title": &session.title,
+                        "summary": format!("new session: {}", session.title),
+                    }),
+                    channel,
+                    mention,
+                    format,
+                );
+                let _ = tx.send(event).await;
+            }
+
+            // Fetch current message count so we don't replay old messages
+            let msg_count = fetch_messages(client, base_url, &session.id).await
+                .map(|msgs| msgs.len())
+                .unwrap_or(0);
+
             state.known_sessions.insert(session.id.clone(), SessionSnapshot {
                 updated_ms: session.time.updated,
-                message_count: 0,
+                message_count: msg_count,
                 title: session.title.clone(),
             });
+
+            // During warmup, mark already-idle sessions so we don't alert
+            if is_warmup {
+                let elapsed = now_ms.saturating_sub(session.time.updated);
+                if elapsed > idle_threshold.as_millis() as u64 {
+                    state.idle_alerted.insert(session.id.clone());
+                }
+            }
         }
 
         let snap = state.known_sessions.get_mut(&session.id).unwrap();
@@ -281,6 +303,11 @@ async fn poll_opencode(
             );
             let _ = tx.send(event).await;
         }
+    }
+
+    if is_warmup {
+        state.warmed_up = true;
+        eprintln!("clawhip opencode warmup complete: {} existing sessions", state.known_sessions.len());
     }
 
     Ok(())
