@@ -145,6 +145,13 @@ impl Dispatcher {
             }
         };
 
+        eprintln!(
+            "clawhip dispatch: event={} deliveries={} sinks={}",
+            event.canonical_kind(),
+            deliveries.len(),
+            deliveries.iter().map(|d| d.sink.as_str()).collect::<Vec<_>>().join(",")
+        );
+
         for delivery in deliveries {
             if self.should_batch_routine_delivery(&event, &delivery)
                 && let Some(routine_batcher) = self.routine_batcher.as_mut()

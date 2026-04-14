@@ -50,11 +50,19 @@ impl OpenClawSink {
         if event_kind.contains("pr-status-changed") {
             return "/hooks/pr-review";
         }
+        if event_kind.contains("issue-opened") {
+            return "/hooks/issue-triage";
+        }
         // Check batched event_kinds array
         if let Some(kinds) = payload.get("event_kinds").and_then(|v| v.as_array()) {
             for kind in kinds {
-                if kind.as_str().map(|s| s.contains("pr-status-changed")).unwrap_or(false) {
-                    return "/hooks/pr-review";
+                if let Some(s) = kind.as_str() {
+                    if s.contains("pr-status-changed") {
+                        return "/hooks/pr-review";
+                    }
+                    if s.contains("issue-opened") {
+                        return "/hooks/issue-triage";
+                    }
                 }
             }
         }
@@ -67,39 +75,53 @@ impl Sink for OpenClawSink {
     async fn send(&self, _target: &SinkTarget, message: &SinkMessage) -> Result<()> {
         let hooks_path = Self::hooks_path_for_event(&message.event_kind, &message.payload);
 
-        let text = if hooks_path == "/hooks/pr-review" {
-            // Build a complete review prompt with PR data extracted from content
-            format!(
-                "PR 자동 리뷰를 실행하세요.\n\n\
-                skills/pr-review/SKILL.md를 읽고 정확히 따르세요.\n\n\
-                ### PR 이벤트 정보\n\
-                {}\n\n\
-                위 정보에서 repo와 PR 번호를 파싱해서 gh pr diff를 실행하세요.",
-                message.content
-            )
-        } else {
-            format!(
-                "[clawhip:{}] {}\n\nPayload: {}",
-                message.event_kind,
-                message.content,
-                serde_json::to_string_pretty(&message.payload).unwrap_or_default()
-            )
-        };
-
         let url = format!(
             "{}{}",
             self.gateway_url.trim_end_matches('/'),
             hooks_path
         );
 
+        let body = if hooks_path == "/hooks/pr-review" {
+            // Send structured JSON so messageTemplate can use {{repo}}, {{number}}, etc.
+            let mut pr_body = json!({
+                "text": message.content,
+                "content": message.content,
+                "mode": "now"
+            });
+            // Copy payload fields (repo, number, title, etc.) to top level
+            if let Some(obj) = message.payload.as_object() {
+                for (k, v) in obj {
+                    pr_body[k] = v.clone();
+                }
+            }
+            // Also check batched payloads for event_kinds
+            if let Some(kinds) = message.payload.get("event_kinds").and_then(|v| v.as_array()) {
+                pr_body["event_kinds"] = json!(kinds);
+            }
+            pr_body
+        } else {
+            json!({
+                "text": format!(
+                    "[clawhip:{}] {}\n\nPayload: {}",
+                    message.event_kind,
+                    message.content,
+                    serde_json::to_string_pretty(&message.payload).unwrap_or_default()
+                ),
+                "mode": "now"
+            })
+        };
+
+        // Log which hooks path is being used
+        eprintln!(
+            "clawhip openclaw sink: event_kind={} hooks_path={} url={}",
+            message.event_kind, hooks_path, url
+        );
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.gateway_token))
-            .json(&json!({
-                "text": text,
-                "mode": "now"
-            }))
+            .json(&body)
             .send()
             .await
             .map_err(|e| format!("OpenClaw request to {hooks_path} failed: {e}"))?;
