@@ -52,7 +52,7 @@ impl Sink for OpenClawSink {
             serde_json::to_string_pretty(&message.payload).unwrap_or_default()
         );
 
-        let url = format!("{}/api/cron/wake", self.gateway_url.trim_end_matches('/'));
+        let url = format!("{}/hooks/wake", self.gateway_url.trim_end_matches('/'));
 
         let response = self
             .client
