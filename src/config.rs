@@ -39,6 +39,8 @@ pub struct ProvidersConfig {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub slack: SlackConfig,
+    #[serde(default)]
+    pub openclaw: OpenClawConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +53,12 @@ pub struct DiscordConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SlackConfig {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenClawConfig {
+    pub gateway_url: Option<String>,
+    pub gateway_token: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -68,9 +76,15 @@ impl DiscordConfig {
     }
 }
 
+impl OpenClawConfig {
+    pub fn is_configured(&self) -> bool {
+        crate::sink::OpenClawSink::is_configured(&self.gateway_url, &self.gateway_token)
+    }
+}
+
 impl ProvidersConfig {
     fn is_empty(&self) -> bool {
-        self.discord.is_empty() && self.slack.is_empty()
+        self.discord.is_empty() && self.slack.is_empty() && !self.openclaw.is_configured()
     }
 }
 
@@ -619,7 +633,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack") {
+            if !matches!(sink, "discord" | "slack" | "openclaw") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -662,6 +676,16 @@ impl AppConfig {
                     if !has_slack_webhook {
                         return Err(format!(
                             "route #{} ({}) must set webhook or slack_webhook when sink = \"slack\"",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                }
+                "openclaw" => {
+                    if !self.providers.openclaw.is_configured() {
+                        return Err(format!(
+                            "route #{} ({}) uses openclaw sink but [providers.openclaw] is not configured",
                             index + 1,
                             route.event
                         )

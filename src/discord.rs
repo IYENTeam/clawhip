@@ -105,6 +105,9 @@ impl DiscordClient {
                 SinkTarget::SlackWebhook(_) => {
                     return Err("cannot send Slack webhook via Discord client".into());
                 }
+                SinkTarget::OpenClaw => {
+                    return Err("cannot send OpenClaw event via Discord client".into());
+                }
             };
 
             match result {
@@ -286,6 +289,7 @@ fn target_rate_limit_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordChannel(channel_id) => format!("discord:channel:{channel_id}"),
         SinkTarget::DiscordWebhook(webhook_url) => format!("discord:webhook:{webhook_url}"),
         SinkTarget::SlackWebhook(webhook_url) => format!("slack:webhook:{webhook_url}"),
+        SinkTarget::OpenClaw => "openclaw:gateway".to_string(),
     }
 }
 

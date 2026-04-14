@@ -720,6 +720,7 @@ fn sink_target_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordChannel(channel) => format!("discord-channel:{channel}"),
         SinkTarget::DiscordWebhook(webhook) => format!("discord-webhook:{webhook}"),
         SinkTarget::SlackWebhook(webhook) => format!("slack-webhook:{webhook}"),
+        SinkTarget::OpenClaw => "openclaw".to_string(),
     }
 }
 

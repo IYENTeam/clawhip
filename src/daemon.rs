@@ -21,7 +21,7 @@ use crate::events::{IncomingEvent, MessageFormat, normalize_event};
 use crate::native_hooks::incoming_event_from_native_hook_json;
 use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
-use crate::sink::{DiscordSink, Sink, SlackSink};
+use crate::sink::{DiscordSink, OpenClawSink, Sink, SlackSink};
 use crate::source::{
     GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
     OpenCodeSource, WorkspaceSource, list_active_tmux_registrations,
@@ -54,6 +54,17 @@ pub async fn run(
         Box::new(DiscordSink::from_config(config.clone())?),
     );
     sinks.insert("slack".into(), Box::new(SlackSink::default()));
+    if config.providers.openclaw.is_configured() {
+        let oc = &config.providers.openclaw;
+        sinks.insert(
+            "openclaw".into(),
+            Box::new(OpenClawSink::new(
+                oc.gateway_url.clone().unwrap_or_default(),
+                oc.gateway_token.clone().unwrap_or_default(),
+            )),
+        );
+        println!("clawhip: openclaw sink registered");
+    }
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));

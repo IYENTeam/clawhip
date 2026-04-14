@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod openclaw;
 pub mod slack;
 
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use crate::events::MessageFormat;
 use serde_json::Value;
 
 pub use discord::DiscordSink;
+pub use openclaw::OpenClawSink;
 pub use slack::SlackSink;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -15,6 +17,7 @@ pub enum SinkTarget {
     DiscordChannel(String),
     DiscordWebhook(String),
     SlackWebhook(String),
+    OpenClaw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
