@@ -322,6 +322,14 @@ async fn post_github(
                 None,
             )))
         }
+        "issues" if action == "reopened" => {
+            Some(normalize_event(IncomingEvent::github_issue_opened(
+                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
+                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
+                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+                None,
+            )))
+        }
         "issues" if action == "closed" => {
             Some(normalize_event(IncomingEvent::github_issue_closed(
                 payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
@@ -408,6 +416,15 @@ async fn post_github(
                     title,
                     "open".to_string(),
                     "closed".to_string(),
+                    url,
+                    None,
+                ))),
+                "reopened" => Some(normalize_event(IncomingEvent::github_pr_status_changed(
+                    repo,
+                    number,
+                    title,
+                    "closed".to_string(),
+                    "opened".to_string(),
                     url,
                     None,
                 ))),
