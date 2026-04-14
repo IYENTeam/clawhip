@@ -303,21 +303,30 @@ async fn post_github(
 
     let event = match event_name {
         "issues" if action == "opened" => {
-            Some(normalize_event(IncomingEvent::github_issue_opened(
-                payload
-                    .pointer("/repository/full_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown/unknown")
-                    .to_string(),
-                payload
-                    .pointer("/issue/number")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-                payload
-                    .pointer("/issue/title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Untitled issue")
-                    .to_string(),
+            let labels: Vec<String> = payload
+                .pointer("/issue/labels")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(|l| l.get("name").and_then(Value::as_str).map(String::from)).collect())
+                .unwrap_or_default();
+            let body = payload
+                .pointer("/issue/body")
+                .and_then(Value::as_str)
+                .map(|b| if b.len() > 200 { format!("{}...", &b[..200]) } else { b.to_string() });
+            Some(normalize_event(IncomingEvent::github_issue_opened_rich(
+                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
+                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
+                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled issue").to_string(),
+                payload.pointer("/issue/html_url").and_then(Value::as_str).map(String::from),
+                labels,
+                body,
+                None,
+            )))
+        }
+        "issues" if action == "closed" => {
+            Some(normalize_event(IncomingEvent::github_issue_closed(
+                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
+                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
+                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
                 None,
             )))
         }

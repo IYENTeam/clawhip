@@ -292,6 +292,35 @@ impl IncomingEvent {
         }
     }
 
+    pub fn github_issue_opened_rich(
+        repo: String,
+        number: u64,
+        title: String,
+        html_url: Option<String>,
+        labels: Vec<String>,
+        body_preview: Option<String>,
+        channel: Option<String>,
+    ) -> Self {
+        let mut p = json!({ "repo": repo, "number": number, "title": title });
+        if let Some(url) = html_url {
+            p["html_url"] = json!(url);
+        }
+        if !labels.is_empty() {
+            p["labels"] = json!(labels);
+        }
+        if let Some(body) = body_preview {
+            p["body_preview"] = json!(body);
+        }
+        Self {
+            kind: "github.issue-opened".to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload: p,
+        }
+    }
+
     pub fn github_issue_commented(
         repo: String,
         number: u64,
