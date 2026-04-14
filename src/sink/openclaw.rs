@@ -41,10 +41,22 @@ impl OpenClawSink {
     }
 }
 
+impl OpenClawSink {
+    /// Determine the hooks path based on event kind.
+    /// PR events go to /hooks/pr-review (agent action),
+    /// everything else goes to /hooks/wake (wake action).
+    fn hooks_path_for_event(event_kind: &str) -> &'static str {
+        if event_kind.contains("pr-status-changed") {
+            "/hooks/pr-review"
+        } else {
+            "/hooks/wake"
+        }
+    }
+}
+
 #[async_trait]
 impl Sink for OpenClawSink {
     async fn send(&self, _target: &SinkTarget, message: &SinkMessage) -> Result<()> {
-        // Use OpenClaw cron wake API to inject a system event into the main session
         let text = format!(
             "[clawhip:{}] {}\n\nPayload: {}",
             message.event_kind,
@@ -52,7 +64,12 @@ impl Sink for OpenClawSink {
             serde_json::to_string_pretty(&message.payload).unwrap_or_default()
         );
 
-        let url = format!("{}/hooks/wake", self.gateway_url.trim_end_matches('/'));
+        let hooks_path = Self::hooks_path_for_event(&message.event_kind);
+        let url = format!(
+            "{}{}",
+            self.gateway_url.trim_end_matches('/'),
+            hooks_path
+        );
 
         let response = self
             .client
@@ -64,7 +81,7 @@ impl Sink for OpenClawSink {
             }))
             .send()
             .await
-            .map_err(|e| format!("OpenClaw wake request failed: {e}"))?;
+            .map_err(|e| format!("OpenClaw request to {hooks_path} failed: {e}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -72,7 +89,7 @@ impl Sink for OpenClawSink {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to read body>".to_string());
-            return Err(format!("OpenClaw wake failed: {status} — {body}").into());
+            return Err(format!("OpenClaw {hooks_path} failed: {status} — {body}").into());
         }
 
         Ok(())
