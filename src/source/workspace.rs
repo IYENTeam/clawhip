@@ -448,6 +448,9 @@ fn diff_workspace_state(
         other if other.ends_with("idle-notif-cooldown.json") => {
             diff_idle_notif_state(matched, previous, current)
         }
+        ".status-file" | ".close-status" => {
+            diff_status_tag_file(matched, previous, current)
+        }
         _ => None,
     }?;
 
@@ -824,6 +827,45 @@ fn diff_idle_notif_state(
     )])
 }
 
+fn diff_status_tag_file(
+    matched: &WorkspaceMatch<'_>,
+    previous: Option<&Value>,
+    current: Option<&Value>,
+) -> Option<Vec<IncomingEvent>> {
+    let current = current?;
+    let current_str = current.as_str().unwrap_or("").trim();
+    let previous_str = previous.and_then(|v| v.as_str()).unwrap_or("").trim();
+    if current_str == previous_str || current_str.is_empty() {
+        return None;
+    }
+
+    // Match STATUS: or CLOSE: tags
+    let status = if current_str.contains("STATUS: CONTINUE") || current_str.contains("CLOSE: CONTINUE") {
+        Some("continue")
+    } else if current_str.contains("STATUS: BLOCKED") || current_str.contains("CLOSE: BLOCKED") {
+        Some("blocked")
+    } else if current_str.contains("STATUS: DONE") || current_str.contains("CLOSE: DONE") {
+        Some("done")
+    } else {
+        None
+    };
+
+    let status = status?;
+    let kind = format!("workspace.status.{}.{}", matched.workspace_name, status);
+
+    let mut payload = base_payload(matched, current)
+        .with_string("summary", Some(format!("agent status: {}", status)))
+        .into_object();
+    payload.insert("content".into(), Value::String(current_str.to_string()));
+    payload.insert("status".into(), Value::String(status.to_string()));
+
+    Some(vec![workspace_event(
+        matched,
+        &kind,
+        Value::Object(payload),
+    )])
+}
+
 fn workspace_event(matched: &WorkspaceMatch<'_>, kind: &str, payload: Value) -> IncomingEvent {
     IncomingEvent::workspace(kind.to_string(), payload, matched.monitor.channel.clone())
         .with_mention(matched.monitor.mention.clone())
@@ -841,12 +883,22 @@ fn base_payload(matched: &WorkspaceMatch<'_>, current: &Value) -> PayloadBuilder
         .with_string("state_family", Some(matched.state_family.clone()))
         .with_string("state_dir", Some(matched.watch_dir.display().to_string()))
         .with_string("state_file", Some(matched.state_file.clone()))
+        .with_string("path", Some(matched.state_file.clone()))
         .with_string("tool", string_value(current, "tool"))
 }
 
 fn read_json(path: &Path) -> Option<Value> {
     let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    // Try JSON first; fall back to plain-text String for non-JSON files
+    // (e.g. .status-file, .close-status)
+    serde_json::from_str(&raw).ok().or_else(|| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(Value::String(trimmed.to_string()))
+        }
+    })
 }
 
 fn debounce_for_path(config: &AppConfig, path: &Path) -> Duration {
