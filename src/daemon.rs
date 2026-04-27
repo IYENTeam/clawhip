@@ -21,7 +21,7 @@ use crate::events::{IncomingEvent, MessageFormat, normalize_event};
 use crate::native_hooks::incoming_event_from_native_hook_json;
 use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
-use crate::sink::{DiscordSink, OpenClawSink, Sink, SlackSink};
+use crate::sink::{DiscordSink, IyenSystemSink, OpenClawSink, Sink, SlackSink};
 use crate::source::{
     GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
     OpenCodeSource, WorkspaceSource, list_active_tmux_registrations,
@@ -64,6 +64,17 @@ pub async fn run(
             )),
         );
         println!("clawhip: openclaw sink registered");
+    }
+    if config.providers.iyensystem.is_configured() {
+        let iy = &config.providers.iyensystem;
+        sinks.insert(
+            "iyensystem".into(),
+            Box::new(IyenSystemSink::new(
+                iy.url.clone().unwrap_or_default(),
+                iy.auth_token.clone().unwrap_or_default(),
+            )),
+        );
+        println!("clawhip: iyensystem sink registered");
     }
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());

@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod iyensystem;
 pub mod openclaw;
 pub mod slack;
 
@@ -9,6 +10,7 @@ use crate::events::MessageFormat;
 use serde_json::Value;
 
 pub use discord::DiscordSink;
+pub use iyensystem::IyenSystemSink;
 pub use openclaw::OpenClawSink;
 pub use slack::SlackSink;
 
@@ -18,6 +20,7 @@ pub enum SinkTarget {
     DiscordWebhook(String),
     SlackWebhook(String),
     OpenClaw,
+    IyenSystem,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
