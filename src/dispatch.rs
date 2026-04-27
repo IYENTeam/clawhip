@@ -728,6 +728,7 @@ fn sink_target_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordWebhook(webhook) => format!("discord-webhook:{webhook}"),
         SinkTarget::SlackWebhook(webhook) => format!("slack-webhook:{webhook}"),
         SinkTarget::OpenClaw => "openclaw".to_string(),
+        SinkTarget::IyenSystem => "iyensystem".to_string(),
     }
 }
 

@@ -161,8 +161,12 @@ impl Router {
             .await?;
         match delivery.target {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
-            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) | SinkTarget::OpenClaw => {
-                Err("matched route uses a webhook or openclaw instead of a channel".into())
+            SinkTarget::DiscordWebhook(_)
+            | SinkTarget::SlackWebhook(_)
+            | SinkTarget::OpenClaw
+            | SinkTarget::IyenSystem => {
+                Err("matched route uses a webhook, openclaw, or iyensystem instead of a channel"
+                    .into())
             }
         }
     }
@@ -232,6 +236,7 @@ impl Router {
                     .into()
                 }),
             "openclaw" => Ok(SinkTarget::OpenClaw),
+            "iyensystem" => Ok(SinkTarget::IyenSystem),
             other => Err(format!(
                 "unsupported sink '{other}' for event {}",
                 event.canonical_kind()

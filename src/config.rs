@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
 use crate::events::MessageFormat;
 use crate::source::workspace::{default_workspace_debounce_ms, default_workspace_watch_dirs};
+use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -41,6 +41,8 @@ pub struct ProvidersConfig {
     pub slack: SlackConfig,
     #[serde(default)]
     pub openclaw: OpenClawConfig,
+    #[serde(default)]
+    pub iyensystem: IyenSystemConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -58,6 +60,12 @@ pub struct SlackConfig {}
 pub struct OpenClawConfig {
     pub gateway_url: Option<String>,
     pub gateway_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IyenSystemConfig {
+    pub url: Option<String>,
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,9 +90,18 @@ impl OpenClawConfig {
     }
 }
 
+impl IyenSystemConfig {
+    pub fn is_configured(&self) -> bool {
+        crate::sink::IyenSystemSink::is_configured(&self.url, &self.auth_token)
+    }
+}
+
 impl ProvidersConfig {
     fn is_empty(&self) -> bool {
-        self.discord.is_empty() && self.slack.is_empty() && !self.openclaw.is_configured()
+        self.discord.is_empty()
+            && self.slack.is_empty()
+            && !self.openclaw.is_configured()
+            && !self.iyensystem.is_configured()
     }
 }
 
@@ -365,8 +382,12 @@ pub struct OpenCodeMonitorConfig {
     pub format: Option<MessageFormat>,
 }
 
-fn default_opencode_poll_interval() -> u64 { 10 }
-fn default_opencode_idle_threshold() -> u64 { 600 }
+fn default_opencode_poll_interval() -> u64 {
+    10
+}
+fn default_opencode_idle_threshold() -> u64 {
+    600
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronConfig {
@@ -633,7 +654,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack" | "openclaw") {
+            if !matches!(sink, "discord" | "slack" | "openclaw" | "iyensystem") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -686,6 +707,16 @@ impl AppConfig {
                     if !self.providers.openclaw.is_configured() {
                         return Err(format!(
                             "route #{} ({}) uses openclaw sink but [providers.openclaw] is not configured",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                }
+                "iyensystem" => {
+                    if !self.providers.iyensystem.is_configured() {
+                        return Err(format!(
+                            "route #{} ({}) uses iyensystem sink but [providers.iyensystem] is not configured",
                             index + 1,
                             route.event
                         )
@@ -1124,6 +1155,7 @@ mod tests {
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                ..ProvidersConfig::default()
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
@@ -1361,6 +1393,7 @@ message = " ping "
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                ..ProvidersConfig::default()
             },
             cron: CronConfig {
                 poll_interval_secs: 30,
