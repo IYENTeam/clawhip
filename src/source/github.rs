@@ -58,8 +58,11 @@ impl Source for GitHubSource {
 
 struct GitHubRepoState {
     issues: HashMap<u64, IssueSnapshot>,
+    issues_ready: bool,
     prs: HashMap<u64, PullRequestSnapshot>,
+    prs_ready: bool,
     ci: HashMap<String, GitHubCISnapshot>,
+    ci_ready: bool,
 }
 
 #[derive(Clone)]
@@ -174,43 +177,71 @@ async fn poll_github(
         };
 
         let previous = state.get(&repo.path);
-        let issues = match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
-            Ok(issues) => issues,
-            Err(error) => {
-                eprintln!(
-                    "clawhip source GitHub issue processing failed for {}: {error}",
-                    repo.path
-                );
-                previous
-                    .map(|entry| entry.issues.clone())
-                    .unwrap_or_default()
-            }
-        };
-        let prs =
+        let (issues, issues_ready) =
+            match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!(
+                        "clawhip source GitHub issue processing failed for {}: {error}",
+                        repo.path
+                    );
+                    (
+                        previous
+                            .map(|entry| entry.issues.clone())
+                            .unwrap_or_default(),
+                        previous.map(|entry| entry.issues_ready).unwrap_or(false),
+                    )
+                }
+            };
+        let (prs, prs_ready) =
             match poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await {
-                Ok(prs) => prs,
+                Ok(result) => result,
                 Err(error) => {
                     eprintln!(
                         "clawhip source GitHub pull request processing failed for {}: {error}",
                         repo.path
                     );
-                    previous.map(|entry| entry.prs.clone()).unwrap_or_default()
+                    (
+                        previous.map(|entry| entry.prs.clone()).unwrap_or_default(),
+                        previous.map(|entry| entry.prs_ready).unwrap_or(false),
+                    )
                 }
             };
-        let ci = match poll_ci_statuses(config, github_client, repo, &snapshot, previous, &prs, tx)
-            .await
+        let (ci, ci_ready) = match poll_ci_statuses(
+            config,
+            github_client,
+            repo,
+            &snapshot,
+            previous,
+            &prs,
+            tx,
+        )
+        .await
         {
-            Ok(ci) => ci,
+            Ok(result) => result,
             Err(error) => {
                 eprintln!(
                     "clawhip source GitHub CI processing failed for {}: {error}",
                     repo.path
                 );
-                previous.map(|entry| entry.ci.clone()).unwrap_or_default()
+                (
+                    previous.map(|entry| entry.ci.clone()).unwrap_or_default(),
+                    previous.map(|entry| entry.ci_ready).unwrap_or(false),
+                )
             }
         };
 
-        state.insert(repo.path.clone(), GitHubRepoState { issues, prs, ci });
+        state.insert(
+            repo.path.clone(),
+            GitHubRepoState {
+                issues,
+                issues_ready,
+                prs,
+                prs_ready,
+                ci,
+                ci_ready,
+            },
+        );
     }
 
     Ok(())
@@ -223,38 +254,53 @@ async fn poll_issues(
     snapshot: &GitSnapshot,
     previous: Option<&GitHubRepoState>,
     tx: &mpsc::Sender<IncomingEvent>,
-) -> Result<HashMap<u64, IssueSnapshot>> {
+) -> Result<(HashMap<u64, IssueSnapshot>, bool)> {
     if !repo.emit_issue_opened {
-        return Ok(previous
-            .map(|entry| entry.issues.clone())
-            .unwrap_or_default());
+        return Ok((
+            previous
+                .map(|entry| entry.issues.clone())
+                .unwrap_or_default(),
+            previous.map(|entry| entry.issues_ready).unwrap_or(false),
+        ));
     }
 
     let Some(client) = github_client else {
-        return Ok(previous
-            .map(|entry| entry.issues.clone())
-            .unwrap_or_default());
+        return Ok((
+            previous
+                .map(|entry| entry.issues.clone())
+                .unwrap_or_default(),
+            previous.map(|entry| entry.issues_ready).unwrap_or(false),
+        ));
     };
 
     match fetch_issues(client, &config.monitors.github_api_base, repo, snapshot).await {
         Ok(issues) => {
-            if let Some(previous) = previous {
+            if let Some(previous) = previous.filter(|entry| entry.issues_ready) {
                 for event in
                     collect_issue_events(repo, &snapshot.repo_name, &previous.issues, &issues)
                 {
                     send_event(tx, event).await?;
                 }
+            } else {
+                eprintln!(
+                    "clawhip source GitHub issue baseline established for {}; suppressing initial {} issue events",
+                    repo.path,
+                    issues.len()
+                );
             }
-            Ok(issues)
+            Ok((issues, true))
         }
         Err(error) => {
             eprintln!(
                 "clawhip source GitHub issue polling failed for {}: {error}",
                 repo.path
             );
-            Ok(previous
-                .map(|entry| entry.issues.clone())
-                .unwrap_or_default())
+            Ok((
+                previous
+                    .map(|entry| entry.issues.clone())
+                    .unwrap_or_default(),
+                previous.map(|entry| entry.issues_ready).unwrap_or(false),
+            ))
         }
     }
 }
@@ -266,18 +312,24 @@ async fn poll_pull_requests(
     snapshot: &GitSnapshot,
     previous: Option<&GitHubRepoState>,
     tx: &mpsc::Sender<IncomingEvent>,
-) -> Result<HashMap<u64, PullRequestSnapshot>> {
+) -> Result<(HashMap<u64, PullRequestSnapshot>, bool)> {
     if !repo.emit_pr_status {
-        return Ok(previous.map(|entry| entry.prs.clone()).unwrap_or_default());
+        return Ok((
+            previous.map(|entry| entry.prs.clone()).unwrap_or_default(),
+            previous.map(|entry| entry.prs_ready).unwrap_or(false),
+        ));
     }
 
     let Some(client) = github_client else {
-        return Ok(previous.map(|entry| entry.prs.clone()).unwrap_or_default());
+        return Ok((
+            previous.map(|entry| entry.prs.clone()).unwrap_or_default(),
+            previous.map(|entry| entry.prs_ready).unwrap_or(false),
+        ));
     };
 
     match fetch_pull_requests(client, &config.monitors.github_api_base, repo, snapshot).await {
         Ok(prs) => {
-            if let Some(previous) = previous {
+            if let Some(previous) = previous.filter(|entry| entry.prs_ready) {
                 for (number, pr) in &prs {
                     match previous.prs.get(number) {
                         Some(old) if old.status == pr.status => {}
@@ -302,15 +354,24 @@ async fn poll_pull_requests(
                         }
                     }
                 }
+            } else {
+                eprintln!(
+                    "clawhip source GitHub PR baseline established for {}; suppressing initial {} PR events",
+                    repo.path,
+                    prs.len()
+                );
             }
-            Ok(prs)
+            Ok((prs, true))
         }
         Err(error) => {
             eprintln!(
                 "clawhip source GitHub polling failed for {}: {error}",
                 repo.path
             );
-            Ok(previous.map(|entry| entry.prs.clone()).unwrap_or_default())
+            Ok((
+                previous.map(|entry| entry.prs.clone()).unwrap_or_default(),
+                previous.map(|entry| entry.prs_ready).unwrap_or(false),
+            ))
         }
     }
 }
@@ -323,13 +384,19 @@ async fn poll_ci_statuses(
     previous: Option<&GitHubRepoState>,
     prs: &HashMap<u64, PullRequestSnapshot>,
     tx: &mpsc::Sender<IncomingEvent>,
-) -> Result<HashMap<String, GitHubCISnapshot>> {
+) -> Result<(HashMap<String, GitHubCISnapshot>, bool)> {
     if !repo.emit_pr_status {
-        return Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default());
+        return Ok((
+            previous.map(|entry| entry.ci.clone()).unwrap_or_default(),
+            previous.map(|entry| entry.ci_ready).unwrap_or(false),
+        ));
     }
 
     let Some(client) = github_client else {
-        return Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default());
+        return Ok((
+            previous.map(|entry| entry.ci.clone()).unwrap_or_default(),
+            previous.map(|entry| entry.ci_ready).unwrap_or(false),
+        ));
     };
 
     let open_prs = prs
@@ -348,19 +415,28 @@ async fn poll_ci_statuses(
     .await
     {
         Ok(ci) => {
-            let empty = HashMap::new();
-            let previous_ci = previous.map(|entry| &entry.ci).unwrap_or(&empty);
-            for event in collect_ci_events(repo, &snapshot.repo_name, previous_ci, &ci) {
-                send_event(tx, event).await?;
+            if let Some(previous) = previous.filter(|entry| entry.ci_ready) {
+                for event in collect_ci_events(repo, &snapshot.repo_name, &previous.ci, &ci) {
+                    send_event(tx, event).await?;
+                }
+            } else {
+                eprintln!(
+                    "clawhip source GitHub CI baseline established for {}; suppressing initial {} CI events",
+                    repo.path,
+                    ci.len()
+                );
             }
-            Ok(ci)
+            Ok((ci, true))
         }
         Err(error) => {
             eprintln!(
                 "clawhip source GitHub CI polling failed for {}: {error}",
                 repo.path
             );
-            Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default())
+            Ok((
+                previous.map(|entry| entry.ci.clone()).unwrap_or_default(),
+                previous.map(|entry| entry.ci_ready).unwrap_or(false),
+            ))
         }
     }
 }
@@ -1044,18 +1120,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let prs = HashMap::new();
 
-        let ci = poll_ci_statuses(&config, Some(&client), &repo, &snapshot, None, &prs, &tx)
-            .await
-            .unwrap();
+        let (ci, ci_ready) =
+            poll_ci_statuses(&config, Some(&client), &repo, &snapshot, None, &prs, &tx)
+                .await
+                .unwrap();
 
         assert_eq!(ci.len(), 1);
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.canonical_kind(), "github.ci-failed");
-        assert_eq!(event.payload["repo"], json!("claw-code"));
-        assert_eq!(event.payload["workflow"], json!("Rust CI"));
-        assert_eq!(event.payload["branch"], json!("main"));
-        assert_eq!(event.payload["run_id"], json!("24007460067"));
-        assert!(event.payload.get("number").is_none());
+        assert!(ci_ready);
+        assert!(rx.try_recv().is_err());
 
         let req = server.await.unwrap();
         assert!(req.contains("GET /repos/ultraworkers/claw-code/actions/runs?"));
