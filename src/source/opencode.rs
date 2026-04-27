@@ -35,12 +35,9 @@ impl Source for OpenCodeSource {
             None => return Ok(()), // no config → silent exit
         };
 
-        let poll_interval = Duration::from_secs(
-            self.config.monitors.opencode.poll_interval_secs.max(1),
-        );
-        let idle_threshold = Duration::from_secs(
-            self.config.monitors.opencode.idle_threshold_secs,
-        );
+        let poll_interval =
+            Duration::from_secs(self.config.monitors.opencode.poll_interval_secs.max(1));
+        let idle_threshold = Duration::from_secs(self.config.monitors.opencode.idle_threshold_secs);
         let channel = self.config.monitors.opencode.channel.clone();
         let mention = self.config.monitors.opencode.mention.clone();
         let format = self.config.monitors.opencode.format.clone();
@@ -54,9 +51,17 @@ impl Source for OpenCodeSource {
 
         loop {
             if let Err(e) = poll_opencode(
-                &client, &url, &tx, &mut state,
-                idle_threshold, &channel, &mention, &format,
-            ).await {
+                &client,
+                &url,
+                &tx,
+                &mut state,
+                idle_threshold,
+                &channel,
+                &mention,
+                &format,
+            )
+            .await
+            {
                 eprintln!("clawhip opencode poll error: {e}");
             }
             sleep(poll_interval).await;
@@ -78,6 +83,7 @@ struct SessionSnapshot {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)] // shape mirrors opencode's `/session` JSON; unused fields kept for forward-compat.
 struct SessionInfo {
     id: String,
     #[serde(default)]
@@ -89,6 +95,7 @@ struct SessionInfo {
 }
 
 #[derive(Deserialize, Default)]
+#[allow(dead_code)] // mirrors opencode's session.time JSON shape.
 struct SessionTime {
     #[serde(default)]
     created: u64,
@@ -114,6 +121,7 @@ struct MessagePart {
     tool_invocation: Option<Value>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_opencode(
     client: &Client,
     base_url: &str,
@@ -139,7 +147,9 @@ async fn poll_opencode(
 
     // Detect ended sessions (skip during warmup)
     if !is_warmup {
-        let ended: Vec<String> = state.known_sessions.keys()
+        let ended: Vec<String> = state
+            .known_sessions
+            .keys()
             .filter(|id| !current_ids.contains(*id))
             .cloned()
             .collect();
@@ -189,15 +199,19 @@ async fn poll_opencode(
             }
 
             // Fetch current message count so we don't replay old messages
-            let msg_count = fetch_messages(client, base_url, &session.id).await
+            let msg_count = fetch_messages(client, base_url, &session.id)
+                .await
                 .map(|msgs| msgs.len())
                 .unwrap_or(0);
 
-            state.known_sessions.insert(session.id.clone(), SessionSnapshot {
-                updated_ms: session.time.updated,
-                message_count: msg_count,
-                title: session.title.clone(),
-            });
+            state.known_sessions.insert(
+                session.id.clone(),
+                SessionSnapshot {
+                    updated_ms: session.time.updated,
+                    message_count: msg_count,
+                    title: session.title.clone(),
+                },
+            );
 
             // During warmup, mark already-idle sessions so we don't alert
             if is_warmup {
@@ -225,21 +239,31 @@ async fn poll_opencode(
                     // Report new messages
                     for msg in messages.iter().skip(snap.message_count) {
                         if msg.role == "assistant" {
-                            let text = msg.parts.iter()
+                            let text = msg
+                                .parts
+                                .iter()
                                 .filter_map(|p| {
-                                    if p.kind == "text" { p.text.clone() }
-                                    else { None }
+                                    if p.kind == "text" {
+                                        p.text.clone()
+                                    } else {
+                                        None
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            let tools: Vec<String> = msg.parts.iter()
+                            let tools: Vec<String> = msg
+                                .parts
+                                .iter()
                                 .filter_map(|p| {
                                     if p.kind == "tool-invocation" {
-                                        p.tool_invocation.as_ref()
+                                        p.tool_invocation
+                                            .as_ref()
                                             .and_then(|ti| ti.get("toolName"))
                                             .and_then(|v| v.as_str())
                                             .map(String::from)
-                                    } else { None }
+                                    } else {
+                                        None
+                                    }
                                 })
                                 .collect();
 
@@ -293,7 +317,9 @@ async fn poll_opencode(
 
         // Idle detection
         let elapsed_ms = now_ms.saturating_sub(snap.updated_ms);
-        if elapsed_ms > idle_threshold.as_millis() as u64 && !state.idle_alerted.contains(&session.id) {
+        if elapsed_ms > idle_threshold.as_millis() as u64
+            && !state.idle_alerted.contains(&session.id)
+        {
             state.idle_alerted.insert(session.id.clone());
             let idle_mins = elapsed_ms / 60_000;
             let event = make_event(
@@ -314,7 +340,10 @@ async fn poll_opencode(
 
     if is_warmup {
         state.warmed_up = true;
-        eprintln!("clawhip opencode warmup complete: {} existing sessions", state.known_sessions.len());
+        eprintln!(
+            "clawhip opencode warmup complete: {} existing sessions",
+            state.known_sessions.len()
+        );
     }
 
     Ok(())

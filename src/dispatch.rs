@@ -149,7 +149,11 @@ impl Dispatcher {
             "clawhip dispatch: event={} deliveries={} sinks={}",
             event.canonical_kind(),
             deliveries.len(),
-            deliveries.iter().map(|d| d.sink.as_str()).collect::<Vec<_>>().join(",")
+            deliveries
+                .iter()
+                .map(|d| d.sink.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         );
 
         for delivery in deliveries {

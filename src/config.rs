@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Result;
 use crate::events::MessageFormat;
 use crate::source::workspace::{default_workspace_debounce_ms, default_workspace_watch_dirs};
-use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {

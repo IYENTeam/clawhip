@@ -23,8 +23,8 @@ use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
 use crate::sink::{DiscordSink, IyenSystemSink, OpenClawSink, Sink, SlackSink};
 use crate::source::{
-    GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
-    OpenCodeSource, WorkspaceSource, list_active_tmux_registrations,
+    GitHubSource, GitSource, OpenCodeSource, RegisteredTmuxSession, SharedTmuxRegistry, Source,
+    TmuxSource, WorkspaceSource, list_active_tmux_registrations,
 };
 use crate::update::{self, SharedPendingUpdate};
 
@@ -317,17 +317,41 @@ async fn post_github(
             let labels: Vec<String> = payload
                 .pointer("/issue/labels")
                 .and_then(Value::as_array)
-                .map(|arr| arr.iter().filter_map(|l| l.get("name").and_then(Value::as_str).map(String::from)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l.get("name").and_then(Value::as_str).map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let body = payload
                 .pointer("/issue/body")
                 .and_then(Value::as_str)
-                .map(|b| if b.len() > 200 { format!("{}...", &b[..200]) } else { b.to_string() });
+                .map(|b| {
+                    if b.len() > 200 {
+                        format!("{}...", &b[..200])
+                    } else {
+                        b.to_string()
+                    }
+                });
             Some(normalize_event(IncomingEvent::github_issue_opened_rich(
-                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
-                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
-                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled issue").to_string(),
-                payload.pointer("/issue/html_url").and_then(Value::as_str).map(String::from),
+                payload
+                    .pointer("/repository/full_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown/unknown")
+                    .to_string(),
+                payload
+                    .pointer("/issue/number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                payload
+                    .pointer("/issue/title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled issue")
+                    .to_string(),
+                payload
+                    .pointer("/issue/html_url")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 labels,
                 body,
                 None,
@@ -335,17 +359,39 @@ async fn post_github(
         }
         "issues" if action == "reopened" => {
             Some(normalize_event(IncomingEvent::github_issue_opened(
-                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
-                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
-                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+                payload
+                    .pointer("/repository/full_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown/unknown")
+                    .to_string(),
+                payload
+                    .pointer("/issue/number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                payload
+                    .pointer("/issue/title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled")
+                    .to_string(),
                 None,
             )))
         }
         "issues" if action == "closed" => {
             Some(normalize_event(IncomingEvent::github_issue_closed(
-                payload.pointer("/repository/full_name").and_then(Value::as_str).unwrap_or("unknown/unknown").to_string(),
-                payload.pointer("/issue/number").and_then(Value::as_u64).unwrap_or_default(),
-                payload.pointer("/issue/title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+                payload
+                    .pointer("/repository/full_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown/unknown")
+                    .to_string(),
+                payload
+                    .pointer("/issue/number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                payload
+                    .pointer("/issue/title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled")
+                    .to_string(),
                 None,
             )))
         }

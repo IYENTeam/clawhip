@@ -130,10 +130,7 @@ mod tests {
             &Some("http://localhost".into()),
             &None
         ));
-        assert!(!IyenSystemSink::is_configured(
-            &None,
-            &Some("token".into())
-        ));
+        assert!(!IyenSystemSink::is_configured(&None, &Some("token".into())));
         assert!(IyenSystemSink::is_configured(
             &Some("http://localhost".into()),
             &Some("token".into())

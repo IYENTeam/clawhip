@@ -75,11 +75,7 @@ impl Sink for OpenClawSink {
     async fn send(&self, _target: &SinkTarget, message: &SinkMessage) -> Result<()> {
         let hooks_path = Self::hooks_path_for_event(&message.event_kind, &message.payload);
 
-        let url = format!(
-            "{}{}",
-            self.gateway_url.trim_end_matches('/'),
-            hooks_path
-        );
+        let url = format!("{}{}", self.gateway_url.trim_end_matches('/'), hooks_path);
 
         let body = if hooks_path == "/hooks/pr-review" {
             // Send structured JSON so messageTemplate can use {{repo}}, {{number}}, etc.
@@ -95,7 +91,11 @@ impl Sink for OpenClawSink {
                 }
             }
             // Also check batched payloads for event_kinds
-            if let Some(kinds) = message.payload.get("event_kinds").and_then(|v| v.as_array()) {
+            if let Some(kinds) = message
+                .payload
+                .get("event_kinds")
+                .and_then(|v| v.as_array())
+            {
                 pr_body["event_kinds"] = json!(kinds);
             }
             pr_body
@@ -150,10 +150,7 @@ mod tests {
             &Some("http://localhost".into()),
             &None
         ));
-        assert!(!OpenClawSink::is_configured(
-            &None,
-            &Some("token".into())
-        ));
+        assert!(!OpenClawSink::is_configured(&None, &Some("token".into())));
         assert!(OpenClawSink::is_configured(
             &Some("http://localhost".into()),
             &Some("token".into())

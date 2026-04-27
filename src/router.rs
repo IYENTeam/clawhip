@@ -164,10 +164,9 @@ impl Router {
             SinkTarget::DiscordWebhook(_)
             | SinkTarget::SlackWebhook(_)
             | SinkTarget::OpenClaw
-            | SinkTarget::IyenSystem => {
-                Err("matched route uses a webhook, openclaw, or iyensystem instead of a channel"
-                    .into())
-            }
+            | SinkTarget::IyenSystem => Err(
+                "matched route uses a webhook, openclaw, or iyensystem instead of a channel".into(),
+            ),
         }
     }
 

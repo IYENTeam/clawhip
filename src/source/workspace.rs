@@ -448,9 +448,7 @@ fn diff_workspace_state(
         other if other.ends_with("idle-notif-cooldown.json") => {
             diff_idle_notif_state(matched, previous, current)
         }
-        ".status-file" | ".close-status" => {
-            diff_status_tag_file(matched, previous, current)
-        }
+        ".status-file" | ".close-status" => diff_status_tag_file(matched, previous, current),
         _ => None,
     }?;
 
@@ -840,7 +838,9 @@ fn diff_status_tag_file(
     }
 
     // Match STATUS: or CLOSE: tags
-    let status = if current_str.contains("STATUS: CONTINUE") || current_str.contains("CLOSE: CONTINUE") {
+    let status = if current_str.contains("STATUS: CONTINUE")
+        || current_str.contains("CLOSE: CONTINUE")
+    {
         Some("continue")
     } else if current_str.contains("STATUS: BLOCKED") || current_str.contains("CLOSE: BLOCKED") {
         Some("blocked")

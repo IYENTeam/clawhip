@@ -79,31 +79,55 @@ impl Renderer for DefaultRenderer {
                 let repo = string_field(payload, "repo")?;
                 let number = payload.field_u64("number")?;
                 let title = string_field(payload, "title")?;
-                let labels = payload.get("labels")
+                let labels = payload
+                    .get("labels")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| format!("`{s}`")).collect::<Vec<_>>().join(" "))
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| format!("`{s}`"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
                     .unwrap_or_default();
-                let url = payload.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+                let url = payload
+                    .get("html_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let link = if url.is_empty() {
                     format!("**{repo}#{number}**")
                 } else {
                     format!("[**{repo}#{number}**]({url})")
                 };
-                let label_str = if labels.is_empty() { String::new() } else { format!(" {labels}") };
+                let label_str = if labels.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {labels}")
+                };
                 format!("🆕 {link} {title}{label_str}")
             }
             ("github.issue-opened", MessageFormat::Alert) => {
                 let repo = string_field(payload, "repo")?;
                 let number = payload.field_u64("number")?;
                 let title = string_field(payload, "title")?;
-                let url = payload.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
-                let body = payload.get("body_preview").and_then(|v| v.as_str()).unwrap_or("");
+                let url = payload
+                    .get("html_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let body = payload
+                    .get("body_preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let link = if url.is_empty() {
                     format!("{repo}#{number}")
                 } else {
                     format!("[{repo}#{number}]({url})")
                 };
-                let body_str = if body.is_empty() { String::new() } else { format!("\n> {body}") };
+                let body_str = if body.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n> {body}")
+                };
                 format!("🚨 **New Issue** {link}\n**{title}**{body_str}")
             }
             ("github.issue-opened", MessageFormat::Inline) => format!(
@@ -923,7 +947,11 @@ fn render_opencode_event(kind: &str, payload: &Value, format: &MessageFormat) ->
         _ => "📋",
     };
 
-    let short_id = if session_id.len() > 12 { &session_id[..12] } else { &session_id };
+    let short_id = if session_id.len() > 12 {
+        &session_id[..12]
+    } else {
+        &session_id
+    };
     let kind_label = kind.strip_prefix("opencode.").unwrap_or(kind);
 
     match format {
