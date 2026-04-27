@@ -138,16 +138,17 @@ impl Renderer for DefaultRenderer {
             ),
             ("github.issue-opened", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
             ("github.issue-commented", MessageFormat::Compact) => format!(
-                "{}#{} commented ({} comments): {}",
+                "💬 {}#{} commented ({} comments): {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 payload.field_u64("comments")?,
                 string_field(payload, "title")?
             ),
             ("github.issue-commented", MessageFormat::Alert) => format!(
-                "🚨 GitHub issue commented in {}: #{} {}",
+                "🚨 **GitHub issue commented**\nRepo: `{}`\nIssue: #{}\nComments: {}\nTitle: {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
+                payload.field_u64("comments")?,
                 string_field(payload, "title")?
             ),
             ("github.issue-commented", MessageFormat::Inline) => format!(
@@ -160,13 +161,13 @@ impl Renderer for DefaultRenderer {
                 serde_json::to_string_pretty(payload)?
             }
             ("github.issue-closed", MessageFormat::Compact) => format!(
-                "{}#{} closed: {}",
+                "✅ {}#{} closed: {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "title")?
             ),
             ("github.issue-closed", MessageFormat::Alert) => format!(
-                "🚨 GitHub issue closed in {}: #{} {}",
+                "🚨 **GitHub issue closed**\nRepo: `{}`\nIssue: #{}\nState: closed\nTitle: {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "title")?
@@ -220,29 +221,52 @@ impl Renderer for DefaultRenderer {
             ),
             ("git.branch-changed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
-            ("github.pr-status-changed", MessageFormat::Compact) => format!(
-                "PR {}#{} {} -> {}: {}",
-                string_field(payload, "repo")?,
-                payload.field_u64("number")?,
-                string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?,
-                string_field(payload, "title")?
-            ),
-            ("github.pr-status-changed", MessageFormat::Alert) => format!(
-                "🚨 PR status changed in {}: #{} {} -> {} ({})",
-                string_field(payload, "repo")?,
-                payload.field_u64("number")?,
-                string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?,
-                string_field(payload, "title")?
-            ),
-            ("github.pr-status-changed", MessageFormat::Inline) => format!(
-                "[PR {}#{}] {} -> {}",
-                string_field(payload, "repo")?,
-                payload.field_u64("number")?,
-                string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?
-            ),
+            ("github.pr-status-changed", MessageFormat::Compact) => {
+                let repo = string_field(payload, "repo")?;
+                let number = payload.field_u64("number")?;
+                let old_status = string_field(payload, "old_status")?;
+                let new_status = string_field(payload, "new_status")?;
+                let title = string_field(payload, "title")?;
+                let body = payload.get("body").and_then(Value::as_str).unwrap_or("");
+                let url = optional_string_field(payload, "url");
+                let target = github_target(&repo, number, url.as_deref(), false);
+                let fixes = extract_fix_suffix(body);
+                format!("🔀 PR {target} {old_status} -> {new_status}: {title}{fixes}")
+            }
+            ("github.pr-status-changed", MessageFormat::Alert) => {
+                let repo = string_field(payload, "repo")?;
+                let number = payload.field_u64("number")?;
+                let old_status = string_field(payload, "old_status")?;
+                let new_status = string_field(payload, "new_status")?;
+                let title = string_field(payload, "title")?;
+                let body = payload.get("body").and_then(Value::as_str).unwrap_or("");
+                let url = optional_string_field(payload, "url");
+                let fixes = extract_fix_suffix(body);
+                let mut lines = vec![
+                    "🚨 **GitHub PR status changed**".to_string(),
+                    format!("Repo: `{repo}`"),
+                    format!("PR: #{}", number),
+                    format!("Status: `{old_status}` → `{new_status}`"),
+                    format!("Title: {title}"),
+                ];
+                if let Some(url) = url {
+                    lines.push(format!("URL: {url}"));
+                }
+                if !fixes.is_empty() {
+                    lines.push(fixes.trim().to_string());
+                }
+                lines.join("\n")
+            }
+            ("github.pr-status-changed", MessageFormat::Inline) => {
+                let repo = string_field(payload, "repo")?;
+                let number = payload.field_u64("number")?;
+                let old_status = string_field(payload, "old_status")?;
+                let new_status = string_field(payload, "new_status")?;
+                let title = string_field(payload, "title")?;
+                let body = payload.get("body").and_then(Value::as_str).unwrap_or("");
+                let fixes = extract_fix_suffix(body);
+                format!("[PR {repo}#{number}] {old_status} -> {new_status}: {title}{fixes}")
+            }
             ("github.pr-status-changed", MessageFormat::Raw) => {
                 serde_json::to_string_pretty(payload)?
             }
@@ -260,10 +284,7 @@ impl Renderer for DefaultRenderer {
                 | "github.ci-passed"
                 | "github.ci-cancelled",
                 MessageFormat::Alert,
-            ) => format!(
-                "🚨 {}",
-                render_github_ci(payload, event.canonical_kind(), true)?
-            ),
+            ) => render_github_ci_alert(payload, event.canonical_kind())?,
             (
                 "github.ci-started"
                 | "github.ci-failed"
@@ -614,6 +635,18 @@ fn tmux_identity(payload: &Value) -> Option<String> {
     }
 }
 
+fn github_target(repo: &str, number: u64, url: Option<&str>, bold: bool) -> String {
+    let label = if bold {
+        format!("**{repo}#{number}**")
+    } else {
+        format!("{repo}#{number}")
+    };
+    match url.filter(|url| !url.is_empty()) {
+        Some(url) => format!("[{label}]({url})"),
+        None => label,
+    }
+}
+
 fn render_github_ci(payload: &Value, kind: &str, include_url: bool) -> Result<String> {
     if payload
         .get("batched")
@@ -641,6 +674,36 @@ fn render_github_ci(payload: &Value, kind: &str, include_url: bool) -> Result<St
     }
 
     Ok(parts.join(" · "))
+}
+
+fn render_github_ci_alert(payload: &Value, kind: &str) -> Result<String> {
+    if payload
+        .get("batched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(format!(
+            "🚨 {}",
+            render_batched_github_ci(payload, kind, true)?
+        ));
+    }
+
+    let workflow = string_field(payload, "workflow")?;
+    let state = optional_string_field(payload, "conclusion")
+        .or_else(|| optional_string_field(payload, "status"))
+        .ok_or_else(|| "missing GitHub CI state".to_string())?;
+    let sha = short_sha(&string_field(payload, "sha")?);
+    let mut lines = vec![
+        format!("🚨 **GitHub CI {}**", github_ci_action(kind)),
+        format!("Target: {}", github_ci_target(payload)?),
+        format!("Workflow: {workflow}"),
+        format!("Status: `{state}`"),
+        format!("Commit: `{sha}`"),
+    ];
+    if let Some(url) = optional_string_field(payload, "url") {
+        lines.push(format!("URL: {url}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn render_batched_github_ci(payload: &Value, kind: &str, include_url: bool) -> Result<String> {
@@ -763,6 +826,33 @@ fn render_github_release(payload: &Value, kind: &str) -> Result<String> {
 
 fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
+}
+
+fn extract_fix_suffix(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    let mut nums: Vec<String> = Vec::new();
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                i += 1;
+            }
+            if i > start
+                && let Ok(num) = std::str::from_utf8(&bytes[start..i]).map(|s| s.to_string())
+            {
+                nums.push(num);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if nums.is_empty() {
+        String::new()
+    } else {
+        format!(" (fixes #{})", nums.join(", #"))
+    }
 }
 
 fn git_repo_label(payload: &Value) -> Result<String> {

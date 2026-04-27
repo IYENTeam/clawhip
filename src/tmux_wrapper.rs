@@ -730,10 +730,20 @@ mod tests {
         let monitor_args = TmuxMonitorArgs::from_new_args(&args, &config);
 
         assert_eq!(monitor_args.channel.as_deref(), Some("metadata-route"));
-        assert_eq!(
-            monitor_args.routing.worktree_path.as_deref(),
-            Some(repo.path().to_string_lossy().as_ref())
-        );
+        let expected_worktree = repo
+            .path()
+            .canonicalize()
+            .expect("canonical repo")
+            .to_string_lossy()
+            .into_owned();
+        // Normalize potential macOS /private prefix differences in canonical paths
+        let expected_worktree_norm = expected_worktree.trim_start_matches("/private").to_string();
+        let actual_worktree_norm = monitor_args
+            .routing
+            .worktree_path
+            .as_deref()
+            .map(|path| path.trim_start_matches("/private"));
+        assert_eq!(actual_worktree_norm, Some(expected_worktree_norm.as_str()));
         assert!(monitor_args.routing.repo_name.is_some());
     }
 
