@@ -536,36 +536,27 @@ fn collect_ci_events(
 ) -> Vec<IncomingEvent> {
     let mut events = Vec::new();
     for (key, ci) in current {
-        let changed = previous
-            .get(key)
-            .map(|old| old.status != ci.status || old.conclusion != ci.conclusion)
-            .unwrap_or(true);
+        let Some(old) = previous.get(key) else {
+            // GitHub's Actions APIs are eventually consistent and may surface
+            // older completed runs after clawhip restarts, after pagination
+            // churn, or after a transient API failure. Treating every newly
+            // discovered terminal run as a fresh event replays stale CI pass/fail
+            // notifications. Only emit a first-seen CI event while the run is
+            // still active; terminal pass/fail/cancel notifications require a
+            // prior observed state transition.
+            if is_terminal_ci(&ci.status) {
+                continue;
+            }
+            events.push(ci_event(repo, repo_name, ci));
+            continue;
+        };
+
+        let changed = old.status != ci.status || old.conclusion != ci.conclusion;
         if !changed {
             continue;
         }
 
-        let mut event = IncomingEvent::github_ci(
-            ci.event_kind(),
-            repo_name.to_string(),
-            ci.pr_number,
-            ci.workflow.clone(),
-            ci.status.clone(),
-            ci.conclusion.clone(),
-            ci.sha.clone(),
-            ci.url.clone(),
-            ci.branch.clone(),
-            repo.channel.clone(),
-        )
-        .with_mention(repo.mention.clone())
-        .with_format(repo.format.clone());
-        if let Some(payload) = event.payload.as_object_mut() {
-            if let Some(run_id) = &ci.run_id {
-                payload.insert("run_id".to_string(), json!(run_id));
-            }
-            payload.insert("run_job_count".to_string(), json!(ci.run_job_count));
-            payload.insert("run_all_terminal".to_string(), json!(ci.run_all_terminal));
-        }
-        events.push(event);
+        events.push(ci_event(repo, repo_name, ci));
     }
 
     events.sort_by(|left, right| {
@@ -579,6 +570,35 @@ fn collect_ci_events(
             })
     });
     events
+}
+
+fn ci_event(repo: &GitRepoMonitor, repo_name: &str, ci: &GitHubCISnapshot) -> IncomingEvent {
+    let mut event = IncomingEvent::github_ci(
+        ci.event_kind(),
+        repo_name.to_string(),
+        ci.pr_number,
+        ci.workflow.clone(),
+        ci.status.clone(),
+        ci.conclusion.clone(),
+        ci.sha.clone(),
+        ci.url.clone(),
+        ci.branch.clone(),
+        repo.channel.clone(),
+    )
+    .with_mention(repo.mention.clone())
+    .with_format(repo.format.clone());
+    if let Some(payload) = event.payload.as_object_mut() {
+        if let Some(run_id) = &ci.run_id {
+            payload.insert("run_id".to_string(), json!(run_id));
+        }
+        payload.insert("run_job_count".to_string(), json!(ci.run_job_count));
+        payload.insert("run_all_terminal".to_string(), json!(ci.run_all_terminal));
+    }
+    event
+}
+
+fn is_terminal_ci(status: &str) -> bool {
+    status == "completed"
 }
 
 async fn fetch_issues(
@@ -1281,6 +1301,22 @@ mod tests {
             events[0].payload["url"],
             json!("https://github.com/Yeachan-Heo/clawhip/actions/runs/1")
         );
+    }
+
+    #[test]
+    fn newly_discovered_terminal_ci_state_is_suppressed() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let previous = HashMap::new();
+        let current_ci = ci_snapshot(58, "CI / test", "completed", Some("success"));
+        let current = [(current_ci.dedupe_key(), current_ci)]
+            .into_iter()
+            .collect();
+
+        let events = collect_ci_events(&repo, "clawhip", &previous, &current);
+        assert!(events.is_empty());
     }
 
     #[test]
