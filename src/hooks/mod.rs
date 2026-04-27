@@ -292,25 +292,22 @@ mod tests {
         })
         .expect("install");
 
+        let root = dir.path().canonicalize().expect("canonical tempdir");
+        assert!(report.generated_files.contains(&root.join(HOOK_SCRIPT)));
         assert!(
             report
                 .generated_files
-                .contains(&dir.path().join(HOOK_SCRIPT))
+                .contains(&root.join(CLAWHIP_PROJECT_FILE))
         );
         assert!(
             report
                 .generated_files
-                .contains(&dir.path().join(CLAWHIP_PROJECT_FILE))
+                .contains(&root.join(CODEX_HOOKS_FILE))
         );
         assert!(
             report
                 .generated_files
-                .contains(&dir.path().join(CODEX_HOOKS_FILE))
-        );
-        assert!(
-            report
-                .generated_files
-                .contains(&dir.path().join(CLAUDE_SETTINGS_FILE))
+                .contains(&root.join(CLAUDE_SETTINGS_FILE))
         );
     }
 

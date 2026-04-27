@@ -446,6 +446,7 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn github_pr_status_changed(
         repo: String,
         number: u64,
@@ -453,6 +454,7 @@ impl IncomingEvent {
         old_status: String,
         new_status: String,
         url: String,
+        body: String,
         channel: Option<String>,
     ) -> Self {
         Self {
@@ -468,6 +470,7 @@ impl IncomingEvent {
                 "old_status": old_status,
                 "new_status": new_status,
                 "url": url,
+                "body": body,
             }),
         }
     }
@@ -1774,7 +1777,7 @@ mod tests {
         );
         assert_eq!(
             event.render_default(&MessageFormat::Alert).unwrap(),
-            "🚨 CI failed · clawhip#58 · CI / test · failure · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
+            "🚨 **GitHub CI failed**\nTarget: clawhip#58\nWorkflow: CI / test\nStatus: `failure`\nCommit: `abcdef1`\nURL: https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
         );
         assert_eq!(event.channel.as_deref(), Some("alerts"));
     }
@@ -1800,7 +1803,7 @@ mod tests {
         );
         assert_eq!(
             event.render_default(&MessageFormat::Alert).unwrap(),
-            "🚨 CI started · clawhip#58 · CI / test · in_progress · abcdef1 · https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
+            "🚨 **GitHub CI started**\nTarget: clawhip#58\nWorkflow: CI / test\nStatus: `in_progress`\nCommit: `abcdef1`\nURL: https://github.com/Yeachan-Heo/clawhip/actions/runs/1"
         );
     }
 

@@ -67,6 +67,9 @@ struct IssueSnapshot {
     title: String,
     state: String,
     comments: u64,
+    html_url: String,
+    labels: Vec<String>,
+    body: String,
 }
 
 #[derive(Clone)]
@@ -76,6 +79,7 @@ struct PullRequestSnapshot {
     url: String,
     head_branch: String,
     head_sha: String,
+    body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +292,7 @@ async fn poll_pull_requests(
                                         .unwrap_or_else(|| "<new>".to_string()),
                                     pr.status.clone(),
                                     pr.url.clone(),
+                                    pr.body.clone(),
                                     repo.channel.clone(),
                                 )
                                 .with_mention(repo.mention.clone())
@@ -403,10 +408,13 @@ fn collect_issue_events(
     for (number, issue) in current {
         match previous.get(number) {
             None => events.push(
-                IncomingEvent::github_issue_opened(
+                IncomingEvent::github_issue_opened_rich(
                     repo_name.to_string(),
                     *number,
                     issue.title.clone(),
+                    Some(issue.html_url.clone()),
+                    issue.labels.clone(),
+                    body_preview(&issue.body),
                     repo.channel.clone(),
                 )
                 .with_mention(repo.mention.clone())
@@ -526,6 +534,9 @@ async fn fetch_issues(
                     title: issue.title,
                     state: issue.state,
                     comments: issue.comments,
+                    html_url: issue.html_url,
+                    labels: issue.labels.into_iter().map(|label| label.name).collect(),
+                    body: issue.body,
                 },
             )
         })
@@ -567,6 +578,7 @@ async fn fetch_pull_requests(
                     url: pull.html_url,
                     head_branch: pull.head.reference,
                     head_sha: pull.head.sha,
+                    body: pull.body,
                 },
             )
         })
@@ -746,7 +758,29 @@ struct GitHubIssue {
     state: String,
     comments: u64,
     #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    labels: Vec<GitHubLabel>,
+    #[serde(default)]
     pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GitHubLabel {
+    name: String,
+}
+
+fn body_preview(body: &str) -> Option<String> {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else if collapsed.chars().count() > 180 {
+        Some(collapsed.chars().take(177).collect::<String>() + "…")
+    } else {
+        Some(collapsed)
+    }
 }
 
 impl GitHubIssue {
@@ -763,6 +797,8 @@ struct GitHubPullRequest {
     html_url: String,
     merged_at: Option<String>,
     head: GitHubPullRequestHead,
+    #[serde(default)]
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -849,6 +885,9 @@ mod tests {
                 title: "live issue".into(),
                 state: "open".into(),
                 comments: 0,
+                html_url: "https://example.test/issues/2".into(),
+                labels: Vec::new(),
+                body: String::new(),
             },
         )]
         .into_iter()
@@ -899,6 +938,9 @@ mod tests {
                 title: "live issue".into(),
                 state: "open".into(),
                 comments: 0,
+                html_url: String::new(),
+                labels: Vec::new(),
+                body: String::new(),
             },
         )]
         .into_iter()
@@ -909,6 +951,9 @@ mod tests {
                 title: "live issue".into(),
                 state: "closed".into(),
                 comments: 1,
+                html_url: String::new(),
+                labels: Vec::new(),
+                body: String::new(),
             },
         )]
         .into_iter()
@@ -1097,6 +1142,7 @@ mod tests {
             url: "https://github.com/org/repo/pull/42".into(),
             head_branch: "feat/pr".into(),
             head_sha: "prsha".into(),
+            body: "PR body".into(),
         };
         let open_prs = vec![(42_u64, &pr)];
 

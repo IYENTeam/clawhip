@@ -465,6 +465,7 @@ async fn post_github(
                     "unknown".to_string(),
                     "opened".to_string(),
                     url,
+                    "".into(),
                     None,
                 ))),
                 "closed" => Some(normalize_event(IncomingEvent::github_pr_status_changed(
@@ -474,6 +475,7 @@ async fn post_github(
                     "open".to_string(),
                     "closed".to_string(),
                     url,
+                    "".into(),
                     None,
                 ))),
                 "reopened" => Some(normalize_event(IncomingEvent::github_pr_status_changed(
@@ -483,6 +485,7 @@ async fn post_github(
                     "closed".to_string(),
                     "opened".to_string(),
                     url,
+                    "".into(),
                     None,
                 ))),
                 _ => None,

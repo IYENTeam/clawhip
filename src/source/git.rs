@@ -646,7 +646,14 @@ mod tests {
         assert_eq!(branch_event.kind, "git.branch-changed");
         assert_eq!(branch_event.payload["repo"], "clawhip");
         assert_eq!(branch_event.payload["repo_path"], path_str(&root));
-        assert_eq!(branch_event.payload["worktree_path"], path_str(&worktree));
+        let expected_worktree = canonical_path_string(&worktree);
+        let expected_worktree_norm = expected_worktree.trim_start_matches("/private").to_string();
+        assert_eq!(
+            branch_event.payload["worktree_path"]
+                .as_str()
+                .map(|path| path.trim_start_matches("/private")),
+            Some(expected_worktree_norm.as_str())
+        );
         assert_eq!(branch_event.payload["old_branch"], "feat/issue-115");
         assert_eq!(branch_event.payload["new_branch"], "feat/issue-115-v2");
         assert!(rx.try_recv().is_err());
@@ -660,7 +667,10 @@ mod tests {
         assert_eq!(commit_event.kind, "git.commit");
         assert_eq!(commit_event.payload["repo"], "clawhip");
         assert_eq!(commit_event.payload["repo_path"], path_str(&root));
-        assert_eq!(commit_event.payload["worktree_path"], path_str(&worktree));
+        assert_eq!(
+            commit_event.payload["worktree_path"],
+            canonical_path_string(&worktree)
+        );
         assert_eq!(commit_event.payload["branch"], "feat/issue-115-v2");
         assert_eq!(commit_event.payload["summary"], "worktree commit");
         assert!(rx.try_recv().is_err());
@@ -740,5 +750,12 @@ mod tests {
 
     fn path_str(path: &Path) -> &str {
         path.to_str().unwrap()
+    }
+
+    fn canonical_path_string(path: &Path) -> String {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
     }
 }

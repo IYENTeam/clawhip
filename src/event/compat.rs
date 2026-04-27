@@ -507,6 +507,7 @@ mod tests {
             "<new>".into(),
             "open".into(),
             "https://example.test/pr/48".into(),
+            "".into(),
             None,
         );
         let merged = IncomingEvent::github_pr_status_changed(
@@ -516,6 +517,7 @@ mod tests {
             "open".into(),
             "merged".into(),
             "https://example.test/pr/48".into(),
+            "".into(),
             None,
         );
 
