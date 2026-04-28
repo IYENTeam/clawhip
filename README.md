@@ -592,6 +592,7 @@ Verification:
 - `github.issue-opened`
 - `github.issue-commented`
 - `github.issue-closed`
+- `github.issues-labeled`
 - `github.pr-status-changed`
 
 ### Git family
@@ -654,6 +655,17 @@ filter = { project = "clawhip" }
 sink = "discord"
 channel = "1480171113253175356"
 format = "alert"
+allow_dynamic_tokens = false
+
+# Forward labeled-issue events to IYENsystem so its `iyen:auto-fix` /
+# `iyen:declined` label triggers can fire (see [providers.iyensystem]).
+# `github.issues-labeled` carries `payload.sender.login` and
+# `payload.label.name` so IYENsystem's SafetyPolicy gate can validate
+# the (actor, label) pair before enqueuing work.
+[[routes]]
+event = "github.issues-labeled"
+filter = { repo = "IYENTeam/example-repo" }
+sink = "iyensystem"
 allow_dynamic_tokens = false
 ```
 
