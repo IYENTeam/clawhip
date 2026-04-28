@@ -286,6 +286,8 @@ pub struct GitRepoMonitor {
     pub emit_issue_opened: bool,
     #[serde(default)]
     pub emit_pr_status: bool,
+    #[serde(default)]
+    pub emit_pr_reviews: bool,
     pub channel: Option<String>,
     pub mention: Option<String>,
     pub format: Option<MessageFormat>,
@@ -302,6 +304,7 @@ impl Default for GitRepoMonitor {
             emit_branch_changes: true,
             emit_issue_opened: true,
             emit_pr_status: false,
+            emit_pr_reviews: false,
             channel: None,
             mention: None,
             format: None,

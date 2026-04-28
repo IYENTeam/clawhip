@@ -61,8 +61,17 @@ struct GitHubRepoState {
     issues_ready: bool,
     prs: HashMap<u64, PullRequestSnapshot>,
     prs_ready: bool,
+    pr_reviews: HashMap<u64, HashMap<u64, ReviewSnapshot>>,
+    pr_reviews_ready: bool,
     ci: HashMap<String, GitHubCISnapshot>,
     ci_ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReviewSnapshot {
+    state: String,
+    body: String,
+    actor: Option<String>,
 }
 
 #[derive(Clone)]
@@ -161,7 +170,7 @@ async fn poll_github(
     state: &mut HashMap<String, GitHubRepoState>,
 ) -> Result<()> {
     for repo in &config.monitors.git.repos {
-        if !repo.emit_issue_opened && !repo.emit_pr_status {
+        if !repo.emit_issue_opened && !repo.emit_pr_status && !repo.emit_pr_reviews {
             continue;
         }
 
@@ -207,6 +216,25 @@ async fn poll_github(
                     )
                 }
             };
+        let (pr_reviews, pr_reviews_ready) =
+            match poll_pr_reviews(config, github_client, repo, &snapshot, previous, &prs, tx).await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!(
+                        "clawhip source GitHub PR review processing failed for {}: {error}",
+                        repo.path
+                    );
+                    (
+                        previous
+                            .map(|entry| entry.pr_reviews.clone())
+                            .unwrap_or_default(),
+                        previous
+                            .map(|entry| entry.pr_reviews_ready)
+                            .unwrap_or(false),
+                    )
+                }
+            };
         let (ci, ci_ready) = match poll_ci_statuses(
             config,
             github_client,
@@ -238,6 +266,8 @@ async fn poll_github(
                 issues_ready,
                 prs,
                 prs_ready,
+                pr_reviews,
+                pr_reviews_ready,
                 ci,
                 ci_ready,
             },
@@ -382,6 +412,117 @@ async fn poll_pull_requests(
             ))
         }
     }
+}
+
+async fn poll_pr_reviews(
+    config: &AppConfig,
+    github_client: Option<&reqwest::Client>,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    previous: Option<&GitHubRepoState>,
+    prs: &HashMap<u64, PullRequestSnapshot>,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<(HashMap<u64, HashMap<u64, ReviewSnapshot>>, bool)> {
+    if !repo.emit_pr_reviews {
+        return Ok((
+            previous
+                .map(|entry| entry.pr_reviews.clone())
+                .unwrap_or_default(),
+            previous
+                .map(|entry| entry.pr_reviews_ready)
+                .unwrap_or(false),
+        ));
+    }
+
+    let Some(client) = github_client else {
+        return Ok((
+            previous
+                .map(|entry| entry.pr_reviews.clone())
+                .unwrap_or_default(),
+            previous
+                .map(|entry| entry.pr_reviews_ready)
+                .unwrap_or(false),
+        ));
+    };
+
+    let Some(github_repo) = snapshot.github_repo.as_deref() else {
+        return Ok((HashMap::new(), false));
+    };
+
+    let mut current = HashMap::new();
+    let mut fetch_failed = false;
+    for (number, pr) in prs {
+        if pr.status == "merged" {
+            continue;
+        }
+        match fetch_pr_reviews(
+            client,
+            &config.monitors.github_api_base,
+            github_repo,
+            *number,
+        )
+        .await
+        {
+            Ok(reviews) => {
+                current.insert(*number, reviews);
+            }
+            Err(error) => {
+                eprintln!(
+                    "clawhip source GitHub PR review fetch failed for {github_repo}#{number}: {error}"
+                );
+                fetch_failed = true;
+                if let Some(prev_reviews) = previous.and_then(|entry| entry.pr_reviews.get(number))
+                {
+                    current.insert(*number, prev_reviews.clone());
+                }
+            }
+        }
+    }
+
+    let baseline_ready = previous
+        .map(|entry| entry.pr_reviews_ready)
+        .unwrap_or(false);
+    if !baseline_ready {
+        eprintln!(
+            "clawhip source GitHub PR review baseline established for {}; suppressing initial reviews",
+            repo.path
+        );
+        return Ok((current, true));
+    }
+
+    for (number, reviews) in &current {
+        let Some(pr) = prs.get(number) else { continue };
+        let prev_reviews = previous
+            .and_then(|entry| entry.pr_reviews.get(number))
+            .cloned()
+            .unwrap_or_default();
+        for (review_id, review) in reviews {
+            if prev_reviews.contains_key(review_id) {
+                continue;
+            }
+            send_event(
+                tx,
+                IncomingEvent::github_pr_review_submitted(
+                    snapshot.repo_name.clone(),
+                    *number,
+                    pr.title.clone(),
+                    review.state.clone(),
+                    if review.body.is_empty() {
+                        None
+                    } else {
+                        Some(review.body.clone())
+                    },
+                    review.actor.clone(),
+                    repo.channel.clone(),
+                )
+                .with_mention(repo.mention.clone())
+                .with_format(repo.format.clone()),
+            )
+            .await?;
+        }
+    }
+
+    Ok((current, !fetch_failed))
 }
 
 async fn poll_ci_statuses(
@@ -769,6 +910,47 @@ async fn fetch_pull_requests(
         .collect())
 }
 
+async fn fetch_pr_reviews(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_repo: &str,
+    pr_number: u64,
+) -> Result<HashMap<u64, ReviewSnapshot>> {
+    let response = github_get(
+        client,
+        api_base,
+        &format!("repos/{github_repo}/pulls/{pr_number}/reviews"),
+        &[("per_page", "100")],
+        &format!("PR reviews for {github_repo}#{pr_number}"),
+    )
+    .await?;
+    let reviews: Vec<GitHubPullRequestReview> = response.json().await?;
+    Ok(reviews
+        .into_iter()
+        .filter(|review| !review.state.is_empty() && review.state != "PENDING")
+        .map(|review| {
+            (
+                review.id,
+                ReviewSnapshot {
+                    state: normalize_review_state(&review.state),
+                    body: review.body,
+                    actor: review.user.map(|user| user.login),
+                },
+            )
+        })
+        .collect())
+}
+
+fn normalize_review_state(raw: &str) -> String {
+    match raw.to_uppercase().as_str() {
+        "APPROVED" => "approved".to_string(),
+        "CHANGES_REQUESTED" => "changes_requested".to_string(),
+        "COMMENTED" => "commented".to_string(),
+        "DISMISSED" => "dismissed".to_string(),
+        other => other.to_lowercase(),
+    }
+}
+
 async fn fetch_ci_statuses(
     client: &reqwest::Client,
     api_base: &str,
@@ -990,6 +1172,22 @@ struct GitHubPullRequestHead {
     #[serde(rename = "ref")]
     reference: String,
     sha: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubPullRequestReview {
+    id: u64,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    user: Option<GitHubReviewUser>,
+}
+
+#[derive(Deserialize)]
+struct GitHubReviewUser {
+    login: String,
 }
 
 #[derive(Deserialize)]
@@ -1747,5 +1945,54 @@ mod tests {
 
         source_task.abort();
         let _ = source_task.await;
+    }
+
+    #[test]
+    fn normalize_review_state_maps_github_uppercase_to_clawhip_lowercase() {
+        assert_eq!(normalize_review_state("APPROVED"), "approved");
+        assert_eq!(
+            normalize_review_state("CHANGES_REQUESTED"),
+            "changes_requested"
+        );
+        assert_eq!(normalize_review_state("COMMENTED"), "commented");
+        assert_eq!(normalize_review_state("DISMISSED"), "dismissed");
+        assert_eq!(normalize_review_state("approved"), "approved");
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_reviews_filters_pending_and_normalizes_state() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let body = json!([
+                { "id": 1, "state": "APPROVED", "body": "lgtm", "user": {"login": "alice"} },
+                { "id": 2, "state": "CHANGES_REQUESTED", "body": "fix this", "user": {"login": "bob"} },
+                { "id": 3, "state": "PENDING", "body": "draft", "user": {"login": "carol"} }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = build_github_client(None).unwrap();
+        let api_base = format!("http://{addr}");
+        let reviews = fetch_pr_reviews(&client, &api_base, "owner/repo", 7)
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(reviews.len(), 2, "PENDING reviews must be filtered out");
+        assert_eq!(reviews.get(&1).unwrap().state, "approved");
+        assert_eq!(reviews.get(&2).unwrap().state, "changes_requested");
+        assert_eq!(reviews.get(&1).unwrap().actor.as_deref(), Some("alice"));
     }
 }
