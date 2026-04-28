@@ -393,11 +393,13 @@ Verification:
 
 Input:
 - GitHub webhook `pull_request.*`
-- built-in PR monitor state changes
+- built-in PR monitor state changes (status + reviews)
 - CLI thin client `clawhip github pr-status-changed ...`
 
 Behavior:
 - emit `github.pr-status-changed`
+- emit `github.pr-review-submitted` when `emit_pr_reviews = true` on a monitored repo (per-PR polling of `/repos/{owner}/{repo}/pulls/{n}/reviews`, baseline-then-emit)
+- review payload carries `payload.review.state` (one of `approved`, `changes_requested`, `commented`, `dismissed`), `payload.review.body`, and `payload.sender.login`
 - route via `github.*`
 - apply repo filter
 - prepend route mention if configured
@@ -405,6 +407,7 @@ Behavior:
 Verification:
 - open real PR
 - merge / close PR
+- submit a real review on a PR with `emit_pr_reviews = true`
 - confirm final Discord message body in target channel
 
 ### 6. Git commit preset family
@@ -594,6 +597,7 @@ Verification:
 - `github.issue-closed`
 - `github.issues-labeled`
 - `github.pr-status-changed`
+- `github.pr-review-submitted`
 
 ### Git family
 - `git.commit`
@@ -658,12 +662,30 @@ format = "alert"
 allow_dynamic_tokens = false
 
 # Forward labeled-issue events to IYENsystem so its `iyen:auto-fix` /
-# `iyen:declined` label triggers can fire (see [providers.iyensystem]).
-# `github.issues-labeled` carries `payload.sender.login` and
-# `payload.label.name` so IYENsystem's SafetyPolicy gate can validate
-# the (actor, label) pair before enqueuing work.
+# `iyen:declined` / `iyen:review` label triggers can fire (see
+# [providers.iyensystem]). `github.issues-labeled` carries
+# `payload.sender.login` and `payload.label.name` so IYENsystem's
+# SafetyPolicy gate can validate the (actor, label) pair before enqueuing
+# work. `iyen:review` on a PR (clawhip emits `issues-labeled` for both
+# issues and PRs — IYENsystem's PrReviewWorkflow gates on
+# `payload.issue.pull_request` to distinguish) hands the PR to
+# IYENsystem's review lane.
 [[routes]]
 event = "github.issues-labeled"
+filter = { repo = "IYENTeam/example-repo" }
+sink = "iyensystem"
+allow_dynamic_tokens = false
+
+# Forward submitted PR reviews to IYENsystem so its ReviewResultHandler
+# can decide on merges. `approved` reviews coming from outside the
+# system (an OpenClaw / human reviewer, not IYENsystem's own
+# reviewer-bot) hit the auto_merge_allowlist + human_approved gate and
+# may trigger `merge_pr` + linked-issue close. `changes_requested`
+# reviews log only — IYENsystem doesn't auto-retry under the new
+# label-driven design (review submissions are stateless).
+# Requires the monitored repo entry to set `emit_pr_reviews = true`.
+[[routes]]
+event = "github.pr-review-submitted"
 filter = { repo = "IYENTeam/example-repo" }
 sink = "iyensystem"
 allow_dynamic_tokens = false

@@ -386,6 +386,38 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn github_pr_review_submitted(
+        repo: String,
+        pr_number: u64,
+        pr_title: String,
+        review_state: String,
+        review_body: Option<String>,
+        sender_login: Option<String>,
+        channel: Option<String>,
+    ) -> Self {
+        let mut payload = json!({
+            "repo": repo,
+            "number": pr_number,
+            "pr": { "title": pr_title },
+            "review": {
+                "state": review_state,
+                "body": review_body.unwrap_or_default(),
+            },
+        });
+        if let Some(login) = sender_login {
+            payload["sender"] = json!({ "login": login });
+        }
+        Self {
+            kind: "github.pr-review-submitted".to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload,
+        }
+    }
+
     pub fn git_commit(
         repo: String,
         branch: String,
