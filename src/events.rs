@@ -354,6 +354,38 @@ impl IncomingEvent {
         }
     }
 
+    /// Emitted when a label was added to an issue between two polls.
+    /// Payload shape mirrors what IYENsystem's `SafetyPolicy::label_trigger_allowed`
+    /// reads: top-level `repo`/`number`, plus `issue.title`, `label.name`, and
+    /// `sender.login` so the gate can validate (actor, label) pairs without
+    /// re-fetching from GitHub.
+    pub fn github_issues_labeled(
+        repo: String,
+        number: u64,
+        title: String,
+        label: String,
+        sender_login: Option<String>,
+        channel: Option<String>,
+    ) -> Self {
+        let mut payload = json!({
+            "repo": repo,
+            "number": number,
+            "issue": { "title": title },
+            "label": { "name": label },
+        });
+        if let Some(login) = sender_login {
+            payload["sender"] = json!({ "login": login });
+        }
+        Self {
+            kind: "github.issues-labeled".to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload,
+        }
+    }
+
     pub fn git_commit(
         repo: String,
         branch: String,
