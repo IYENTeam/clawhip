@@ -276,8 +276,16 @@ async fn poll_issues(
     match fetch_issues(client, &config.monitors.github_api_base, repo, snapshot).await {
         Ok(issues) => {
             if let Some(previous) = previous.filter(|entry| entry.issues_ready) {
-                for event in
-                    collect_issue_events(repo, &snapshot.repo_name, &previous.issues, &issues)
+                for event in collect_issue_events(
+                    client,
+                    &config.monitors.github_api_base,
+                    snapshot.github_repo.as_deref(),
+                    repo,
+                    &snapshot.repo_name,
+                    &previous.issues,
+                    &issues,
+                )
+                .await
                 {
                     send_event(tx, event).await?;
                 }
@@ -474,7 +482,10 @@ async fn github_get(
     Ok(response)
 }
 
-fn collect_issue_events(
+async fn collect_issue_events(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_repo: Option<&str>,
     repo: &GitRepoMonitor,
     repo_name: &str,
     previous: &HashMap<u64, IssueSnapshot>,
@@ -516,6 +527,31 @@ fn collect_issue_events(
                             *number,
                             issue.title.clone(),
                             issue.comments,
+                            repo.channel.clone(),
+                        )
+                        .with_mention(repo.mention.clone())
+                        .with_format(repo.format.clone()),
+                    );
+                }
+                let added: Vec<&String> = issue
+                    .labels
+                    .iter()
+                    .filter(|name| !old.labels.contains(name))
+                    .collect();
+                for label_name in added {
+                    let actor = match github_repo {
+                        Some(gh) => {
+                            fetch_label_actor(client, api_base, gh, *number, label_name).await
+                        }
+                        None => None,
+                    };
+                    events.push(
+                        IncomingEvent::github_issues_labeled(
+                            repo_name.to_string(),
+                            *number,
+                            issue.title.clone(),
+                            label_name.clone(),
+                            actor,
                             repo.channel.clone(),
                         )
                         .with_mention(repo.mention.clone())
@@ -599,6 +635,58 @@ fn ci_event(repo: &GitRepoMonitor, repo_name: &str, ci: &GitHubCISnapshot) -> In
 
 fn is_terminal_ci(status: &str) -> bool {
     status == "completed"
+}
+
+/// Look up who applied a specific label to an issue, by scanning the
+/// issue's events feed for the most recent `labeled` action carrying
+/// that label name. Returns `None` when the call fails or the actor
+/// is unknown — callers must NOT block emission on this lookup.
+///
+/// The events endpoint returns oldest-first; we walk in reverse so
+/// repeated label cycles (label → unlabel → label) attribute to the
+/// most recent labeler.
+async fn fetch_label_actor(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_repo: &str,
+    issue_number: u64,
+    label_name: &str,
+) -> Option<String> {
+    #[derive(Deserialize)]
+    struct IssueEvent {
+        event: String,
+        #[serde(default)]
+        actor: Option<EventActor>,
+        #[serde(default)]
+        label: Option<GitHubLabel>,
+    }
+
+    #[derive(Deserialize)]
+    struct EventActor {
+        login: String,
+    }
+
+    let response = github_get(
+        client,
+        api_base,
+        &format!("repos/{github_repo}/issues/{issue_number}/events"),
+        &[("per_page", "100")],
+        &format!("issue events for {github_repo}#{issue_number}"),
+    )
+    .await
+    .ok()?;
+    let events: Vec<IssueEvent> = response.json().await.ok()?;
+    events
+        .into_iter()
+        .rev()
+        .find(|e| {
+            e.event == "labeled"
+                && e.label
+                    .as_ref()
+                    .map(|l| l.name == label_name)
+                    .unwrap_or(false)
+        })
+        .and_then(|e| e.actor.map(|a| a.login))
 }
 
 async fn fetch_issues(
@@ -988,7 +1076,17 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        let client = build_github_client(None).unwrap();
+        let events = collect_issue_events(
+            &client,
+            "http://127.0.0.1:1",
+            None,
+            &repo,
+            "clawhip",
+            &previous,
+            &current,
+        )
+        .await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.issue-opened");
         assert_eq!(events[0].payload["repo"], "clawhip");
@@ -1021,8 +1119,8 @@ mod tests {
         assert!(content.contains("live issue"));
     }
 
-    #[test]
-    fn issue_comment_and_close_events_are_emitted() {
+    #[tokio::test]
+    async fn issue_comment_and_close_events_are_emitted() {
         let repo = GitRepoMonitor {
             path: "/tmp/clawhip".into(),
             name: Some("clawhip".into()),
@@ -1054,7 +1152,17 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        let client = build_github_client(None).unwrap();
+        let events = collect_issue_events(
+            &client,
+            "http://127.0.0.1:1",
+            None,
+            &repo,
+            "clawhip",
+            &previous,
+            &current,
+        )
+        .await;
         assert!(
             events
                 .iter()
@@ -1064,6 +1172,136 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.canonical_kind() == "github.issue-closed")
+        );
+    }
+
+    #[tokio::test]
+    async fn newly_added_label_emits_issues_labeled_event_with_actor_login() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let body = json!([
+                { "event": "renamed", "actor": {"login": "human-author"} },
+                { "event": "labeled", "label": {"name": "iyen:auto-fix"}, "actor": {"login": "openclaw-bot"} }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let previous = [(
+            42_u64,
+            IssueSnapshot {
+                title: "bug".into(),
+                state: "open".into(),
+                comments: 0,
+                html_url: String::new(),
+                labels: vec!["bug".into()],
+                body: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let current = [(
+            42_u64,
+            IssueSnapshot {
+                title: "bug".into(),
+                state: "open".into(),
+                comments: 0,
+                html_url: String::new(),
+                labels: vec!["bug".into(), "iyen:auto-fix".into()],
+                body: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let client = build_github_client(None).unwrap();
+        let api_base = format!("http://{addr}");
+        let events = collect_issue_events(
+            &client,
+            &api_base,
+            Some("Org/Repo"),
+            &repo,
+            "Repo",
+            &previous,
+            &current,
+        )
+        .await;
+
+        server.await.unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.canonical_kind(), "github.issues-labeled");
+        assert_eq!(event.payload["repo"], "Repo");
+        assert_eq!(event.payload["number"], 42);
+        assert_eq!(event.payload["label"]["name"], "iyen:auto-fix");
+        assert_eq!(event.payload["sender"]["login"], "openclaw-bot");
+        assert_eq!(event.payload["issue"]["title"], "bug");
+    }
+
+    #[tokio::test]
+    async fn unchanged_labels_do_not_emit_labeled_event() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            ..GitRepoMonitor::default()
+        };
+        let labels = vec!["bug".into(), "iyen:auto-fix".into()];
+        let previous = [(
+            42_u64,
+            IssueSnapshot {
+                title: "bug".into(),
+                state: "open".into(),
+                comments: 0,
+                html_url: String::new(),
+                labels: labels.clone(),
+                body: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let current = [(
+            42_u64,
+            IssueSnapshot {
+                title: "bug".into(),
+                state: "open".into(),
+                comments: 0,
+                html_url: String::new(),
+                labels,
+                body: String::new(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let client = build_github_client(None).unwrap();
+        let events = collect_issue_events(
+            &client,
+            "http://127.0.0.1:1",
+            Some("Org/Repo"),
+            &repo,
+            "Repo",
+            &previous,
+            &current,
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.canonical_kind() == "github.issues-labeled"),
+            "label set unchanged → no labeled event should be emitted"
         );
     }
 
