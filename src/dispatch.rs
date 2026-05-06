@@ -7,10 +7,15 @@ use tokio::sync::mpsc;
 
 use crate::Result;
 use crate::core::timer_wheel::{DelayedEntry, TimerWheel};
-use crate::events::IncomingEvent;
+use crate::events::{IncomingEvent, normalize_event};
+use crate::native_observability::{
+    SharedNativeHookObservability, is_native_hook_event, native_event_telemetry_fields,
+    with_native_observability,
+};
 use crate::render::Renderer;
 use crate::router::{ResolvedDelivery, Router};
-use crate::sink::{Sink, SinkMessage, SinkTarget};
+use crate::sink::{Sink, SinkMessage, SinkTarget, SinkTelemetry};
+use crate::telemetry;
 
 const DEFAULT_BATCH_TICK: Duration = Duration::from_secs(1);
 
@@ -22,6 +27,7 @@ pub struct Dispatcher {
     ci_batcher: GitHubCiBatcher,
     routine_batcher: Option<RoutineDeliveryBatcher>,
     batch_tick: Duration,
+    native_observability: SharedNativeHookObservability,
 }
 
 impl Dispatcher {
@@ -32,6 +38,7 @@ impl Dispatcher {
         sinks: HashMap<String, Box<dyn Sink>>,
         ci_batch_window: Duration,
         routine_batch_window: Option<Duration>,
+        native_observability: SharedNativeHookObservability,
     ) -> Self {
         Self {
             rx,
@@ -41,6 +48,7 @@ impl Dispatcher {
             ci_batcher: GitHubCiBatcher::new(ci_batch_window),
             routine_batcher: routine_batch_window.map(RoutineDeliveryBatcher::new),
             batch_tick: DEFAULT_BATCH_TICK,
+            native_observability,
         }
     }
 
@@ -69,6 +77,7 @@ impl Dispatcher {
                 maybe_event = self.rx.recv() => {
                     match maybe_event {
                         Some(event) => {
+                            let event = normalize_event(event);
                             let now_ms = now_ms();
                             self.flush_due_batches(now_ms).await?;
                             if self.is_ci_event(&event) {
@@ -113,9 +122,31 @@ impl Dispatcher {
     }
 
     async fn deliver_event(&self, event: IncomingEvent) {
+        let provenance = is_native_hook_event(&event).then(|| self.router.explain(&event));
         let deliveries = match self.router.resolve(&event).await {
-            Ok(deliveries) => deliveries,
+            Ok(deliveries) => {
+                self.observe_native_route_outcome(
+                    &event,
+                    provenance.as_ref(),
+                    Some(deliveries.len()),
+                    None,
+                );
+                deliveries
+            }
             Err(error) => {
+                let error_message = error.to_string();
+                self.emit_dispatch_failure(
+                    &event,
+                    telemetry::reason::ROUTE_NONE,
+                    None,
+                    error_message.clone(),
+                );
+                self.observe_native_route_outcome(
+                    &event,
+                    provenance.as_ref(),
+                    None,
+                    Some(error_message),
+                );
                 eprintln!(
                     "clawhip dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
@@ -125,14 +156,37 @@ impl Dispatcher {
         };
 
         for delivery in deliveries {
+            self.emit_route_trace(&event, &delivery);
             self.send_delivery(&event, &delivery).await;
         }
     }
 
     async fn resolve_and_dispatch(&mut self, event: IncomingEvent, now_ms: u64) {
+        let provenance = is_native_hook_event(&event).then(|| self.router.explain(&event));
         let deliveries = match self.router.resolve(&event).await {
-            Ok(deliveries) => deliveries,
+            Ok(deliveries) => {
+                self.observe_native_route_outcome(
+                    &event,
+                    provenance.as_ref(),
+                    Some(deliveries.len()),
+                    None,
+                );
+                deliveries
+            }
             Err(error) => {
+                let error_message = error.to_string();
+                self.emit_dispatch_failure(
+                    &event,
+                    telemetry::reason::ROUTE_NONE,
+                    None,
+                    error_message.clone(),
+                );
+                self.observe_native_route_outcome(
+                    &event,
+                    provenance.as_ref(),
+                    None,
+                    Some(error_message),
+                );
                 eprintln!(
                     "clawhip dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
@@ -142,9 +196,13 @@ impl Dispatcher {
         };
 
         for delivery in deliveries {
-            if self.should_batch_routine_delivery(&event, &delivery)
-                && let Some(routine_batcher) = self.routine_batcher.as_mut()
-            {
+            self.emit_route_trace(&event, &delivery);
+            if self.should_batch_routine_delivery(&event, &delivery) {
+                self.emit_routine_deferred(&event, &delivery);
+                let Some(routine_batcher) = self.routine_batcher.as_mut() else {
+                    self.send_delivery(&event, &delivery).await;
+                    continue;
+                };
                 routine_batcher.observe(
                     QueuedRoutineDelivery {
                         event: event.clone(),
@@ -159,8 +217,52 @@ impl Dispatcher {
         }
     }
 
+    fn observe_native_route_outcome(
+        &self,
+        event: &IncomingEvent,
+        provenance: Option<&crate::provenance::Provenance>,
+        delivery_count: Option<usize>,
+        error: Option<String>,
+    ) {
+        if !is_native_hook_event(event) {
+            return;
+        }
+
+        let route_kind = match (delivery_count, provenance) {
+            (Some(0), _) | (None, _) => "unresolved",
+            (Some(_), Some(provenance))
+                if provenance
+                    .deliveries
+                    .iter()
+                    .any(|delivery| delivery.matched_route_index.is_some()) =>
+            {
+                "explicit_route"
+            }
+            (Some(_), _) => "default_route",
+        };
+
+        let count = delivery_count.unwrap_or_default();
+        with_native_observability(&self.native_observability, |observability| {
+            observability.observe_routed(event, count, route_kind);
+        });
+
+        eprintln!(
+            "clawhip native hook routed: {} route={} deliveries={} error={}",
+            native_event_telemetry_fields(event),
+            route_kind,
+            count,
+            error.as_deref().unwrap_or("none")
+        );
+    }
+
     async fn send_delivery(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) {
         let Some(sink) = self.sinks.get(delivery.sink.as_str()) else {
+            self.emit_dispatch_failure(
+                event,
+                telemetry::reason::SINK_MISSING,
+                Some(delivery),
+                format!("missing sink '{}'", delivery.sink),
+            );
             eprintln!(
                 "clawhip dispatcher missing sink '{}' for target {:?}",
                 delivery.sink, delivery.target
@@ -175,6 +277,12 @@ impl Dispatcher {
         {
             Ok(content) => content,
             Err(error) => {
+                self.emit_dispatch_failure(
+                    event,
+                    telemetry::reason::RENDER_FAILED,
+                    Some(delivery),
+                    error.to_string(),
+                );
                 eprintln!(
                     "clawhip dispatcher failed to render {} for {}/ {:?}: {error}",
                     event.canonical_kind(),
@@ -193,6 +301,7 @@ impl Dispatcher {
                 format: delivery.format.clone(),
                 content,
                 payload: event.payload.clone(),
+                telemetry: Some(sink_telemetry_for(event, delivery, None)),
             },
         )
         .await;
@@ -208,6 +317,12 @@ impl Dispatcher {
         }
 
         let Some(sink) = self.sinks.get(first.delivery.sink.as_str()) else {
+            self.emit_dispatch_failure(
+                &first.event,
+                telemetry::reason::SINK_MISSING,
+                Some(&first.delivery),
+                format!("missing sink '{}'", first.delivery.sink),
+            );
             eprintln!(
                 "clawhip dispatcher missing sink '{}' for batched target {:?}",
                 first.delivery.sink, first.delivery.target
@@ -228,6 +343,12 @@ impl Dispatcher {
                     event_kinds.push(item.event.canonical_kind().to_string());
                 }
                 Err(error) => {
+                    self.emit_dispatch_failure(
+                        &item.event,
+                        telemetry::reason::RENDER_FAILED,
+                        Some(&item.delivery),
+                        error.to_string(),
+                    );
                     eprintln!(
                         "clawhip dispatcher failed to render batched {} for {}/ {:?}: {error}",
                         item.event.canonical_kind(),
@@ -242,6 +363,7 @@ impl Dispatcher {
             return;
         }
 
+        self.emit_routine_flushed(first, contents.len());
         self.send_sink_message(
             sink.as_ref(),
             &first.delivery.target,
@@ -253,7 +375,13 @@ impl Dispatcher {
                     "batched": true,
                     "count": contents.len(),
                     "event_kinds": event_kinds,
+                    "correlation_id": telemetry::correlation_id_for_event(&first.event),
                 }),
+                telemetry: Some(sink_telemetry_for(
+                    &first.event,
+                    &first.delivery,
+                    Some(contents.len()),
+                )),
             },
         )
         .await;
@@ -261,11 +389,109 @@ impl Dispatcher {
 
     async fn send_sink_message(&self, sink: &dyn Sink, target: &SinkTarget, message: SinkMessage) {
         if let Err(error) = sink.send(target, &message).await {
+            let mut record = telemetry::record(
+                telemetry::event_name::DISPATCH_FAILURE,
+                telemetry::reason::SINK_SEND_FAILED,
+                telemetry::correlation_id_for_message(&message.event_kind, &message.payload),
+            );
+            record.insert(
+                "target".to_string(),
+                json!(telemetry::safe_target_id(target)),
+            );
+            record.insert("event_kind".to_string(), json!(message.event_kind));
+            record.insert("error".to_string(), json!(error.to_string()));
+            telemetry::emit(record);
             eprintln!(
                 "clawhip dispatcher delivery failed to {:?}: {error}",
                 target
             );
         }
+    }
+
+    fn emit_route_trace(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) {
+        let mut record = telemetry::record(
+            telemetry::event_name::ROUTE_TRACE,
+            delivery.trace.result.reason_code(),
+            telemetry::correlation_id_for_event(event),
+        );
+        record.insert("event_kind".to_string(), json!(event.canonical_kind()));
+        record.insert(
+            "route_result".to_string(),
+            json!(delivery.trace.result.as_str()),
+        );
+        record.insert(
+            "route_index".to_string(),
+            json!(delivery.trace.matched_route_index),
+        );
+        record.insert(
+            "event_pattern".to_string(),
+            json!(delivery.trace.event_pattern),
+        );
+        record.insert("filter_keys".to_string(), json!(delivery.trace.filter_keys));
+        record.insert("target".to_string(), json!(delivery.trace.target));
+        telemetry::emit(record);
+    }
+
+    fn emit_routine_deferred(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) {
+        let mut record = telemetry::record(
+            telemetry::event_name::ROUTINE_DEFERRED,
+            telemetry::reason::ROUTINE_BATCH_DEFERRED,
+            telemetry::correlation_id_for_event(event),
+        );
+        record.insert("event_kind".to_string(), json!(event.canonical_kind()));
+        record.insert("target".to_string(), json!(delivery.trace.target));
+        record.insert(
+            "route_result".to_string(),
+            json!(delivery.trace.result.as_str()),
+        );
+        telemetry::emit(record);
+    }
+
+    fn emit_routine_flushed(&self, first: &QueuedRoutineDelivery, count: usize) {
+        let mut record = telemetry::record(
+            telemetry::event_name::ROUTINE_FLUSHED,
+            telemetry::reason::ROUTINE_BATCH_FLUSHED,
+            telemetry::correlation_id_for_event(&first.event),
+        );
+        record.insert(
+            "event_kind".to_string(),
+            json!(first.event.canonical_kind()),
+        );
+        record.insert("target".to_string(), json!(first.delivery.trace.target));
+        record.insert(
+            "route_result".to_string(),
+            json!(first.delivery.trace.result.as_str()),
+        );
+        record.insert("batch_count".to_string(), json!(count));
+        telemetry::emit(record);
+    }
+
+    fn emit_dispatch_failure(
+        &self,
+        event: &IncomingEvent,
+        reason_code: &str,
+        delivery: Option<&ResolvedDelivery>,
+        error: String,
+    ) {
+        let mut record = telemetry::record(
+            telemetry::event_name::DISPATCH_FAILURE,
+            reason_code,
+            telemetry::correlation_id_for_event(event),
+        );
+        record.insert("event_kind".to_string(), json!(event.canonical_kind()));
+        record.insert("error".to_string(), json!(error));
+        if let Some(delivery) = delivery {
+            record.insert("target".to_string(), json!(delivery.trace.target));
+            record.insert(
+                "route_result".to_string(),
+                json!(delivery.trace.result.as_str()),
+            );
+            record.insert(
+                "route_index".to_string(),
+                json!(delivery.trace.matched_route_index),
+            );
+        }
+        telemetry::emit(record);
     }
 
     fn should_batch_routine_delivery(
@@ -277,6 +503,20 @@ impl Dispatcher {
             && delivery.sink == "discord"
             && !self.is_ci_event(event)
             && !should_bypass_routine_batch(event)
+    }
+}
+
+fn sink_telemetry_for(
+    event: &IncomingEvent,
+    delivery: &ResolvedDelivery,
+    batch_count: Option<usize>,
+) -> SinkTelemetry {
+    SinkTelemetry {
+        correlation_id: telemetry::correlation_id_for_event(event),
+        route_result: Some(delivery.trace.result.as_str().to_string()),
+        route_index: delivery.trace.matched_route_index,
+        target: delivery.trace.target.clone(),
+        batch_count,
     }
 }
 
@@ -710,6 +950,7 @@ mod tests {
 
     use super::*;
     use crate::config::{AppConfig, RouteRule};
+    use crate::native_observability::new_shared_native_hook_observability;
     use crate::render::DefaultRenderer;
     use crate::sink::{DiscordSink, SlackSink};
 
@@ -727,7 +968,111 @@ mod tests {
             sinks,
             Duration::from_secs(30),
             None,
+            new_shared_native_hook_observability(),
         )
+    }
+
+    fn native_dispatch_event(kind: &str) -> IncomingEvent {
+        IncomingEvent {
+            kind: kind.into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "provider": "codex",
+                "hook_event_name": "SessionStart",
+                "repo_name": "clawhip",
+                "repo_path": "/tmp/clawhip",
+                "worktree_path": "/tmp/clawhip",
+                "session_id": "sess-route"
+            }),
+        }
+    }
+
+    fn dispatcher_with_observability(
+        config: AppConfig,
+        observability: crate::native_observability::SharedNativeHookObservability,
+    ) -> Dispatcher {
+        let (_tx, rx) = mpsc::channel(1);
+        Dispatcher::new(
+            rx,
+            Router::new(Arc::new(config)),
+            Box::new(DefaultRenderer),
+            HashMap::new(),
+            Duration::from_secs(30),
+            None,
+            observability,
+        )
+    }
+
+    #[tokio::test]
+    async fn native_route_observability_counts_explicit_route() {
+        let observability = new_shared_native_hook_observability();
+        let mut config = AppConfig::default();
+        config.routes.push(RouteRule {
+            event: "session.started".into(),
+            channel: Some("ops".into()),
+            ..RouteRule::default()
+        });
+        let mut dispatcher = dispatcher_with_observability(config, observability.clone());
+
+        dispatcher
+            .resolve_and_dispatch(native_dispatch_event("session.started"), now_ms())
+            .await;
+
+        let snapshot = crate::native_observability::snapshot_shared(&observability);
+        assert_eq!(snapshot["totals"]["routed"], json!(1));
+        assert_eq!(snapshot["reasons"]["explicit_route"], json!(1));
+        assert_eq!(snapshot["recent_groups"][0]["routed"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn native_route_observability_counts_default_route() {
+        let observability = new_shared_native_hook_observability();
+        let mut config = AppConfig::default();
+        config.defaults.channel = Some("default".into());
+        let mut dispatcher = dispatcher_with_observability(config, observability.clone());
+
+        dispatcher
+            .resolve_and_dispatch(native_dispatch_event("session.started"), now_ms())
+            .await;
+
+        let snapshot = crate::native_observability::snapshot_shared(&observability);
+        assert_eq!(snapshot["totals"]["routed"], json!(1));
+        assert_eq!(snapshot["reasons"]["default_route"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn native_route_observability_counts_unresolved_route() {
+        let observability = new_shared_native_hook_observability();
+        let mut dispatcher =
+            dispatcher_with_observability(AppConfig::default(), observability.clone());
+
+        dispatcher
+            .resolve_and_dispatch(native_dispatch_event("session.started"), now_ms())
+            .await;
+
+        let snapshot = crate::native_observability::snapshot_shared(&observability);
+        assert_eq!(snapshot["totals"]["routed"], json!(0));
+        assert_eq!(snapshot["totals"]["unresolved"], json!(1));
+        assert_eq!(snapshot["reasons"]["unresolved"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn route_observability_ignores_non_native_events() {
+        let observability = new_shared_native_hook_observability();
+        let mut config = AppConfig::default();
+        config.defaults.channel = Some("default".into());
+        let mut dispatcher = dispatcher_with_observability(config, observability.clone());
+
+        dispatcher
+            .resolve_and_dispatch(IncomingEvent::custom(None, "hello".into()), now_ms())
+            .await;
+
+        let snapshot = crate::native_observability::snapshot_shared(&observability);
+        assert_eq!(snapshot["totals"]["routed"], json!(0));
+        assert!(snapshot["recent_groups"].as_array().unwrap().is_empty());
     }
 
     async fn spawn_webhook_collector(
@@ -1380,6 +1725,7 @@ mod tests {
             HashMap::new(),
             Duration::from_secs(90),
             None,
+            new_shared_native_hook_observability(),
         );
 
         assert_eq!(dispatcher.ci_batcher.window, Duration::from_secs(90));
@@ -1467,6 +1813,7 @@ mod tests {
             sinks,
             Duration::from_secs(config.dispatch.ci_batch_window_secs),
             config.dispatch.routine_batch_window(),
+            new_shared_native_hook_observability(),
         );
 
         assert_eq!(

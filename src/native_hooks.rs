@@ -65,11 +65,25 @@ pub fn incoming_event_from_native_hook_json(
     );
     let worktree_path = first_string(payload, &["/worktree_path", "/context/worktree_path"])
         .or_else(|| directory.clone());
+    let explicit_normalization_outcome = first_string(
+        payload,
+        &[
+            "/normalization_outcome",
+            "/context/normalization_outcome",
+            "/event_payload/normalization_outcome",
+            "/payload/normalization_outcome",
+        ],
+    );
     let repo_path = first_string(payload, &["/repo_path", "/context/repo_path"]).or_else(|| {
         worktree_path
             .as_deref()
             .and_then(infer_repo_root)
             .map(|path| path.to_string_lossy().into_owned())
+    });
+    let normalization_outcome = explicit_normalization_outcome.or_else(|| {
+        repo_path
+            .is_none()
+            .then(|| NATIVE_NON_GIT_OUTCOME.to_string())
     });
     let project_metadata = load_effective_project_metadata(
         payload,
@@ -189,6 +203,12 @@ pub fn incoming_event_from_native_hook_json(
     }
     if let Some(repo_path) = repo_path {
         normalized.insert("repo_path".into(), json!(repo_path));
+    }
+    if let Some(normalization_outcome) = normalization_outcome {
+        normalized.insert(
+            NATIVE_NORMALIZATION_OUTCOME_FIELD.into(),
+            json!(normalization_outcome),
+        );
     }
     if let Some(repo_name) = repo_name {
         normalized.insert("repo_name".into(), json!(repo_name));
@@ -1159,7 +1179,7 @@ mod tests {
         let fake_clawhip = fake_bin.join("clawhip");
         std::fs::write(
             &fake_clawhip,
-            "#!/bin/sh\necho 'fake native hook bridge failure' >&2\nexit 7\n",
+            "#!/bin/sh\ncat >/dev/null\necho 'fake native hook bridge failure' >&2\nexit 7\n",
         )
         .expect("write fake clawhip");
         let mut fake_perms = std::fs::metadata(&fake_clawhip)

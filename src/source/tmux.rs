@@ -13,9 +13,13 @@ use crate::Result;
 use crate::client::DaemonClient;
 use crate::config::{AppConfig, TmuxSessionMonitor};
 use crate::events::{IncomingEvent, MessageFormat, RoutingMetadata};
-use crate::keyword_window::{PendingKeywordHits, collect_keyword_hits};
+use crate::keyword_window::{
+    KeywordHit, KeywordMatchProvenance, KeywordMatchSource, PendingKeywordHits,
+    collect_keyword_hits_with_provenance,
+};
 use crate::router::glob_match;
 use crate::source::Source;
+use crate::telemetry;
 
 pub type SharedTmuxRegistry = Arc<RwLock<HashMap<String, RegisteredTmuxSession>>>;
 
@@ -223,10 +227,16 @@ pub async fn monitor_registered_session(
                 Some(existing) => {
                     existing.pane_dead = pane.pane_dead;
                     if existing.content_hash != hash {
-                        let hits = collect_keyword_hits(
+                        let hits = collect_keyword_hits_with_provenance(
                             &existing.snapshot,
                             &pane.content,
                             &registration.keywords,
+                            KeywordMatchProvenance {
+                                pane_id: pane.pane_id.clone(),
+                                pane_name: pane.pane_name.clone(),
+                                cursor: Some(pane.content.lines().count()),
+                                source: KeywordMatchSource::FreshOutput,
+                            },
                         );
                         push_pending_keyword_hits(&mut pending_keyword_hits, now, hits);
 
@@ -267,6 +277,12 @@ pub async fn list_active_tmux_registrations(
             sync_active_config_registrations(config, registry, &available_sessions).await;
         }
         Err(error) => {
+            telemetry::emit(source_record(
+                telemetry::event_name::SOURCE_DEGRADED,
+                "source_poll_failed",
+                None,
+                Some(error.to_string()),
+            ));
             eprintln!("clawhip source tmux list-sessions failed: {error}");
         }
     }
@@ -284,6 +300,12 @@ async fn poll_tmux(
     let available_sessions = match list_tmux_sessions().await {
         Ok(sessions) => Some(sessions),
         Err(error) => {
+            telemetry::emit(source_record(
+                telemetry::event_name::SOURCE_DEGRADED,
+                "source_poll_failed",
+                None,
+                Some(error.to_string()),
+            ));
             eprintln!("clawhip source tmux list-sessions failed: {error}");
             None
         }
@@ -327,6 +349,12 @@ async fn poll_tmux(
 
         match session_exists(session_name).await {
             Ok(false) => {
+                telemetry::emit(source_record(
+                    telemetry::event_name::SOURCE_INVENTORY,
+                    "source_missing",
+                    Some(session_name),
+                    None,
+                ));
                 sessions_to_unregister.push(session_name.clone());
                 flush_session_pending_keyword_hits(
                     &mut state.pending_keyword_hits,
@@ -341,6 +369,12 @@ async fn poll_tmux(
                 continue;
             }
             Err(error) => {
+                telemetry::emit(source_record(
+                    telemetry::event_name::SOURCE_DEGRADED,
+                    "source_poll_failed",
+                    Some(session_name),
+                    Some(error.to_string()),
+                ));
                 eprintln!(
                     "clawhip source tmux has-session failed for {}: {error}",
                     session_name
@@ -378,10 +412,16 @@ async fn poll_tmux(
                         Some(existing) => {
                             existing.pane_dead = pane.pane_dead;
                             if existing.content_hash != hash {
-                                let hits = collect_keyword_hits(
+                                let hits = collect_keyword_hits_with_provenance(
                                     &existing.snapshot,
                                     &pane.content,
                                     &registration.keywords,
+                                    KeywordMatchProvenance {
+                                        pane_id: pane.pane_id.clone(),
+                                        pane_name: pane.pane_name.clone(),
+                                        cursor: Some(pane.content.lines().count()),
+                                        source: KeywordMatchSource::FreshOutput,
+                                    },
                                 );
                                 existing.pane_name = pane.pane_name;
                                 existing.snapshot = pane.content;
@@ -391,6 +431,12 @@ async fn poll_tmux(
                                 Some(hits)
                             } else {
                                 if should_emit_stale(existing, now, registration.stale_minutes) {
+                                    telemetry::emit(source_record(
+                                        telemetry::event_name::SOURCE_INVENTORY,
+                                        "stale_emitted",
+                                        Some(session_name),
+                                        None,
+                                    ));
                                     tx.emit(tmux_stale_event(
                                         registration,
                                         existing.session.clone(),
@@ -415,10 +461,18 @@ async fn poll_tmux(
                     }
                 }
             }
-            Err(error) => eprintln!(
-                "clawhip source tmux snapshot failed for {}: {error}",
-                session_name
-            ),
+            Err(error) => {
+                telemetry::emit(source_record(
+                    telemetry::event_name::SOURCE_DEGRADED,
+                    "source_snapshot_failed",
+                    Some(session_name),
+                    Some(error.to_string()),
+                ));
+                eprintln!(
+                    "clawhip source tmux snapshot failed for {}: {error}",
+                    session_name
+                );
+            }
         }
     }
 
@@ -436,6 +490,24 @@ async fn poll_tmux(
         .retain(|session, _| sessions.contains_key(session));
 
     Ok(())
+}
+
+fn source_record(
+    event_name: &str,
+    reason_code: &str,
+    session: Option<&str>,
+    error: Option<String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let correlation = format!("source:tmux:{}", session.unwrap_or("inventory"));
+    let mut record = telemetry::record(event_name, reason_code, correlation);
+    record.insert("source".to_string(), serde_json::json!("tmux"));
+    if let Some(session) = session {
+        record.insert("session".to_string(), serde_json::json!(session));
+    }
+    if let Some(error) = error {
+        record.insert("error".to_string(), serde_json::json!(error));
+    }
+    record
 }
 
 async fn sync_active_config_registrations(
@@ -610,12 +682,19 @@ fn should_emit_stale(pane: &TmuxPaneState, now: Instant, stale_minutes: u64) -> 
 fn tmux_keyword_event(
     registration: &RegisteredTmuxSession,
     session: String,
-    hits: Vec<(String, String)>,
+    hits: Vec<KeywordHit>,
 ) -> IncomingEvent {
     let event = if hits.len() <= 1 {
         match hits.into_iter().next() {
-            Some((keyword, line)) => {
-                IncomingEvent::tmux_keyword(session, keyword, line, registration.channel.clone())
+            Some(hit) => {
+                let mut event = IncomingEvent::tmux_keyword(
+                    session,
+                    hit.keyword,
+                    hit.line,
+                    registration.channel.clone(),
+                );
+                add_keyword_hit_provenance(&mut event.payload, hit.provenance.as_ref());
+                event
             }
             None => IncomingEvent::tmux_keyword(
                 session,
@@ -624,14 +703,90 @@ fn tmux_keyword_event(
                 registration.channel.clone(),
             ),
         }
+    } else if hits.iter().all(|hit| hit.provenance.is_none()) {
+        IncomingEvent::tmux_keywords(
+            session,
+            hits.into_iter()
+                .map(|hit| (hit.keyword, hit.line))
+                .collect(),
+            registration.channel.clone(),
+        )
     } else {
-        IncomingEvent::tmux_keywords(session, hits, registration.channel.clone())
+        let hit_payloads = hits
+            .into_iter()
+            .map(|hit| {
+                let mut payload = serde_json::json!({
+                    "keyword": hit.keyword,
+                    "line": hit.line,
+                });
+                add_keyword_hit_provenance(&mut payload, hit.provenance.as_ref());
+                payload
+            })
+            .collect::<Vec<_>>();
+        tmux_keyword_event_from_hit_payloads(session, registration.channel.clone(), hit_payloads)
     };
 
     event
         .with_routing_metadata(&registration.routing)
         .with_mention(registration.mention.clone())
         .with_format(registration.format.clone())
+}
+
+fn tmux_keyword_event_from_hit_payloads(
+    session: String,
+    channel: Option<String>,
+    hit_payloads: Vec<serde_json::Value>,
+) -> IncomingEvent {
+    let hit_count = hit_payloads.len();
+    let first_keyword = hit_payloads
+        .first()
+        .and_then(|hit| hit.get("keyword"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let first_line = hit_payloads
+        .first()
+        .and_then(|hit| hit.get("line"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    IncomingEvent {
+        kind: "tmux.keyword".to_string(),
+        channel,
+        mention: None,
+        format: None,
+        template: None,
+        payload: serde_json::json!({
+            "session": session,
+            "keyword": first_keyword,
+            "line": first_line,
+            "hit_count": hit_count,
+            "hits": hit_payloads,
+        }),
+    }
+}
+
+fn add_keyword_hit_provenance(
+    payload: &mut serde_json::Value,
+    provenance: Option<&KeywordMatchProvenance>,
+) {
+    let Some(provenance) = provenance else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+
+    object.insert("pane_id".to_string(), serde_json::json!(provenance.pane_id));
+    object.insert(
+        "pane_name".to_string(),
+        serde_json::json!(provenance.pane_name),
+    );
+    if let Some(cursor) = provenance.cursor {
+        object.insert("cursor".to_string(), serde_json::json!(cursor));
+    }
+    object.insert("source".to_string(), serde_json::json!("fresh-output"));
 }
 
 fn tmux_stale_event(
@@ -672,11 +827,7 @@ async fn flush_pending_keyword_hits<E: EventEmitter>(
     let Some(pending) = pending_keyword_hits.take() else {
         return Ok(());
     };
-    let hits = pending
-        .into_hits()
-        .into_iter()
-        .map(|hit| (hit.keyword, hit.line))
-        .collect::<Vec<_>>();
+    let hits = pending.into_hits();
     if hits.is_empty() {
         return Ok(());
     }
@@ -854,7 +1005,7 @@ pub fn current_timestamp_rfc3339() -> String {
 mod tests {
     use super::*;
     use crate::event::{EventBody, compat::from_incoming_event};
-    use crate::keyword_window::KeywordHit;
+    use crate::keyword_window::{KeywordHit, collect_keyword_hits};
 
     fn registration(keywords: Vec<&str>) -> RegisteredTmuxSession {
         RegisteredTmuxSession {
@@ -870,6 +1021,14 @@ mod tests {
             registration_source: RegistrationSource::ConfigMonitor,
             parent_process: None,
             active_wrapper_monitor: false,
+        }
+    }
+
+    fn keyword_hit(keyword: &str, line: &str) -> KeywordHit {
+        KeywordHit {
+            keyword: keyword.into(),
+            line: line.into(),
+            provenance: None,
         }
     }
 
@@ -897,7 +1056,7 @@ PR created #7",
         let event = tmux_keyword_event(
             &registration,
             "issue-24".into(),
-            vec![("error".into(), "boom".into())],
+            vec![keyword_hit("error", "boom")],
         );
 
         assert_eq!(event.channel.as_deref(), Some("alerts"));
@@ -907,6 +1066,30 @@ PR created #7",
         assert_eq!(event.payload["keyword"], "error");
         assert_eq!(event.payload["line"], "boom");
         assert_eq!(event.payload["hit_count"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn tmux_keyword_event_includes_match_provenance() {
+        let registration = registration(vec!["error"]);
+        let event = tmux_keyword_event(
+            &registration,
+            "issue-24".into(),
+            vec![KeywordHit {
+                keyword: "error".into(),
+                line: "error: failed".into(),
+                provenance: Some(KeywordMatchProvenance {
+                    pane_id: "%3".into(),
+                    pane_name: "0.1".into(),
+                    cursor: Some(42),
+                    source: KeywordMatchSource::FreshOutput,
+                }),
+            }],
+        );
+
+        assert_eq!(event.payload["pane_id"], "%3");
+        assert_eq!(event.payload["pane_name"], "0.1");
+        assert_eq!(event.payload["cursor"], 42);
+        assert_eq!(event.payload["source"], "fresh-output");
     }
 
     #[test]
@@ -922,7 +1105,7 @@ PR created #7",
         let event = tmux_keyword_event(
             &registration,
             "clawhip-issue-152".into(),
-            vec![("error".into(), "boom".into())],
+            vec![keyword_hit("error", "boom")],
         );
 
         assert_eq!(event.payload["project"], "clawhip");
@@ -942,8 +1125,8 @@ PR created #7",
             &registration,
             "issue-24".into(),
             vec![
-                ("error".into(), "boom".into()),
-                ("complete".into(), "done".into()),
+                keyword_hit("error", "boom"),
+                keyword_hit("complete", "done"),
             ],
         );
 
@@ -1126,14 +1309,17 @@ PR created #7",
                 KeywordHit {
                     keyword: "error".into(),
                     line: "error: failed".into(),
+                    provenance: None,
                 },
                 KeywordHit {
                     keyword: "error".into(),
                     line: "error: failed".into(),
+                    provenance: None,
                 },
                 KeywordHit {
                     keyword: "complete".into(),
                     line: "complete".into(),
+                    provenance: None,
                 },
             ]);
             pending
@@ -1173,6 +1359,7 @@ PR created #7",
             pending.push(vec![KeywordHit {
                 keyword: "error".into(),
                 line: "boom".into(),
+                provenance: None,
             }]);
             pending
         });
@@ -1275,6 +1462,7 @@ error: failed";
             vec![KeywordHit {
                 keyword: "error".into(),
                 line: "error: failed".into(),
+                provenance: None,
             }],
         );
         push_session_pending_keyword_hits(
@@ -1285,10 +1473,12 @@ error: failed";
                 KeywordHit {
                     keyword: "error".into(),
                     line: "error: failed".into(),
+                    provenance: None,
                 },
                 KeywordHit {
                     keyword: "complete".into(),
                     line: "build complete".into(),
+                    provenance: None,
                 },
             ],
         );
@@ -1333,6 +1523,7 @@ error: failed";
             vec![KeywordHit {
                 keyword: "error".into(),
                 line: "error: failed".into(),
+                provenance: None,
             }],
         );
 
