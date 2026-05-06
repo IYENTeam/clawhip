@@ -22,9 +22,10 @@ impl SlackClient {
             SinkTarget::DiscordChannel(_)
             | SinkTarget::DiscordWebhook(_)
             | SinkTarget::OpenClaw
-            | SinkTarget::IyenSystem => {
-                Err("cannot send Discord/OpenClaw/IyenSystem target via Slack client".into())
-            }
+            | SinkTarget::IyenSystem
+            | SinkTarget::Hermes => Err(
+                "cannot send Discord/OpenClaw/IyenSystem/Hermes target via Slack client".into(),
+            ),
         }
     }
 

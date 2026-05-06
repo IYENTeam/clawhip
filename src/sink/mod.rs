@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod hermes;
 pub mod iyensystem;
 pub mod openclaw;
 pub mod slack;
@@ -10,6 +11,7 @@ use crate::events::MessageFormat;
 use serde_json::Value;
 
 pub use discord::DiscordSink;
+pub use hermes::HermesSink;
 pub use iyensystem::IyenSystemSink;
 pub use openclaw::OpenClawSink;
 pub use slack::SlackSink;
@@ -21,6 +23,10 @@ pub enum SinkTarget {
     SlackWebhook(String),
     OpenClaw,
     IyenSystem,
+    /// Hermes Agent gateway — peer to OpenClaw as a decision authority
+    /// for IYEN label-driven lanes. Carries no per-target data because
+    /// the gateway URL/token live in `[providers.hermes]` config.
+    Hermes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

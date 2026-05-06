@@ -164,8 +164,9 @@ impl Router {
             SinkTarget::DiscordWebhook(_)
             | SinkTarget::SlackWebhook(_)
             | SinkTarget::OpenClaw
-            | SinkTarget::IyenSystem => Err(
-                "matched route uses a webhook, openclaw, or iyensystem instead of a channel".into(),
+            | SinkTarget::IyenSystem
+            | SinkTarget::Hermes => Err(
+                "matched route uses a webhook or non-channel sink (openclaw / iyensystem / hermes) instead of a channel".into(),
             ),
         }
     }
@@ -236,6 +237,7 @@ impl Router {
                 }),
             "openclaw" => Ok(SinkTarget::OpenClaw),
             "iyensystem" => Ok(SinkTarget::IyenSystem),
+            "hermes" => Ok(SinkTarget::Hermes),
             other => Err(format!(
                 "unsupported sink '{other}' for event {}",
                 event.canonical_kind()

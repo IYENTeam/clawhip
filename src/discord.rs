@@ -111,6 +111,9 @@ impl DiscordClient {
                 SinkTarget::IyenSystem => {
                     return Err("cannot send IyenSystem event via Discord client".into());
                 }
+                SinkTarget::Hermes => {
+                    return Err("cannot send Hermes event via Discord client".into());
+                }
             };
 
             match result {
@@ -294,6 +297,7 @@ fn target_rate_limit_key(target: &SinkTarget) -> String {
         SinkTarget::SlackWebhook(webhook_url) => format!("slack:webhook:{webhook_url}"),
         SinkTarget::OpenClaw => "openclaw:gateway".to_string(),
         SinkTarget::IyenSystem => "iyensystem:event".to_string(),
+        SinkTarget::Hermes => "hermes:gateway".to_string(),
     }
 }
 
