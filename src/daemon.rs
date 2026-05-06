@@ -21,7 +21,7 @@ use crate::events::{IncomingEvent, MessageFormat, normalize_event};
 use crate::native_hooks::incoming_event_from_native_hook_json;
 use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
-use crate::sink::{DiscordSink, IyenSystemSink, OpenClawSink, Sink, SlackSink};
+use crate::sink::{DiscordSink, HermesSink, IyenSystemSink, OpenClawSink, Sink, SlackSink};
 use crate::source::{
     GitHubSource, GitSource, OpenCodeSource, RegisteredTmuxSession, SharedTmuxRegistry, Source,
     TmuxSource, WorkspaceSource, list_active_tmux_registrations,
@@ -75,6 +75,21 @@ pub async fn run(
             )),
         );
         println!("clawhip: iyensystem sink registered");
+    }
+    if config.providers.hermes.is_configured() {
+        let hermes_cfg = &config.providers.hermes;
+        let mut sink = HermesSink::new(
+            hermes_cfg.base_url.clone().unwrap_or_default(),
+            hermes_cfg.auth_token.clone().unwrap_or_default(),
+        );
+        if let Some(instructions) = hermes_cfg.instructions.clone() {
+            sink = sink.with_instructions(instructions);
+        }
+        if let Some(model) = hermes_cfg.model.clone() {
+            sink = sink.with_model(model);
+        }
+        sinks.insert("hermes".into(), Box::new(sink));
+        println!("clawhip: hermes sink registered");
     }
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());

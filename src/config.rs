@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
 use crate::events::MessageFormat;
 use crate::source::workspace::{default_workspace_debounce_ms, default_workspace_watch_dirs};
+use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -43,6 +43,8 @@ pub struct ProvidersConfig {
     pub openclaw: OpenClawConfig,
     #[serde(default)]
     pub iyensystem: IyenSystemConfig,
+    #[serde(default)]
+    pub hermes: HermesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -66,6 +68,27 @@ pub struct OpenClawConfig {
 pub struct IyenSystemConfig {
     pub url: Option<String>,
     pub auth_token: Option<String>,
+}
+
+/// Configuration for routing events to a Hermes Agent gateway as a
+/// decision authority. Mirrors [`OpenClawConfig`]: when both
+/// `base_url` and `auth_token` are set, the dispatcher registers a
+/// `hermes` sink and routes with `sink = "hermes"` become eligible.
+///
+/// Optional knobs:
+///   - `instructions`: override the IYEN-domain system prompt baked
+///     into [`crate::sink::HermesSink`]. Used when an operator ships a
+///     custom Hermes skill.
+///   - `model`: pin a specific model id; otherwise Hermes uses its
+///     configured default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HermesConfig {
+    pub base_url: Option<String>,
+    pub auth_token: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,12 +119,19 @@ impl IyenSystemConfig {
     }
 }
 
+impl HermesConfig {
+    pub fn is_configured(&self) -> bool {
+        crate::sink::HermesSink::is_configured(&self.base_url, &self.auth_token)
+    }
+}
+
 impl ProvidersConfig {
     fn is_empty(&self) -> bool {
         self.discord.is_empty()
             && self.slack.is_empty()
             && !self.openclaw.is_configured()
             && !self.iyensystem.is_configured()
+            && !self.hermes.is_configured()
     }
 }
 
@@ -657,7 +687,10 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack" | "openclaw" | "iyensystem") {
+            if !matches!(
+                sink,
+                "discord" | "slack" | "openclaw" | "iyensystem" | "hermes"
+            ) {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -720,6 +753,16 @@ impl AppConfig {
                     if !self.providers.iyensystem.is_configured() {
                         return Err(format!(
                             "route #{} ({}) uses iyensystem sink but [providers.iyensystem] is not configured",
+                            index + 1,
+                            route.event
+                        )
+                        .into());
+                    }
+                }
+                "hermes" => {
+                    if !self.providers.hermes.is_configured() {
+                        return Err(format!(
+                            "route #{} ({}) uses hermes sink but [providers.hermes] is not configured",
                             index + 1,
                             route.event
                         )
