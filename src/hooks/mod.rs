@@ -10,7 +10,8 @@ use serde_json::{Map, Value, json};
 use crate::Result;
 use crate::cli::{HookInstallScope, HookProvider, HooksInstallArgs};
 use crate::native_hooks::{
-    CLAUDE_SETTINGS_FILE, CODEX_HOOKS_FILE, HOOK_SCRIPT, SHARED_HOOK_EVENTS, generated_hook_script,
+    CLAUDE_SETTINGS_FILE, CODEX_HOOKS_FILE, CURSOR_HOOKS_FILE, WINDSURF_HOOKS_FILE, HOOK_SCRIPT,
+    SHARED_HOOK_EVENTS, generated_hook_script,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +27,7 @@ pub fn install(args: HooksInstallArgs) -> Result<()> {
         println!("  {}", path.display());
     }
     println!("Supported shared events: {}", SHARED_HOOK_EVENTS.join(", "));
-    println!("Ingress: clawhip native hook --provider <codex|claude-code>");
+    println!("Ingress: clawhip native hook --provider <codex|claude-code|cursor|windsurf>");
 
     Ok(())
 }
@@ -49,6 +50,8 @@ fn run_install(args: &HooksInstallArgs) -> Result<InstallReport> {
         let path = match provider {
             HookProvider::Codex => write_codex_hooks(&root, &global_hook_script_path)?,
             HookProvider::ClaudeCode => write_claude_settings(&root, &global_hook_script_path)?,
+            HookProvider::Cursor => write_cursor_hooks(&root, &global_hook_script_path)?,
+            HookProvider::Windsurf => write_windsurf_hooks(&root, &global_hook_script_path)?,
         };
         generated_files.push(path);
     }
@@ -68,7 +71,7 @@ fn ensure_supported_install_scope(args: &HooksInstallArgs) -> Result<()> {
     }
 
     Err(anyhow!(
-        "Claude Code provider-native hook forwarding is global-only; Codex may use either ~/.codex/hooks.json or <repo>/.codex/hooks.json with the clawhip bridge in ~/.clawhip"
+        "Claude Code provider-native hook forwarding is global-only; Codex, Cursor, and Windsurf may use either ~/.codex/hooks.json or <repo>/.codex/hooks.json with the clawhip bridge in ~/.clawhip"
     )
     .into())
 }
@@ -82,7 +85,12 @@ fn resolve_install_root(args: &HooksInstallArgs) -> Result<PathBuf> {
 
 fn selected_providers(args: &HooksInstallArgs) -> Vec<HookProvider> {
     if args.all || args.provider.is_empty() {
-        vec![HookProvider::Codex, HookProvider::ClaudeCode]
+        vec![
+            HookProvider::Codex,
+            HookProvider::ClaudeCode,
+            HookProvider::Cursor,
+            HookProvider::Windsurf,
+        ]
     } else {
         args.provider.clone()
     }
@@ -93,6 +101,34 @@ fn write_codex_hooks(root: &Path, hook_script_path: &Path) -> Result<PathBuf> {
     let mut document = read_json_object(&path)?;
     let hooks = ensure_child_object(&mut document, "hooks")?;
     let command = hook_command(hook_script_path, HookProvider::Codex);
+
+    for event in SHARED_HOOK_EVENTS {
+        upsert_hook_event(hooks, event, &command, codex_matcher_for(event));
+    }
+
+    write_json(&path, Value::Object(document))?;
+    Ok(path)
+}
+
+fn write_cursor_hooks(root: &Path, hook_script_path: &Path) -> Result<PathBuf> {
+    let path = root.join(CURSOR_HOOKS_FILE);
+    let mut document = read_json_object(&path)?;
+    let hooks = ensure_child_object(&mut document, "hooks")?;
+    let command = hook_command(hook_script_path, HookProvider::Cursor);
+
+    for event in SHARED_HOOK_EVENTS {
+        upsert_hook_event(hooks, event, &command, codex_matcher_for(event));
+    }
+
+    write_json(&path, Value::Object(document))?;
+    Ok(path)
+}
+
+fn write_windsurf_hooks(root: &Path, hook_script_path: &Path) -> Result<PathBuf> {
+    let path = root.join(WINDSURF_HOOKS_FILE);
+    let mut document = read_json_object(&path)?;
+    let hooks = ensure_child_object(&mut document, "hooks")?;
+    let command = hook_command(hook_script_path, HookProvider::Windsurf);
 
     for event in SHARED_HOOK_EVENTS {
         upsert_hook_event(hooks, event, &command, codex_matcher_for(event));
@@ -388,6 +424,16 @@ mod tests {
                 .generated_files
                 .contains(&dir.path().join(CLAUDE_SETTINGS_FILE))
         );
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(CURSOR_HOOKS_FILE))
+        );
+        assert!(
+            report
+                .generated_files
+                .contains(&dir.path().join(WINDSURF_HOOKS_FILE))
+        );
 
         if let Some(previous) = previous_home {
             unsafe {
@@ -416,6 +462,28 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_claude_settings(dir.path(), &dir.path().join(HOOK_SCRIPT))
             .expect("claude settings");
+        let document: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        for event in SHARED_HOOK_EVENTS {
+            assert!(document["hooks"][event].is_array(), "missing {event}");
+        }
+    }
+
+    #[test]
+    fn cursor_install_writes_shared_events() {
+        let dir = tempdir().expect("tempdir");
+        let path =
+            write_cursor_hooks(dir.path(), &dir.path().join(HOOK_SCRIPT)).expect("cursor hooks");
+        let document: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        for event in SHARED_HOOK_EVENTS {
+            assert!(document["hooks"][event].is_array(), "missing {event}");
+        }
+    }
+
+    #[test]
+    fn windsurf_install_writes_shared_events() {
+        let dir = tempdir().expect("tempdir");
+        let path =
+            write_windsurf_hooks(dir.path(), &dir.path().join(HOOK_SCRIPT)).expect("windsurf hooks");
         let document: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         for event in SHARED_HOOK_EVENTS {
             assert!(document["hooks"][event].is_array(), "missing {event}");

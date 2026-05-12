@@ -15,6 +15,8 @@ pub const PROJECT_METADATA_RELATIVE_PATH: &str = CLAWHIP_PROJECT_FILE;
 #[allow(dead_code)]
 pub const NATIVE_HOOK_SCRIPT_RELATIVE_PATH: &str = HOOK_SCRIPT;
 pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
+pub const CURSOR_HOOKS_FILE: &str = ".cursor/hooks.json";
+pub const WINDSURF_HOOKS_FILE: &str = ".windsurf/hooks.json";
 #[allow(dead_code)]
 pub const CODEX_CONFIG_FILE: &str = ".codex/config.toml";
 pub const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";

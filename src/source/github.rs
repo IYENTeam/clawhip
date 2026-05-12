@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -39,7 +43,11 @@ impl Source for GitHubSource {
                 None
             }
         };
-        let mut state = HashMap::new();
+
+        let state_path = state_file_path(&self.config);
+        let file_state = load_monitor_state(&state_path);
+        let known_repos: HashSet<String> = file_state.keys().cloned().collect();
+        let mut state = file_state;
 
         loop {
             run_github_poll_cycle(
@@ -47,6 +55,8 @@ impl Source for GitHubSource {
                 github_client.as_ref(),
                 &tx,
                 &mut state,
+                &known_repos,
+                &state_path,
             )
             .await;
             sleep(Duration::from_secs(
@@ -57,20 +67,21 @@ impl Source for GitHubSource {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct GitHubRepoState {
     issues: HashMap<u64, IssueSnapshot>,
     prs: HashMap<u64, PullRequestSnapshot>,
     ci: HashMap<String, GitHubCISnapshot>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct IssueSnapshot {
     title: String,
     state: String,
     comments: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PullRequestSnapshot {
     title: String,
     status: String,
@@ -79,7 +90,7 @@ struct PullRequestSnapshot {
     head_sha: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct GitHubCISnapshot {
     pr_number: Option<u64>,
     workflow: String,
@@ -113,13 +124,95 @@ impl GitHubCISnapshot {
     }
 }
 
+// ── State persistence ────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct GitHubMonitorStateFile {
+    repos: HashMap<String, GitHubRepoState>,
+    updated_at: String,
+}
+
+/// Returns the path for the GitHub monitor state file.
+fn state_file_path(config: &AppConfig) -> PathBuf {
+    config
+        .monitors
+        .github_monitor_state_path
+        .clone()
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".clawhip").join("github-monitor-state.json")
+        })
+}
+
+/// Loads persisted GitHub monitor state from disk.
+/// Returns an empty map if the file is missing or corrupt.
+fn load_monitor_state(path: &Path) -> HashMap<String, GitHubRepoState> {
+    match fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<GitHubMonitorStateFile>(&content) {
+            Ok(file) => {
+                eprintln!(
+                    "clawhip source github: loaded state for {} repo(s) from {}",
+                    file.repos.len(),
+                    path.display()
+                );
+                file.repos
+            }
+            Err(_) => {
+                // Corrupt file — ignore, fall through to legacy suppress behaviour.
+                eprintln!(
+                    "clawhip source github: corrupt state file at {}, ignoring",
+                    path.display()
+                );
+                HashMap::new()
+            }
+        },
+        Err(_) => {
+            // No state file yet — first run, legacy behaviour.
+            HashMap::new()
+        }
+    }
+}
+
+/// Persists the current in-memory state to disk.
+fn save_monitor_state(path: &Path, repos: &HashMap<String, GitHubRepoState>) {
+    let updated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| String::new());
+
+    let file = GitHubMonitorStateFile {
+        repos: repos.clone(),
+        updated_at,
+    };
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("clawhip source github: failed to create state dir: {e}");
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(&file) {
+        Ok(json) => {
+            if let Err(e) = fs::write(path, &json) {
+                eprintln!("clawhip source github: failed to write state file: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("clawhip source github: failed to serialize state: {e}");
+        }
+    }
+}
+
+// ── Poll cycle ────────────────────────────────────────────────────
+
 async fn run_github_poll_cycle(
     config: &AppConfig,
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
+    known_repos: &HashSet<String>,
+    state_path: &Path,
 ) {
-    if let Err(error) = poll_github(config, github_client, tx, state).await {
+    if let Err(error) = poll_github(config, github_client, tx, state, known_repos).await {
         telemetry::emit(source_record(
             telemetry::event_name::SOURCE_DEGRADED,
             "source_poll_failed",
@@ -128,6 +221,7 @@ async fn run_github_poll_cycle(
         ));
         eprintln!("clawhip source github poll failed: {error}");
     }
+    save_monitor_state(state_path, state);
 }
 
 async fn snapshot_github_repo(repo: &GitRepoMonitor) -> Result<GitSnapshot> {
@@ -165,6 +259,7 @@ async fn poll_github(
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
+    known_repos: &HashSet<String>,
 ) -> Result<()> {
     for repo in &config.monitors.git.repos {
         if !repo.emit_issue_opened && !repo.emit_pr_status {
@@ -189,7 +284,9 @@ async fn poll_github(
         };
 
         let previous = state.get(&repo.path);
-        let issues = match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
+        let is_new_repo = previous.is_none() && !known_repos.contains(&repo.path);
+
+        let issues = match poll_issues(config, github_client, repo, &snapshot, previous, is_new_repo, tx).await {
             Ok(issues) => issues,
             Err(error) => {
                 eprintln!(
@@ -202,7 +299,7 @@ async fn poll_github(
             }
         };
         let prs =
-            match poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await {
+            match poll_pull_requests(config, github_client, repo, &snapshot, previous, is_new_repo, tx).await {
                 Ok(prs) => prs,
                 Err(error) => {
                     eprintln!(
@@ -212,7 +309,7 @@ async fn poll_github(
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
             };
-        let ci = match poll_ci_statuses(config, github_client, repo, &snapshot, previous, &prs, tx)
+        let ci = match poll_ci_statuses(config, github_client, repo, &snapshot, previous, is_new_repo, &prs, tx)
             .await
         {
             Ok(ci) => ci,
@@ -237,6 +334,7 @@ async fn poll_issues(
     repo: &GitRepoMonitor,
     snapshot: &GitSnapshot,
     previous: Option<&GitHubRepoState>,
+    is_new_repo: bool,
     tx: &mpsc::Sender<IncomingEvent>,
 ) -> Result<HashMap<u64, IssueSnapshot>> {
     if !repo.emit_issue_opened {
@@ -258,6 +356,24 @@ async fn poll_issues(
                     collect_issue_events(repo, &snapshot.repo_name, &previous.issues, &issues)
                 {
                     send_event(tx, event).await?;
+                }
+            } else if is_new_repo {
+                // Backfill: emit all open issues for a newly registered repo.
+                for (number, issue) in &issues {
+                    if issue.state == "open" {
+                        send_event(
+                            tx,
+                            IncomingEvent::github_issue_opened(
+                                snapshot.repo_name.clone(),
+                                *number,
+                                issue.title.clone(),
+                                repo.channel.clone(),
+                            )
+                            .with_mention(repo.mention.clone())
+                            .with_format(repo.format.clone()),
+                        )
+                        .await?;
+                    }
                 }
             }
             Ok(issues)
@@ -286,6 +402,7 @@ async fn poll_pull_requests(
     repo: &GitRepoMonitor,
     snapshot: &GitSnapshot,
     previous: Option<&GitHubRepoState>,
+    is_new_repo: bool,
     tx: &mpsc::Sender<IncomingEvent>,
 ) -> Result<HashMap<u64, PullRequestSnapshot>> {
     if !repo.emit_pr_status {
@@ -322,6 +439,25 @@ async fn poll_pull_requests(
                         }
                     }
                 }
+            } else if is_new_repo {
+                // Backfill: emit all PRs for a newly registered repo.
+                for (number, pr) in &prs {
+                    send_event(
+                        tx,
+                        IncomingEvent::github_pr_status_changed(
+                            snapshot.repo_name.clone(),
+                            *number,
+                            pr.title.clone(),
+                            "<new>".to_string(),
+                            pr.status.clone(),
+                            pr.url.clone(),
+                            repo.channel.clone(),
+                        )
+                        .with_mention(repo.mention.clone())
+                        .with_format(repo.format.clone()),
+                    )
+                    .await?;
+                }
             }
             Ok(prs)
         }
@@ -347,6 +483,7 @@ async fn poll_ci_statuses(
     repo: &GitRepoMonitor,
     snapshot: &GitSnapshot,
     previous: Option<&GitHubRepoState>,
+    is_new_repo: bool,
     prs: &HashMap<u64, PullRequestSnapshot>,
     tx: &mpsc::Sender<IncomingEvent>,
 ) -> Result<HashMap<String, GitHubCISnapshot>> {
@@ -376,6 +513,11 @@ async fn poll_ci_statuses(
         Ok(ci) => {
             if let Some(previous) = previous {
                 for event in collect_ci_events(repo, &snapshot.repo_name, &previous.ci, &ci) {
+                    send_event(tx, event).await?;
+                }
+            } else if is_new_repo {
+                // Backfill: emit all current CI states for a newly registered repo.
+                for event in collect_ci_events(repo, &snapshot.repo_name, &HashMap::new(), &ci) {
                     send_event(tx, event).await?;
                 }
             }
@@ -1056,7 +1198,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let prs = HashMap::new();
 
-        let ci = poll_ci_statuses(&config, Some(&client), &repo, &snapshot, None, &prs, &tx)
+        let ci = poll_ci_statuses(&config, Some(&client), &repo, &snapshot, None, false, &prs, &tx)
             .await
             .unwrap();
 
@@ -1413,5 +1555,396 @@ mod tests {
 
         source_task.abort();
         let _ = source_task.await;
+    }
+
+    // ── State persistence tests ─────────────────────────────────────
+
+    #[test]
+    fn state_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        let mut repos = HashMap::new();
+        let mut issues = HashMap::new();
+        issues.insert(
+            1_u64,
+            IssueSnapshot {
+                title: "bug: fix".into(),
+                state: "open".into(),
+                comments: 3,
+            },
+        );
+        issues.insert(
+            2_u64,
+            IssueSnapshot {
+                title: "feat: add".into(),
+                state: "closed".into(),
+                comments: 5,
+            },
+        );
+        let mut prs = HashMap::new();
+        prs.insert(
+            42_u64,
+            PullRequestSnapshot {
+                title: "PR title".into(),
+                status: "open".into(),
+                url: "https://github.com/org/repo/pull/42".into(),
+                head_branch: "main".into(),
+                head_sha: "abc123".into(),
+            },
+        );
+        let mut ci = HashMap::new();
+        let ci_snap = GitHubCISnapshot {
+            pr_number: Some(42),
+            workflow: "CI".into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            sha: "abc123".into(),
+            url: "https://github.com/org/repo/actions/runs/1".into(),
+            branch: Some("main".into()),
+            run_id: Some("1".into()),
+            run_job_count: 3,
+            run_all_terminal: true,
+        };
+        let ci_key = ci_snap.dedupe_key();
+        ci.insert(ci_key.clone(), ci_snap);
+
+        repos.insert(
+            "/tmp/repo-a".to_string(),
+            GitHubRepoState {
+                issues: issues.clone(),
+                prs: prs.clone(),
+                ci: ci.clone(),
+            },
+        );
+
+        // Save
+        save_monitor_state(&path, &repos);
+        assert!(path.exists(), "state file should exist after save");
+
+        // Load
+        let loaded = load_monitor_state(&path);
+        assert_eq!(loaded.len(), 1);
+        let loaded_repo = loaded.get("/tmp/repo-a").unwrap();
+        assert_eq!(loaded_repo.issues.len(), 2);
+        assert_eq!(loaded_repo.issues.get(&1).unwrap().title, "bug: fix");
+        assert_eq!(loaded_repo.issues.get(&1).unwrap().state, "open");
+        assert_eq!(loaded_repo.issues.get(&1).unwrap().comments, 3);
+        assert_eq!(loaded_repo.prs.len(), 1);
+        assert_eq!(loaded_repo.prs.get(&42).unwrap().title, "PR title");
+        assert_eq!(loaded_repo.ci.len(), 1);
+        assert_eq!(
+            loaded_repo.ci.get(&ci_key).unwrap().conclusion.as_deref(),
+            Some("success")
+        );
+    }
+
+    #[test]
+    fn state_file_missing_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        let state = load_monitor_state(&path);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn state_file_corrupt_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.json");
+        fs::write(&path, "not valid json at all").unwrap();
+        let state = load_monitor_state(&path);
+        assert!(state.is_empty());
+    }
+
+    #[tokio::test]
+    async fn backfill_issues_emit_events_for_new_repo() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {"number": 1, "title": "open issue", "state": "open", "comments": 0},
+                {"number": 2, "title": "closed issue", "state": "closed", "comments": 1}
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        let client = build_github_client(None).unwrap();
+        let repo = GitRepoMonitor {
+            path: "/tmp/new-repo".into(),
+            name: Some("new-repo".into()),
+            github_repo: Some("owner/new-repo".into()),
+            emit_issue_opened: true,
+            emit_pr_status: false,
+            ..GitRepoMonitor::default()
+        };
+        let snapshot = GitSnapshot {
+            repo_name: "new-repo".into(),
+            repo_path: "/tmp/new-repo".into(),
+            worktree_path: "/tmp/new-repo".into(),
+            branch: "main".into(),
+            head: "head".into(),
+            commits: Vec::new(),
+            github_repo: Some("owner/new-repo".into()),
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let issues = poll_issues(
+            &config,
+            Some(&client),
+            &repo,
+            &snapshot,
+            None,
+            true, // is_new_repo = true → backfill
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        // Both issues should be returned
+        assert_eq!(issues.len(), 2);
+        // Only the open issue should have been emitted
+        let emitted = rx.try_recv().unwrap();
+        assert_eq!(emitted.canonical_kind(), "github.issue-opened");
+        assert_eq!(emitted.payload["number"], json!(1));
+        assert_eq!(emitted.payload["title"], "open issue");
+        // Second emission should be pending (closed issue is skipped in backfill)
+        assert!(rx.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn backfill_prs_emit_events_for_new_repo() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {"number": 10, "title": "open PR", "state": "open", "html_url": "https://github.com/owner/new-repo/pull/10", "merged_at": null, "head": {"ref": "feat", "sha": "abc"}},
+                {"number": 11, "title": "merged PR", "state": "closed", "html_url": "https://github.com/owner/new-repo/pull/11", "merged_at": "2026-01-01T00:00:00Z", "head": {"ref": "main", "sha": "def"}}
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        let client = build_github_client(None).unwrap();
+        let repo = GitRepoMonitor {
+            path: "/tmp/new-repo".into(),
+            name: Some("new-repo".into()),
+            github_repo: Some("owner/new-repo".into()),
+            emit_issue_opened: false,
+            emit_pr_status: true,
+            ..GitRepoMonitor::default()
+        };
+        let snapshot = GitSnapshot {
+            repo_name: "new-repo".into(),
+            repo_path: "/tmp/new-repo".into(),
+            worktree_path: "/tmp/new-repo".into(),
+            branch: "main".into(),
+            head: "head".into(),
+            commits: Vec::new(),
+            github_repo: Some("owner/new-repo".into()),
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let prs = poll_pull_requests(
+            &config,
+            Some(&client),
+            &repo,
+            &snapshot,
+            None,
+            true, // is_new_repo = true → backfill
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prs.len(), 2);
+        // Both PRs should be emitted during backfill
+        let first = rx.try_recv().unwrap();
+        assert_eq!(first.canonical_kind(), "github.pr-status-changed");
+        assert_eq!(first.payload["number"], json!(10));
+        assert_eq!(first.payload["old_status"], "<new>");
+        let second = rx.try_recv().unwrap();
+        assert_eq!(second.canonical_kind(), "github.pr-status-changed");
+        assert_eq!(second.payload["number"], json!(11));
+        assert_eq!(second.payload["old_status"], "<new>");
+        assert!(rx.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn backfill_suppressed_for_known_repo_on_first_poll() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {"number": 5, "title": "existing issue", "state": "open", "comments": 0}
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        let client = build_github_client(None).unwrap();
+        let repo = GitRepoMonitor {
+            path: "/tmp/known-repo".into(),
+            name: Some("known-repo".into()),
+            github_repo: Some("owner/known-repo".into()),
+            emit_issue_opened: true,
+            emit_pr_status: false,
+            ..GitRepoMonitor::default()
+        };
+        let snapshot = GitSnapshot {
+            repo_name: "known-repo".into(),
+            repo_path: "/tmp/known-repo".into(),
+            worktree_path: "/tmp/known-repo".into(),
+            branch: "main".into(),
+            head: "head".into(),
+            commits: Vec::new(),
+            github_repo: Some("owner/known-repo".into()),
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let issues = poll_issues(
+            &config,
+            Some(&client),
+            &repo,
+            &snapshot,
+            None,
+            false, // is_new_repo = false → known repo, suppress (legacy)
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        // No events should be emitted for a known repo (legacy first-poll suppress)
+        assert!(rx.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn known_repo_restores_state_and_does_not_backfill() {
+        // Simulate restart: state exists in file, repo is "known"
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let _req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {"number": 1, "title": "existing issue", "state": "open", "comments": 0}
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        let client = build_github_client(None).unwrap();
+        let repo = GitRepoMonitor {
+            path: "/tmp/persisted-repo".into(),
+            name: Some("persisted-repo".into()),
+            github_repo: Some("owner/persisted-repo".into()),
+            emit_issue_opened: true,
+            emit_pr_status: false,
+            ..GitRepoMonitor::default()
+        };
+        let snapshot = GitSnapshot {
+            repo_name: "persisted-repo".into(),
+            repo_path: "/tmp/persisted-repo".into(),
+            worktree_path: "/tmp/persisted-repo".into(),
+            branch: "main".into(),
+            head: "head".into(),
+            commits: Vec::new(),
+            github_repo: Some("owner/persisted-repo".into()),
+        };
+
+        // Set up state with the repo already tracked (simulating restart)
+        let mut state = HashMap::new();
+        let mut issues = HashMap::new();
+        issues.insert(
+            1_u64,
+            IssueSnapshot {
+                title: "existing issue".into(),
+                state: "open".into(),
+                comments: 0,
+            },
+        );
+        state.insert(
+            "/tmp/persisted-repo".to_string(),
+            GitHubRepoState {
+                issues,
+                prs: HashMap::new(),
+                ci: HashMap::new(),
+            },
+        );
+
+        let known_repos: HashSet<String> = state.keys().cloned().collect();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let issues = poll_issues(
+            &config,
+            Some(&client),
+            &repo,
+            &snapshot,
+            state.get("/tmp/persisted-repo"), // previous restored from file state
+            false,
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        // No events emitted: state was restored, nothing changed → no diff
+        assert!(rx.try_recv().is_err());
+        assert!(known_repos.contains("/tmp/persisted-repo"));
+        server.await.unwrap();
     }
 }

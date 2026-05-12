@@ -653,6 +653,8 @@ pub enum HookProvider {
     Codex,
     #[value(name = "claude-code", alias = "claude")]
     ClaudeCode,
+    Cursor,
+    Windsurf,
 }
 
 impl HookProvider {
@@ -660,6 +662,8 @@ impl HookProvider {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
+            Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
         }
     }
 }
@@ -672,7 +676,7 @@ pub enum HookInstallScope {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum HooksCommands {
-    /// Install provider-native hook forwarding for Codex and/or Claude Code.
+    /// Install provider-native hook forwarding for Codex, Claude Code, Cursor, and/or Windsurf.
     Install(HooksInstallArgs),
 }
 
@@ -684,7 +688,7 @@ pub struct HooksInstallArgs {
     /// Install only the selected provider(s). Repeat to install multiple.
     #[arg(long, value_enum, action = ArgAction::Append)]
     pub provider: Vec<HookProvider>,
-    /// Install into the provider's supported hook config location(s): Codex supports project or global hooks.json; Claude Code is global-only.
+    /// Install into the provider's supported hook config location(s): Codex, Cursor, and Windsurf support project or global hooks.json; Claude Code is global-only.
     #[arg(long, value_enum, default_value_t = HookInstallScope::Global)]
     pub scope: HookInstallScope,
     /// Project root for project-scoped Codex install. Ignored for global installs.

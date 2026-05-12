@@ -220,6 +220,10 @@ pub struct MonitorConfig {
     pub tmux: TmuxMonitorConfig,
     #[serde(default)]
     pub workspace: Vec<WorkspaceMonitor>,
+    /// Optional path to the GitHub monitor state persistence file.
+    /// Defaults to `~/.clawhip/github-monitor-state.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_monitor_state_path: Option<PathBuf>,
 }
 
 impl Default for MonitorConfig {
@@ -231,6 +235,7 @@ impl Default for MonitorConfig {
             git: GitMonitorConfig::default(),
             tmux: TmuxMonitorConfig::default(),
             workspace: Vec::new(),
+            github_monitor_state_path: None,
         }
     }
 }
