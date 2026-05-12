@@ -631,6 +631,13 @@ impl IncomingEvent {
         self
     }
 
+    pub fn with_source(mut self, source: &str) -> Self {
+        if let Some(payload) = self.payload.as_object_mut() {
+            payload.insert("source".to_string(), json!(source));
+        }
+        self
+    }
+
     pub fn with_routing_metadata(mut self, routing: &RoutingMetadata) -> Self {
         let Some(payload) = self.payload.as_object_mut() else {
             return self;

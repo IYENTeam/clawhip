@@ -215,6 +215,10 @@ pub struct MonitorConfig {
     #[serde(default = "default_github_api_base")]
     pub github_api_base: String,
     #[serde(default)]
+    pub github_monitor_state_path: Option<PathBuf>,
+    #[serde(default = "default_reconciliation_interval_polls")]
+    pub reconciliation_interval_polls: u64,
+    #[serde(default)]
     pub git: GitMonitorConfig,
     #[serde(default)]
     pub tmux: TmuxMonitorConfig,
@@ -228,6 +232,8 @@ impl Default for MonitorConfig {
             poll_interval_secs: default_poll_interval(),
             github_token: None,
             github_api_base: default_github_api_base(),
+            github_monitor_state_path: None,
+            reconciliation_interval_polls: default_reconciliation_interval_polls(),
             git: GitMonitorConfig::default(),
             tmux: TmuxMonitorConfig::default(),
             workspace: Vec::new(),
@@ -452,6 +458,9 @@ fn default_cron_poll_interval_secs() -> u64 {
 }
 fn default_cron_timezone() -> String {
     "UTC".to_string()
+}
+fn default_reconciliation_interval_polls() -> u64 {
+    10
 }
 fn default_true() -> bool {
     true
