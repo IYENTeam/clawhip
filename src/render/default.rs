@@ -91,13 +91,23 @@ impl Renderer for DefaultRenderer {
                 string_field(payload, "title")?
             ),
             ("github.issue-opened", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
-            ("github.issue-commented", MessageFormat::Compact) => format!(
-                "{}#{} commented ({} comments): {}",
-                string_field(payload, "repo")?,
-                payload.field_u64("number")?,
-                payload.field_u64("comments")?,
-                string_field(payload, "title")?
-            ),
+            ("github.issue-commented", MessageFormat::Compact) => {
+                let base = format!(
+                    "{}#{} commented ({} comments): {}",
+                    string_field(payload, "repo")?,
+                    payload.field_u64("number")?,
+                    payload.field_u64("comments")?,
+                    string_field(payload, "title")?
+                );
+                match payload.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => format!("{base}\n<{url}>"),
+                    None => {
+                        let repo = string_field(payload, "repo")?;
+                        let number = payload.field_u64("number")?;
+                        format!("{base}\n<https://github.com/{repo}/issues/{number}>")
+                    }
+                }
+            }
             ("github.issue-commented", MessageFormat::Alert) => format!(
                 "🚨 GitHub issue commented in {}: #{} {}",
                 string_field(payload, "repo")?,
@@ -380,7 +390,12 @@ fn agent_detail_suffix(payload: &Value) -> String {
         parts.push(format!("error={error_message}"));
     }
 
-    format!(" ({})", parts.join(", "))
+    let suffix = format!(" ({})", parts.join(", "));
+    if let Some(url) = optional_string_field(payload, "comment_url") {
+        format!("{suffix}\n<{url}>")
+    } else {
+        suffix
+    }
 }
 
 fn agent_inline_suffix(payload: &Value) -> String {
