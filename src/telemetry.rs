@@ -110,6 +110,9 @@ pub fn safe_target_id(target: &SinkTarget) -> String {
         SinkTarget::SlackWebhook(webhook_url) => {
             format!("slack:webhook:{}", redacted_url_fingerprint(webhook_url))
         }
+        SinkTarget::IyenSystemEvent(url) => {
+            format!("iyensystem:event:{}", redacted_url_fingerprint(url))
+        }
     }
 }
 

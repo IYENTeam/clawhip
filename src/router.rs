@@ -223,8 +223,10 @@ impl Router {
             .await?;
         match delivery.target {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
-            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) => {
-                Err("matched route uses a webhook instead of a channel".into())
+            SinkTarget::DiscordWebhook(_)
+            | SinkTarget::SlackWebhook(_)
+            | SinkTarget::IyenSystemEvent(_) => {
+                Err("matched route uses a non-channel sink".into())
             }
         }
     }
@@ -381,6 +383,16 @@ impl Router {
                     )
                     .into()
                 }),
+            "iyensystem" => {
+                let url = self
+                    .config
+                    .providers
+                    .iyensystem
+                    .as_ref()
+                    .map(|c| c.url.clone())
+                    .unwrap_or_else(|| "http://127.0.0.1:25295".to_string());
+                Ok(SinkTarget::IyenSystemEvent(url))
+            }
             other => Err(format!(
                 "unsupported sink '{other}' for event {}",
                 event.canonical_kind()
@@ -463,6 +475,7 @@ fn delivery_explanation(
         }
         SinkTarget::DiscordWebhook(url) => (format!("DiscordWebhook({url})"), None),
         SinkTarget::SlackWebhook(url) => (format!("SlackWebhook({url})"), None),
+        SinkTarget::IyenSystemEvent(url) => (format!("IyenSystemEvent({url})"), None),
     };
 
     DeliveryExplanation {

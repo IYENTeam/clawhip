@@ -39,6 +39,10 @@ pub struct ProvidersConfig {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub slack: SlackConfig,
+    #[serde(default)]
+    pub openclaw: Option<OpenClawConfig>,
+    #[serde(default)]
+    pub iyensystem: Option<IyenSystemConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +55,18 @@ pub struct DiscordConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SlackConfig {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenClawConfig {
+    pub gateway_url: String,
+    pub gateway_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IyenSystemConfig {
+    pub url: String,
+    pub auth_token: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -668,7 +684,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack") {
+            if !matches!(sink, "discord" | "slack" | "iyensystem") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -716,6 +732,10 @@ impl AppConfig {
                         )
                         .into());
                     }
+                }
+                "iyensystem" => {
+                    // IyenSystem sink requires no special route validation;
+                    // target URL comes from providers.iyensystem config.
                 }
                 _ => unreachable!(),
             }
@@ -1313,6 +1333,8 @@ mod tests {
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
+                iyensystem: None,
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
@@ -1388,6 +1410,8 @@ mod tests {
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
+                iyensystem: None,
             },
             daemon: DaemonConfig {
                 base_url: "http://127.0.0.1:25294".into(),
@@ -1745,6 +1769,8 @@ message = " ping "
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
+                iyensystem: None,
             },
             cron: CronConfig {
                 poll_interval_secs: 30,
