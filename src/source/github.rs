@@ -640,7 +640,19 @@ async fn reconcile_issues(
     )
     .await?;
 
-    let issues: Vec<GitHubIssue> = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read reconciliation issues response body for {github_repo}: {e}")
+    })?;
+    let issues: Vec<GitHubIssue> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode reconciliation issues response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
     let mut emitted = 0u64;
 
     for issue in issues {
@@ -694,7 +706,19 @@ async fn reconcile_prs(
     )
     .await?;
 
-    let pulls: Vec<GitHubPullRequest> = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read reconciliation PRs response body for {github_repo}: {e}")
+    })?;
+    let pulls: Vec<GitHubPullRequest> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode reconciliation PRs response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
     let mut emitted = 0u64;
 
     for pull in pulls {
@@ -881,7 +905,19 @@ async fn fetch_issues(
         &format!("issues for {github_repo}"),
     )
     .await?;
-    let issues: Vec<GitHubIssue> = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read issues response body for {github_repo}: {e}")
+    })?;
+    let issues: Vec<GitHubIssue> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode issues response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
     Ok(issues
         .into_iter()
         .filter(|issue| !issue.is_pull_request())
@@ -916,7 +952,19 @@ async fn fetch_pull_requests(
         &format!("pull requests for {github_repo}"),
     )
     .await?;
-    let pulls: Vec<GitHubPullRequest> = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read PRs response body for {github_repo}: {e}")
+    })?;
+    let pulls: Vec<GitHubPullRequest> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode PRs response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
     Ok(pulls
         .into_iter()
         .map(|pull| {
@@ -993,7 +1041,19 @@ async fn fetch_check_runs(
     )
     .await?;
 
-    let runs: GitHubCheckRunsResponse = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read check-runs response body for {github_repo} PR #{pr_number}: {e}")
+    })?;
+    let runs: GitHubCheckRunsResponse = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode check-runs response for {github_repo} PR #{pr_number}: {e}, body: {snippet}"
+        )
+    })?;
     let run_summaries = summarize_workflow_runs(&runs.check_runs);
     Ok(runs
         .check_runs
@@ -1054,7 +1114,19 @@ async fn fetch_direct_workflow_runs(
     )
     .await?;
 
-    let runs: GitHubWorkflowRunsResponse = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read workflow-runs response body for {github_repo}: {e}")
+    })?;
+    let runs: GitHubWorkflowRunsResponse = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode workflow-runs response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
     Ok(runs
         .workflow_runs
         .into_iter()
