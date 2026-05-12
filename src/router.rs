@@ -1,5 +1,3 @@
-pub mod matching;
-
 use std::sync::Arc;
 
 use serde_json::json;
@@ -18,9 +16,6 @@ use crate::sink::Sink;
 use crate::sink::SinkMessage;
 use crate::sink::SinkTarget;
 use crate::telemetry;
-
-// Re-export matching utilities used outside the router module.
-pub(crate) use matching::glob_match;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTrace {
@@ -104,11 +99,8 @@ impl Router {
 
     pub async fn resolve(&self, event: &IncomingEvent) -> Result<Vec<ResolvedDelivery>> {
         let context = event.template_context();
-        let matched_routes = matching::matching_routes_for(
-            &self.config.routes,
-            event.canonical_kind(),
-            &context,
-        );
+        let matched_routes =
+            matching_routes_for(&self.config.routes, event.canonical_kind(), &context);
         let mut deliveries = Vec::with_capacity(matched_routes.len().max(1));
 
         if matched_routes.is_empty() {
@@ -131,9 +123,7 @@ impl Router {
     pub async fn preview_delivery(&self, event: &IncomingEvent) -> Result<ResolvedDelivery> {
         let mut deliveries = self.resolve(event).await?;
         if deliveries.len() != 1 {
-            return Err(
-                format!("expected exactly one delivery, got {}", deliveries.len()).into(),
-            );
+            return Err(format!("expected exactly one delivery, got {}", deliveries.len()).into());
         }
 
         Ok(deliveries.remove(0))
@@ -219,22 +209,14 @@ impl Router {
 
         let rendered = renderer.render(event, &delivery.format)?;
         if delivery.allow_dynamic_tokens {
-            Ok(dynamic_tokens::render_template(
-                &rendered,
-                &event.template_context(),
-                true,
-            )
-            .await)
+            Ok(dynamic_tokens::render_template(&rendered, &event.template_context(), true).await)
         } else {
             Ok(rendered)
         }
     }
 
     #[cfg(test)]
-    pub async fn preview(
-        &self,
-        event: &IncomingEvent,
-    ) -> Result<(String, MessageFormat, String)> {
+    pub async fn preview(&self, event: &IncomingEvent) -> Result<(String, MessageFormat, String)> {
         let delivery = self.preview_delivery(event).await?;
         let content = self
             .render_delivery(event, &delivery, &DefaultRenderer)
@@ -247,11 +229,7 @@ impl Router {
         }
     }
 
-    fn allow_dynamic_tokens_for(
-        &self,
-        event: &IncomingEvent,
-        route: Option<&RouteRule>,
-    ) -> bool {
+    fn allow_dynamic_tokens_for(&self, event: &IncomingEvent, route: Option<&RouteRule>) -> bool {
         if let Some(route) = route {
             return route.allow_dynamic_tokens;
         }
@@ -267,10 +245,15 @@ impl Router {
         false
     }
 
+    /// Produce a full provenance trace explaining how an event would be routed.
+    ///
+    /// Unlike [`resolve`](Self::resolve) this evaluates *every* configured route
+    /// and returns detailed match/mismatch reasons, so operators can answer
+    /// "what emitted this message and why".
     pub fn explain(&self, event: &IncomingEvent) -> Provenance {
         let canonical_kind = event.canonical_kind().to_string();
         let context = event.template_context();
-        let candidates: Vec<String> = matching::route_candidates(&canonical_kind)
+        let candidates: Vec<String> = route_candidates(&canonical_kind)
             .into_iter()
             .map(String::from)
             .collect();
@@ -281,7 +264,7 @@ impl Router {
         for (index, route) in self.config.routes.iter().enumerate() {
             let pattern_matched = candidates
                 .iter()
-                .any(|candidate| matching::glob_match(&route.event, candidate));
+                .any(|candidate| glob_match(&route.event, candidate));
 
             let filter_results: Vec<FilterResult> = route
                 .filter
@@ -290,7 +273,7 @@ impl Router {
                     let actual = context.get(key).cloned();
                     let matched = actual
                         .as_ref()
-                        .map(|a| matching::glob_match(expected, a))
+                        .map(|a| glob_match(expected, a))
                         .unwrap_or(false);
                     FilterResult {
                         key: key.clone(),
@@ -319,7 +302,7 @@ impl Router {
         }
 
         let ordered_matched_indices: Vec<usize> =
-            matching::matching_routes_for(&self.config.routes, &canonical_kind, &context)
+            matching_routes_for(&self.config.routes, &canonical_kind, &context)
                 .into_iter()
                 .filter_map(|matched_route| {
                     self.config
@@ -367,6 +350,9 @@ impl Router {
                     return Ok(SinkTarget::DiscordWebhook(webhook.to_string()));
                 }
 
+                // For custom events (e.g. `clawhip send --channel X`), the
+                // event-level channel represents explicit user intent and must
+                // take highest priority — above both route and default channels.
                 let channel = if event.canonical_kind() == "custom" {
                     event
                         .channel
@@ -417,14 +403,10 @@ pub(crate) fn resolve_tmux_session_channel_with_metadata(
     session_name: &str,
     routing: &RoutingMetadata,
 ) -> Option<String> {
-    let tmux_context = IncomingEvent::tmux_keyword(
-        session_name.to_string(),
-        String::new(),
-        String::new(),
-        None,
-    )
-    .with_routing_metadata(routing)
-    .template_context();
+    let tmux_context =
+        IncomingEvent::tmux_keyword(session_name.to_string(), String::new(), String::new(), None)
+            .with_routing_metadata(routing)
+            .template_context();
     let session_context = IncomingEvent {
         kind: "session.started".to_string(),
         channel: None,
@@ -439,16 +421,16 @@ pub(crate) fn resolve_tmux_session_channel_with_metadata(
     }
     .with_routing_metadata(routing)
     .template_context();
-    let prefer_metadata = matching::prefers_metadata_first_routing("tmux.keyword", &tmux_context)
-        || matching::prefers_metadata_first_routing("session.started", &session_context);
+    let prefer_metadata = prefers_metadata_first_routing("tmux.keyword", &tmux_context)
+        || prefers_metadata_first_routing("session.started", &session_context);
     let mut preferred = Vec::new();
     let mut heuristic = Vec::new();
 
     for route in config.routes.iter().filter(|route| {
-        matching::route_matches(route, "tmux.keyword", &tmux_context)
-            || matching::route_matches(route, "session.started", &session_context)
+        route_matches(route, "tmux.keyword", &tmux_context)
+            || route_matches(route, "session.started", &session_context)
     }) {
-        if prefer_metadata && matching::route_uses_session_name_prefix_heuristics(route) {
+        if prefer_metadata && route_uses_session_name_prefix_heuristics(route) {
             heuristic.push(route);
         } else {
             preferred.push(route);
@@ -494,12 +476,180 @@ fn delivery_explanation(
     }
 }
 
+fn route_candidates(kind: &str) -> Vec<&str> {
+    match kind {
+        "git.commit" => vec!["git.commit", "github.commit"],
+        "git.branch-changed" => vec!["git.branch-changed", "github.branch-changed"],
+        "agent.started" | "agent.blocked" | "agent.finished" | "agent.failed" => {
+            vec![kind, "agent.*", "session.*"]
+        }
+        "session.started" | "session.blocked" | "session.finished" | "session.failed" => {
+            vec![kind, "session.*", "agent.*"]
+        }
+        "session.retry-needed"
+        | "session.pr-created"
+        | "session.test-started"
+        | "session.test-finished"
+        | "session.test-failed"
+        | "session.handoff-needed" => {
+            vec![kind, "session.*"]
+        }
+        other => vec![other],
+    }
+}
+
+fn route_matches(
+    route: &RouteRule,
+    canonical_kind: &str,
+    context: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    route_candidates(canonical_kind)
+        .iter()
+        .any(|candidate| glob_match(&route.event, candidate))
+        && route.filter.iter().all(|(key, expected)| {
+            context
+                .get(key)
+                .map(|actual| glob_match(expected, actual))
+                .unwrap_or(false)
+        })
+}
+
+fn matching_routes_for<'a>(
+    routes: &'a [RouteRule],
+    canonical_kind: &str,
+    context: &std::collections::BTreeMap<String, String>,
+) -> Vec<&'a RouteRule> {
+    let prefer_metadata = prefers_metadata_first_routing(canonical_kind, context);
+    let mut preferred = Vec::new();
+    let mut heuristic = Vec::new();
+
+    for route in routes
+        .iter()
+        .filter(|route| route_matches(route, canonical_kind, context))
+    {
+        if prefer_metadata && route_uses_session_name_prefix_heuristics(route) {
+            heuristic.push(route);
+        } else {
+            preferred.push(route);
+        }
+    }
+
+    preferred.sort_by(|left, right| {
+        route_specificity_score(right, context).cmp(&route_specificity_score(left, context))
+    });
+    heuristic.sort_by(|left, right| {
+        route_specificity_score(right, context).cmp(&route_specificity_score(left, context))
+    });
+
+    if !prefer_metadata {
+        preferred.extend(heuristic);
+    }
+
+    preferred
+}
+
+fn route_specificity_score(
+    route: &RouteRule,
+    context: &std::collections::BTreeMap<String, String>,
+) -> usize {
+    let path_rank = if route.filter.contains_key("worktree_path")
+        && context
+            .get("worktree_path")
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        3
+    } else if route.filter.contains_key("repo_path")
+        && context
+            .get("repo_path")
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        2
+    } else if route.filter.contains_key("repo_name")
+        && context
+            .get("repo_name")
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        1
+    } else {
+        0
+    };
+
+    (path_rank * 100) + route.filter.len()
+}
+
+fn prefers_metadata_first_routing(
+    canonical_kind: &str,
+    context: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    if !(canonical_kind.starts_with("session.") || canonical_kind.starts_with("tmux.")) {
+        return false;
+    }
+
+    [
+        "project",
+        "repo_name",
+        "repo_path",
+        "worktree_path",
+        "session_id",
+    ]
+    .into_iter()
+    .filter_map(|key| context.get(key))
+    .any(|value| !value.trim().is_empty())
+}
+
+fn route_uses_session_name_prefix_heuristics(route: &RouteRule) -> bool {
+    !route.filter.is_empty()
+        && route.filter.iter().all(|(key, expected)| {
+            matches!(key.as_str(), "session" | "session_name") && expected.contains('*')
+        })
+}
+
 fn route_channel(route: &RouteRule) -> Option<&str> {
     route
         .channel
         .as_deref()
         .map(str::trim)
         .filter(|channel| !channel.is_empty())
+}
+
+pub(crate) fn glob_match(pattern: &str, value: &str) -> bool {
+    if pattern == value {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return false;
+    }
+
+    let mut remainder = value;
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let starts_with_wildcard = pattern.starts_with('*');
+    let ends_with_wildcard = pattern.ends_with('*');
+
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        if index == 0 && !starts_with_wildcard {
+            if !remainder.starts_with(part) {
+                return false;
+            }
+            remainder = &remainder[part.len()..];
+            continue;
+        }
+
+        if index == parts.len() - 1 && !ends_with_wildcard {
+            return remainder.ends_with(part);
+        }
+
+        if let Some(position) = remainder.find(part) {
+            remainder = &remainder[(position + part.len())..];
+        } else {
+            return false;
+        }
+    }
+
+    ends_with_wildcard || remainder.is_empty()
 }
 
 #[cfg(test)]
@@ -1785,6 +1935,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
 
+        // clawhip send --channel user-target --message "hello"
         let event = IncomingEvent::custom(Some("user-target".into()), "hello".into());
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
@@ -1819,6 +1970,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
 
+        // clawhip send --message "hello" (no --channel)
         let event = IncomingEvent::custom(None, "hello".into());
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
@@ -2187,6 +2339,7 @@ mod tests {
             provenance.routes[0].filter_results[0].actual.as_deref(),
             Some("feature")
         );
+        // Falls through to default
         assert_eq!(provenance.deliveries.len(), 1);
         assert_eq!(provenance.deliveries[0].matched_route_index, None);
         assert_eq!(provenance.deliveries[0].channel.as_deref(), Some("default"));
