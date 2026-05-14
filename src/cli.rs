@@ -349,6 +349,8 @@ pub enum GithubCommands {
         number: u64,
         #[arg(long)]
         title: String,
+        #[arg(long, default_value = "")]
+        url: String,
         #[arg(long)]
         channel: Option<String>,
     },

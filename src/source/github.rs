@@ -68,6 +68,7 @@ struct IssueSnapshot {
     title: String,
     state: String,
     comments: u64,
+    url: String,
 }
 
 #[derive(Clone)]
@@ -462,6 +463,7 @@ fn collect_issue_events(
                     repo_name.to_string(),
                     *number,
                     issue.title.clone(),
+                    issue.url.clone(),
                     repo.channel.clone(),
                 )
                 .with_mention(repo.mention.clone())
@@ -474,6 +476,7 @@ fn collect_issue_events(
                             repo_name.to_string(),
                             *number,
                             issue.title.clone(),
+                            issue.url.clone(),
                             repo.channel.clone(),
                         )
                         .with_mention(repo.mention.clone())
@@ -487,6 +490,7 @@ fn collect_issue_events(
                             *number,
                             issue.title.clone(),
                             issue.comments,
+                            issue.url.clone(),
                             repo.channel.clone(),
                         )
                         .with_mention(repo.mention.clone())
@@ -581,6 +585,7 @@ async fn fetch_issues(
                     title: issue.title,
                     state: issue.state,
                     comments: issue.comments,
+                    url: issue.html_url,
                 },
             )
         })
@@ -800,6 +805,7 @@ struct GitHubIssue {
     title: String,
     state: String,
     comments: u64,
+    html_url: String,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
 }
@@ -904,6 +910,7 @@ mod tests {
                 title: "live issue".into(),
                 state: "open".into(),
                 comments: 0,
+                url: "https://github.com/clawhip/clawhip/issues/2".into(),
             },
         )]
         .into_iter()
@@ -956,6 +963,7 @@ mod tests {
                 title: "live issue".into(),
                 state: "open".into(),
                 comments: 0,
+                url: "https://github.com/clawhip/clawhip/issues/2".into(),
             },
         )]
         .into_iter()
@@ -966,6 +974,7 @@ mod tests {
                 title: "live issue".into(),
                 state: "closed".into(),
                 comments: 1,
+                url: "https://github.com/clawhip/clawhip/issues/2".into(),
             },
         )]
         .into_iter()

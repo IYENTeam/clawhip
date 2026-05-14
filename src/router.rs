@@ -1052,7 +1052,7 @@ mod tests {
         let router = Router::new(Arc::new(config));
 
         let github_event =
-            IncomingEvent::github_issue_opened("clawhip".into(), 5, "boom".into(), None);
+            IncomingEvent::github_issue_opened("clawhip".into(), 5, "boom".into(), "https://github.com/clawhip/clawhip/issues/5".into(), None);
         let (_, _, github_content) = router.preview(&github_event).await.unwrap();
         assert!(github_content.starts_with("<@botid> "));
         assert!(github_content.contains("boom"));
@@ -1539,7 +1539,7 @@ mod tests {
             ..AppConfig::default()
         };
         let router = Router::new(Arc::new(config));
-        let event = IncomingEvent::github_issue_opened("clawhip".into(), 7, "bug".into(), None);
+        let event = IncomingEvent::github_issue_opened("clawhip".into(), 7, "bug".into(), "https://github.com/clawhip/clawhip/issues/7".into(), None);
         let (channel, _, _) = router.preview(&event).await.unwrap();
         assert_eq!(channel, "repo-b");
     }

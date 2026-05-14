@@ -133,8 +133,9 @@ async fn real_main(cli: Cli) -> Result<()> {
                     repo,
                     number,
                     title,
+                    url,
                     channel,
-                } => IncomingEvent::github_issue_opened(repo, number, title, channel),
+                } => IncomingEvent::github_issue_opened(repo, number, title, url, channel),
                 GithubCommands::PrStatusChanged {
                     repo,
                     number,

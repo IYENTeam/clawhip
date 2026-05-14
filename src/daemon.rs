@@ -687,6 +687,11 @@ async fn post_github(
                     .and_then(Value::as_str)
                     .unwrap_or("Untitled issue")
                     .to_string(),
+                payload
+                    .pointer("/issue/html_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 None,
             )))
         }

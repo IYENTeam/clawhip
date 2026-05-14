@@ -73,63 +73,72 @@ impl Renderer for DefaultRenderer {
             | ("agent.failed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
             ("github.issue-opened", MessageFormat::Compact) => format!(
-                "{}#{} opened: {}",
+                "{}#{} opened: {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-opened", MessageFormat::Alert) => format!(
-                "🚨 GitHub issue opened in {}: #{} {}",
+                "🚨 GitHub issue opened in {}: #{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-opened", MessageFormat::Inline) => format!(
-                "[GitHub] {}#{} {}",
+                "[GitHub] {}#{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-opened", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
             ("github.issue-commented", MessageFormat::Compact) => format!(
-                "{}#{} commented ({} comments): {}",
+                "{}#{} commented ({} comments): {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 payload.field_u64("comments")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-commented", MessageFormat::Alert) => format!(
-                "🚨 GitHub issue commented in {}: #{} {}",
+                "🚨 GitHub issue commented in {}: #{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-commented", MessageFormat::Inline) => format!(
-                "[GitHub comment] {}#{} {}",
+                "[GitHub comment] {}#{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-commented", MessageFormat::Raw) => {
                 serde_json::to_string_pretty(payload)?
             }
             ("github.issue-closed", MessageFormat::Compact) => format!(
-                "{}#{} closed: {}",
+                "{}#{} closed: {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-closed", MessageFormat::Alert) => format!(
-                "🚨 GitHub issue closed in {}: #{} {}",
+                "🚨 GitHub issue closed in {}: #{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-closed", MessageFormat::Inline) => format!(
-                "[GitHub closed] {}#{} {}",
+                "[GitHub closed] {}#{} {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.issue-closed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
@@ -175,27 +184,30 @@ impl Renderer for DefaultRenderer {
             ("git.branch-changed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
             ("github.pr-status-changed", MessageFormat::Compact) => format!(
-                "PR {}#{} {} -> {}: {}",
+                "PR {}#{} {} -> {}: {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "old_status")?,
                 string_field(payload, "new_status")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.pr-status-changed", MessageFormat::Alert) => format!(
-                "🚨 PR status changed in {}: #{} {} -> {} ({})",
+                "🚨 PR status changed in {}: #{} {} -> {} ({}) · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "old_status")?,
                 string_field(payload, "new_status")?,
-                string_field(payload, "title")?
+                string_field(payload, "title")?,
+                string_field(payload, "url")?
             ),
             ("github.pr-status-changed", MessageFormat::Inline) => format!(
-                "[PR {}#{}] {} -> {}",
+                "[PR {}#{}] {} -> {} · {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
                 string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?
+                string_field(payload, "new_status")?,
+                string_field(payload, "url")?
             ),
             ("github.pr-status-changed", MessageFormat::Raw) => {
                 serde_json::to_string_pretty(payload)?

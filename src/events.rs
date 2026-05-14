@@ -280,6 +280,7 @@ impl IncomingEvent {
         repo: String,
         number: u64,
         title: String,
+        url: String,
         channel: Option<String>,
     ) -> Self {
         Self {
@@ -288,7 +289,7 @@ impl IncomingEvent {
             mention: None,
             format: None,
             template: None,
-            payload: json!({ "repo": repo, "number": number, "title": title }),
+            payload: json!({ "repo": repo, "number": number, "title": title, "url": url }),
         }
     }
 
@@ -297,6 +298,7 @@ impl IncomingEvent {
         number: u64,
         title: String,
         comments: u64,
+        url: String,
         channel: Option<String>,
     ) -> Self {
         Self {
@@ -305,7 +307,7 @@ impl IncomingEvent {
             mention: None,
             format: None,
             template: None,
-            payload: json!({ "repo": repo, "number": number, "title": title, "comments": comments }),
+            payload: json!({ "repo": repo, "number": number, "title": title, "comments": comments, "url": url }),
         }
     }
 
@@ -313,6 +315,7 @@ impl IncomingEvent {
         repo: String,
         number: u64,
         title: String,
+        url: String,
         channel: Option<String>,
     ) -> Self {
         Self {
@@ -321,7 +324,7 @@ impl IncomingEvent {
             mention: None,
             format: None,
             template: None,
-            payload: json!({ "repo": repo, "number": number, "title": title }),
+            payload: json!({ "repo": repo, "number": number, "title": title, "url": url }),
         }
     }
 
@@ -1367,7 +1370,7 @@ mod tests {
 
     #[test]
     fn renders_template_from_payload() {
-        let event = IncomingEvent::github_issue_opened("repo".into(), 42, "broken".into(), None);
+        let event = IncomingEvent::github_issue_opened("repo".into(), 42, "broken".into(), "https://github.com/repo/issues/42".into(), None);
         let rendered = render_template("{repo} #{number}: {title}", &event.template_context());
         assert_eq!(rendered, "repo #42: broken");
     }
