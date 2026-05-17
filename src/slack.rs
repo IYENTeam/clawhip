@@ -19,8 +19,7 @@ impl SlackClient {
     pub async fn send(&self, target: &SinkTarget, message: &SinkMessage) -> Result<()> {
         match target {
             SinkTarget::SlackWebhook(webhook_url) => self.send_webhook(webhook_url, message).await,
-            SinkTarget::DiscordChannel(_)
-            | SinkTarget::DiscordWebhook(_) => {
+            SinkTarget::DiscordChannel(_) | SinkTarget::DiscordWebhook(_) => {
                 Err("cannot send non-Slack target via Slack client".into())
             }
         }

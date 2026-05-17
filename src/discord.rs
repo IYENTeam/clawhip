@@ -140,7 +140,6 @@ impl DiscordClient {
                 SinkTarget::SlackWebhook(_) => {
                     return Err("cannot send Slack webhook via Discord client".into());
                 }
-
             };
 
             match result {

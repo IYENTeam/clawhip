@@ -223,8 +223,7 @@ impl Router {
             .await?;
         match delivery.target {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
-            SinkTarget::DiscordWebhook(_)
-            | SinkTarget::SlackWebhook(_) => {
+            SinkTarget::DiscordWebhook(_) | SinkTarget::SlackWebhook(_) => {
                 Err("matched route uses a non-channel sink".into())
             }
         }
