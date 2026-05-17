@@ -41,8 +41,6 @@ pub struct ProvidersConfig {
     pub slack: SlackConfig,
     #[serde(default)]
     pub openclaw: Option<OpenClawConfig>,
-    #[serde(default)]
-    pub iyensystem: Option<IyenSystemConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,11 +60,7 @@ pub struct OpenClawConfig {
     pub gateway_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IyenSystemConfig {
-    pub url: String,
-    pub auth_token: Option<String>,
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -684,7 +678,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack" | "iyensystem") {
+            if !matches!(sink, "discord" | "slack") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -732,10 +726,6 @@ impl AppConfig {
                         )
                         .into());
                     }
-                }
-                "iyensystem" => {
-                    // IyenSystem sink requires no special route validation;
-                    // target URL comes from providers.iyensystem config.
                 }
                 _ => unreachable!(),
             }
@@ -1334,7 +1324,6 @@ mod tests {
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
-                iyensystem: None,
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
@@ -1411,7 +1400,6 @@ mod tests {
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
-                iyensystem: None,
             },
             daemon: DaemonConfig {
                 base_url: "http://127.0.0.1:25294".into(),
@@ -1770,7 +1758,6 @@ message = " ping "
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
-                iyensystem: None,
             },
             cron: CronConfig {
                 poll_interval_secs: 30,

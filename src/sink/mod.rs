@@ -1,5 +1,4 @@
 pub mod discord;
-pub mod iyensystem;
 pub mod slack;
 
 use async_trait::async_trait;
@@ -9,7 +8,6 @@ use crate::events::MessageFormat;
 use serde_json::Value;
 
 pub use discord::DiscordSink;
-pub use iyensystem::IyenSystemSink;
 pub use slack::SlackSink;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -17,7 +15,6 @@ pub enum SinkTarget {
     DiscordChannel(String),
     DiscordWebhook(String),
     SlackWebhook(String),
-    IyenSystemEvent(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

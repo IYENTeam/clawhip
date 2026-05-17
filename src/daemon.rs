@@ -87,17 +87,6 @@ pub async fn run(
     );
     sinks.insert("slack".into(), Box::new(SlackSink::default()));
 
-    // Register iyensystem sink if configured
-    if let Some(iyensystem_config) = &config.providers.iyensystem {
-        sinks.insert(
-            "iyensystem".into(),
-            Box::new(crate::sink::IyenSystemSink::new(
-                iyensystem_config.url.clone(),
-                iyensystem_config.auth_token.clone(),
-            )),
-        );
-        eprintln!("clawhip: iyensystem sink registered");
-    }
 
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());
