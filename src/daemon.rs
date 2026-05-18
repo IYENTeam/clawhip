@@ -87,7 +87,6 @@ pub async fn run(
     );
     sinks.insert("slack".into(), Box::new(SlackSink::default()));
 
-
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));

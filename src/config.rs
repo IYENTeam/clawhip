@@ -60,8 +60,6 @@ pub struct OpenClawConfig {
     pub gateway_token: Option<String>,
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_bind_host")]

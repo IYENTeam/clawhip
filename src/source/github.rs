@@ -60,14 +60,13 @@ impl Source for GitHubSource {
 
             poll_count += 1;
 
-            if reconciliation_interval > 0 && poll_count % reconciliation_interval == 0 {
-                if let Some(client) = github_client.as_ref() {
-                    if let Err(error) =
-                        run_reconciliation(self.config.as_ref(), client, &tx, &state).await
-                    {
-                        eprintln!("clawhip source github reconciliation failed: {error}");
-                    }
-                }
+            if reconciliation_interval > 0
+                && poll_count.is_multiple_of(reconciliation_interval)
+                && let Some(client) = github_client.as_ref()
+                && let Err(error) =
+                    run_reconciliation(self.config.as_ref(), client, &tx, &state).await
+            {
+                eprintln!("clawhip source github reconciliation failed: {error}");
             }
 
             if let Err(error) = save_state(&state_path, &state).await {
@@ -594,25 +593,23 @@ async fn run_reconciliation(
             continue;
         };
 
-        if repo.emit_issue_opened {
-            if let Err(error) = reconcile_issues(config, client, repo, &snapshot, repo_state, tx)
-                .await
-            {
-                eprintln!(
-                    "clawhip source github reconciliation: issue check failed for {}: {error}",
-                    repo.path
-                );
-            }
+        if repo.emit_issue_opened
+            && let Err(error) =
+                reconcile_issues(config, client, repo, &snapshot, repo_state, tx).await
+        {
+            eprintln!(
+                "clawhip source github reconciliation: issue check failed for {}: {error}",
+                repo.path
+            );
         }
 
-        if repo.emit_pr_status {
-            if let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state, tx).await
-            {
-                eprintln!(
-                    "clawhip source github reconciliation: PR check failed for {}: {error}",
-                    repo.path
-                );
-            }
+        if repo.emit_pr_status
+            && let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state, tx).await
+        {
+            eprintln!(
+                "clawhip source github reconciliation: PR check failed for {}: {error}",
+                repo.path
+            );
         }
     }
     Ok(())
@@ -905,18 +902,17 @@ async fn fetch_issues(
         &format!("issues for {github_repo}"),
     )
     .await?;
-    let body = response.text().await.map_err(|e| {
-        format!("failed to read issues response body for {github_repo}: {e}")
-    })?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read issues response body for {github_repo}: {e}"))?;
     let issues: Vec<GitHubIssue> = serde_json::from_str(&body).map_err(|e| {
         let snippet = if body.len() > 300 {
             format!("{}... ({} total bytes)", &body[..300], body.len())
         } else {
             body.clone()
         };
-        format!(
-            "failed to decode issues response for {github_repo}: {e}, body: {snippet}"
-        )
+        format!("failed to decode issues response for {github_repo}: {e}, body: {snippet}")
     })?;
     Ok(issues
         .into_iter()
@@ -952,18 +948,17 @@ async fn fetch_pull_requests(
         &format!("pull requests for {github_repo}"),
     )
     .await?;
-    let body = response.text().await.map_err(|e| {
-        format!("failed to read PRs response body for {github_repo}: {e}")
-    })?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read PRs response body for {github_repo}: {e}"))?;
     let pulls: Vec<GitHubPullRequest> = serde_json::from_str(&body).map_err(|e| {
         let snippet = if body.len() > 300 {
             format!("{}... ({} total bytes)", &body[..300], body.len())
         } else {
             body.clone()
         };
-        format!(
-            "failed to decode PRs response for {github_repo}: {e}, body: {snippet}"
-        )
+        format!("failed to decode PRs response for {github_repo}: {e}, body: {snippet}")
     })?;
     Ok(pulls
         .into_iter()
@@ -1123,9 +1118,7 @@ async fn fetch_direct_workflow_runs(
         } else {
             body.clone()
         };
-        format!(
-            "failed to decode workflow-runs response for {github_repo}: {e}, body: {snippet}"
-        )
+        format!("failed to decode workflow-runs response for {github_repo}: {e}, body: {snippet}")
     })?;
     Ok(runs
         .workflow_runs
