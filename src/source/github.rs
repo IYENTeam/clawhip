@@ -1112,7 +1112,11 @@ async fn fetch_direct_workflow_runs(
     // Convert epoch days to YYYY-MM-DD (civil calendar)
     let (y, m, d) = epoch_days_to_ymd(days as i64);
     let created_filter = format!(">={y:04}-{m:02}-{d:02}");
-    let mut query = vec![("per_page", "100"), ("event", "push"), ("created", &created_filter)];
+    let mut query = vec![
+        ("per_page", "100"),
+        ("event", "push"),
+        ("created", &created_filter),
+    ];
     if !snapshot.branch.is_empty() {
         query.push(("branch", snapshot.branch.as_str()));
     }
