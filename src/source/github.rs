@@ -516,8 +516,13 @@ async fn poll_ci_statuses(
     {
         Ok(ci) => {
             if let Some(previous) = previous {
-                for event in collect_ci_events(repo, &snapshot.repo_name, &previous.ci, &ci) {
-                    send_event(tx, event).await?;
+                // Skip emitting CI events on cold start: if previous CI state
+                // is empty (first poll populated it), all current runs would
+                // appear as "new" and cause a flood of stale events.
+                if !previous.ci.is_empty() {
+                    for event in collect_ci_events(repo, &snapshot.repo_name, &previous.ci, &ci) {
+                        send_event(tx, event).await?;
+                    }
                 }
             }
             Ok(ci)
@@ -1095,7 +1100,19 @@ async fn fetch_direct_workflow_runs(
     github_repo: &str,
     snapshot: &GitSnapshot,
 ) -> Result<Vec<GitHubCISnapshot>> {
-    let mut query = vec![("per_page", "100"), ("event", "push")];
+    // Limit to runs created in the last 7 days to avoid flooding events for
+    // old runs on cold start or after state loss.
+    let seven_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(7 * 24 * 3600);
+    let secs = seven_days_ago;
+    let days = secs / 86400;
+    // Convert epoch days to YYYY-MM-DD (civil calendar)
+    let (y, m, d) = epoch_days_to_ymd(days as i64);
+    let created_filter = format!(">={y:04}-{m:02}-{d:02}");
+    let mut query = vec![("per_page", "100"), ("event", "push"), ("created", &created_filter)];
     if !snapshot.branch.is_empty() {
         query.push(("branch", snapshot.branch.as_str()));
     }
@@ -1150,6 +1167,22 @@ fn workflow_run_id(url: &str) -> Option<String> {
         .and_then(|tail| tail.split('/').next())
         .filter(|part| !part.is_empty())
         .map(ToString::to_string)
+}
+
+/// Convert days since Unix epoch to (year, month, day) using the civil calendar.
+/// Algorithm from Howard Hinnant's `civil_from_days`.
+fn epoch_days_to_ymd(epoch_days: i64) -> (i64, u32, u32) {
+    let z = epoch_days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn build_github_client(token: Option<String>) -> Result<reqwest::Client> {
