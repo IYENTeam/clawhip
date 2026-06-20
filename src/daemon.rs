@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router as AxumRouter};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::{RwLock, mpsc};
@@ -32,8 +34,9 @@ use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
 use crate::sink::{DiscordSink, Sink, SlackSink};
 use crate::source::{
-    GitHubSource, GitSource, RegisteredTmuxSession, SharedTmuxRegistry, Source, TmuxSource,
-    WorkspaceSource, list_active_tmux_registrations,
+    GitHubSource, GitSource, RegisteredTmuxSession, SharedSourceHealth, SharedTmuxRegistry, Source,
+    TmuxSource, WorkspaceSource, list_active_tmux_registrations, mark_source_completed,
+    mark_source_started, mark_source_stopped, new_shared_source_health,
 };
 use crate::telemetry;
 use crate::update::{self, SharedPendingUpdate};
@@ -65,6 +68,7 @@ struct AppState {
     tmux_registry: SharedTmuxRegistry,
     pending_update: SharedPendingUpdate,
     native_observability: SharedNativeHookObservability,
+    source_health: SharedSourceHealth,
 }
 
 pub async fn run(
@@ -92,6 +96,7 @@ pub async fn run(
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));
     let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
     let native_observability = new_shared_native_hook_observability();
+    let source_health = new_shared_source_health();
 
     let ci_batch_window = config.dispatch.ci_batch_window();
     let routine_batch_window = config.dispatch.routine_batch_window();
@@ -110,14 +115,31 @@ pub async fn run(
             eprintln!("clawhip dispatcher stopped: {error}");
         }
     });
-    spawn_source(GitSource::new(config.clone()), tx.clone());
-    spawn_source(GitHubSource::new(config.clone()), tx.clone());
+    spawn_source(
+        GitSource::new(config.clone()),
+        tx.clone(),
+        source_health.clone(),
+    );
+    spawn_source(
+        GitHubSource::new(config.clone(), source_health.clone()),
+        tx.clone(),
+        source_health.clone(),
+    );
     spawn_source(
         TmuxSource::new(config.clone(), tmux_registry.clone()),
         tx.clone(),
+        source_health.clone(),
     );
-    spawn_source(WorkspaceSource::new(config.clone()), tx.clone());
-    spawn_source(CronSource::new(config.clone(), cron_state_path), tx.clone());
+    spawn_source(
+        WorkspaceSource::new(config.clone()),
+        tx.clone(),
+        source_health.clone(),
+    );
+    spawn_source(
+        CronSource::new(config.clone(), cron_state_path),
+        tx.clone(),
+        source_health.clone(),
+    );
 
     let pending_update = update::new_shared_pending_update();
     {
@@ -152,6 +174,7 @@ pub async fn run(
         tmux_registry,
         pending_update,
         native_observability,
+        source_health,
     });
     let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -168,33 +191,68 @@ pub async fn run(
     Ok(())
 }
 
-fn spawn_source<S>(source: S, tx: mpsc::Sender<IncomingEvent>)
+fn spawn_source<S>(source: S, tx: mpsc::Sender<IncomingEvent>, source_health: SharedSourceHealth)
 where
     S: Source + Send + Sync + 'static,
 {
     let source_name = source.name().to_string();
     tokio::spawn(async move {
         println!("clawhip source '{}' starting", source_name);
+        mark_source_started(&source_health, &source_name).await;
         telemetry::emit(source_lifecycle_record(
             telemetry::reason::SOURCE_START,
             &source_name,
             None,
         ));
-        if let Err(error) = source.run(tx.clone()).await {
-            telemetry::emit(source_lifecycle_record(
-                telemetry::reason::SOURCE_STOPPED,
-                &source_name,
-                Some(error.to_string()),
-            ));
-            eprintln!("clawhip source '{}' stopped: {error}", source_name);
-            if let Err(alert_error) = tx
-                .send(source_failure_alert_event(&source_name, &error.to_string()))
-                .await
-            {
-                eprintln!(
-                    "clawhip source '{}' could not enqueue degraded alert: {alert_error}",
-                    source_name
-                );
+        match AssertUnwindSafe(source.run(tx.clone()))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(())) => {
+                mark_source_completed(&source_health, &source_name).await;
+            }
+            Ok(Err(error)) => {
+                mark_source_stopped(&source_health, &source_name, error.to_string()).await;
+                telemetry::emit(source_lifecycle_record(
+                    telemetry::reason::SOURCE_STOPPED,
+                    &source_name,
+                    Some(error.to_string()),
+                ));
+                eprintln!("clawhip source '{}' stopped: {error}", source_name);
+                if let Err(alert_error) = tx
+                    .send(source_failure_alert_event(&source_name, &error.to_string()))
+                    .await
+                {
+                    eprintln!(
+                        "clawhip source '{}' could not enqueue degraded alert: {alert_error}",
+                        source_name
+                    );
+                }
+            }
+            Err(panic) => {
+                let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = panic.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "source task panicked".to_string()
+                };
+                mark_source_stopped(&source_health, &source_name, message.clone()).await;
+                telemetry::emit(source_lifecycle_record(
+                    telemetry::reason::SOURCE_STOPPED,
+                    &source_name,
+                    Some(message.clone()),
+                ));
+                eprintln!("clawhip source '{}' panicked: {message}", source_name);
+                if let Err(alert_error) = tx
+                    .send(source_failure_alert_event(&source_name, &message))
+                    .await
+                {
+                    eprintln!(
+                        "clawhip source '{}' could not enqueue degraded alert: {alert_error}",
+                        source_name
+                    );
+                }
             }
         }
     });
@@ -260,14 +318,51 @@ fn event_record(
     record
 }
 
+fn parse_rfc3339_timestamp(value: Option<&str>) -> Option<OffsetDateTime> {
+    value.and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+}
+
+fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
+    let Some(map) = sources.as_object() else {
+        return false;
+    };
+    if config
+        .monitors
+        .git
+        .repos
+        .iter()
+        .any(|repo| repo.emit_issue_opened || repo.emit_pr_status)
+    {
+        let Some(github) = map.get("github").and_then(Value::as_object) else {
+            return false;
+        };
+        if github.get("status").and_then(Value::as_str) != Some("running") {
+            return false;
+        }
+        let Some(heartbeat) =
+            parse_rfc3339_timestamp(github.get("last_heartbeat_at").and_then(Value::as_str))
+        else {
+            return false;
+        };
+        let allowed_age = Duration::from_secs(config.monitors.poll_interval_secs.max(1) + 120);
+        if OffsetDateTime::now_utc() - heartbeat > allowed_age {
+            return false;
+        }
+    }
+    true
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let registered = state.tmux_registry.read().await.len();
     let native_hooks = snapshot_shared(&state.native_observability);
+    let sources = serde_json::to_value(state.source_health.read().await.clone())
+        .unwrap_or_else(|_| json!({}));
     Json(health_payload(
         state.config.as_ref(),
         state.port,
         registered,
         native_hooks,
+        sources,
     ))
 }
 
@@ -276,9 +371,11 @@ fn health_payload(
     port: u16,
     registered_tmux_sessions: usize,
     native_hooks: Value,
+    sources: Value,
 ) -> Value {
+    let sources_ok = source_health_is_ok(config, &sources);
     json!({
-        "ok": true,
+        "ok": sources_ok,
         "version": VERSION,
         "token_source": config.discord_token_source(),
         "webhook_routes_configured": config.has_webhook_routes(),
@@ -290,6 +387,7 @@ fn health_payload(
         "configured_cron_jobs": config.cron.jobs.len(),
         "registered_tmux_sessions": registered_tmux_sessions,
         "native_hooks": native_hooks,
+        "sources": sources,
     })
 }
 
@@ -900,6 +998,7 @@ mod tests {
                 tmux_registry: Arc::new(RwLock::new(HashMap::new())),
                 pending_update: update::new_shared_pending_update(),
                 native_observability: new_shared_native_hook_observability(),
+                source_health: new_shared_source_health(),
             },
             rx,
         )
@@ -985,6 +1084,7 @@ mod tests {
             25294,
             3,
             snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"github": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")}}),
         );
 
         assert_eq!(payload["ok"], Value::Bool(true));
@@ -996,6 +1096,56 @@ mod tests {
         assert_eq!(payload["configured_workspace_monitors"], Value::from(1));
         assert_eq!(payload["registered_tmux_sessions"], Value::from(3));
         assert!(payload["native_hooks"]["totals"]["received"].is_number());
+        assert_eq!(
+            payload["sources"]["github"]["status"],
+            Value::from("running")
+        );
+    }
+
+    #[test]
+    fn health_payload_marks_github_degraded_as_not_ok() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_pr_status: true,
+                ..Default::default()
+            });
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"github": {"status": "degraded", "last_error": "GitHub API 500"}}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_stale_github_heartbeat_as_not_ok() {
+        let mut config = AppConfig::default();
+        config.monitors.poll_interval_secs = 1;
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_pr_status: true,
+                ..Default::default()
+            });
+        let stale = (OffsetDateTime::now_utc() - Duration::from_secs(300))
+            .format(&Rfc3339)
+            .expect("timestamp");
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"github": {"status": "running", "last_heartbeat_at": stale}}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
     }
 
     #[tokio::test]
@@ -1048,7 +1198,11 @@ mod tests {
         });
 
         let (tx, mut rx) = mpsc::channel(4);
-        spawn_source(CronSource::new(Arc::new(config.clone()), state_path), tx);
+        spawn_source(
+            CronSource::new(Arc::new(config.clone()), state_path),
+            tx,
+            new_shared_source_health(),
+        );
 
         let event = timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -1082,6 +1236,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -1119,6 +1274,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -1149,6 +1305,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let event = IncomingEvent::agent_started(
             "worker-1".into(),
@@ -1194,6 +1351,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: observability.clone(),
+            source_health: new_shared_source_health(),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -1220,6 +1378,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: observability.clone(),
+            source_health: new_shared_source_health(),
         };
         let payload = json!({"provider": "codex", "event_name": "Bogus"});
 
@@ -1245,6 +1404,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: observability.clone(),
+            source_health: new_shared_source_health(),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -1284,6 +1444,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: observability.clone(),
+            source_health: new_shared_source_health(),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -1322,6 +1483,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let payload = json!({
             "provider": "codex",
@@ -1362,6 +1524,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let payload = json!({
             "provider": "claude-code",
@@ -1526,6 +1689,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -1580,6 +1744,7 @@ mod tests {
             tmux_registry: registry,
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = list_tmux(State(state)).await.into_response();
@@ -1615,6 +1780,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -1644,6 +1810,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: pending,
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -1666,6 +1833,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = approve_update(State(state)).await.into_response();
@@ -1700,6 +1868,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: pending.clone(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
@@ -1722,6 +1891,7 @@ mod tests {
             tmux_registry: Arc::new(RwLock::new(HashMap::new())),
             pending_update: update::new_shared_pending_update(),
             native_observability: new_shared_native_hook_observability(),
+            source_health: new_shared_source_health(),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
