@@ -326,6 +326,16 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
     let Some(map) = sources.as_object() else {
         return false;
     };
+
+    let mut required_sources = Vec::new();
+    if config.monitors.git.repos.iter().any(|repo| {
+        repo.emit_branch_changes
+            || repo.emit_commits
+            || repo.emit_issue_opened
+            || repo.emit_pr_status
+    }) {
+        required_sources.push("git");
+    }
     if config
         .monitors
         .git
@@ -333,23 +343,37 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
         .iter()
         .any(|repo| repo.emit_issue_opened || repo.emit_pr_status)
     {
-        let Some(github) = map.get("github").and_then(Value::as_object) else {
-            return false;
-        };
-        if github.get("status").and_then(Value::as_str) != Some("running") {
-            return false;
-        }
-        let Some(heartbeat) =
-            parse_rfc3339_timestamp(github.get("last_heartbeat_at").and_then(Value::as_str))
-        else {
-            return false;
-        };
-        let allowed_age = Duration::from_secs(config.monitors.poll_interval_secs.max(1) + 120);
-        if OffsetDateTime::now_utc() - heartbeat > allowed_age {
-            return false;
-        }
+        required_sources.push("github");
     }
-    true
+    if !config.monitors.tmux.sessions.is_empty() {
+        required_sources.push("tmux");
+    }
+    if !config.monitors.workspace.is_empty() {
+        required_sources.push("workspace");
+    }
+    if !config.cron.jobs.is_empty() {
+        required_sources.push("cron");
+    }
+
+    let allowed_age = Duration::from_secs(config.monitors.poll_interval_secs.max(1) + 120);
+    required_sources
+        .into_iter()
+        .all(|source| source_health_entry_is_ok(map.get(source), allowed_age))
+}
+
+fn source_health_entry_is_ok(source: Option<&Value>, allowed_age: Duration) -> bool {
+    let Some(source) = source.and_then(Value::as_object) else {
+        return false;
+    };
+    if source.get("status").and_then(Value::as_str) != Some("running") {
+        return false;
+    }
+    let Some(heartbeat) =
+        parse_rfc3339_timestamp(source.get("last_heartbeat_at").and_then(Value::as_str))
+    else {
+        return false;
+    };
+    OffsetDateTime::now_utc() - heartbeat <= allowed_age
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -1084,7 +1108,12 @@ mod tests {
             25294,
             3,
             snapshot_shared(&new_shared_native_hook_observability()),
-            json!({"github": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")}}),
+            json!({
+                "git": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")},
+                "github": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")},
+                "tmux": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")},
+                "workspace": {"status": "running", "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")}
+            }),
         );
 
         assert_eq!(payload["ok"], Value::Bool(true));
@@ -1144,6 +1173,183 @@ mod tests {
             0,
             snapshot_shared(&new_shared_native_hook_observability()),
             json!({"github": {"status": "running", "last_heartbeat_at": stale}}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_github_degraded_as_not_ok_even_when_git_is_healthy() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_pr_status: true,
+                ..Default::default()
+            });
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({
+                "git": {
+                    "status": "running",
+                    "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")
+                },
+                "github": {
+                    "status": "degraded",
+                    "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp"),
+                    "last_error": "GitHub poll completed with 1 repo/path error(s)"
+                }
+            }),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_github_missing_as_not_ok_even_when_git_is_healthy() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_issue_opened: true,
+                ..Default::default()
+            });
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({
+                "git": {
+                    "status": "running",
+                    "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp")
+                }
+            }),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_allows_healthy_configured_tmux_workspace_and_cron_sources() {
+        let mut config = AppConfig::default();
+        config.monitors.tmux.sessions.push(Default::default());
+        config.monitors.workspace.push(Default::default());
+        config.cron.jobs.push(crate::config::CronJob {
+            id: "test-job".into(),
+            schedule: "* * * * *".into(),
+            timezone: "UTC".into(),
+            enabled: true,
+            channel: None,
+            mention: None,
+            format: None,
+            state_file: None,
+            kind: crate::config::CronJobKind::CustomMessage {
+                message: "test".into(),
+            },
+        });
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .expect("timestamp");
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({
+                "tmux": {"status": "running", "last_heartbeat_at": now},
+                "workspace": {"status": "running", "last_heartbeat_at": now},
+                "cron": {"status": "running", "last_heartbeat_at": now}
+            }),
+        );
+        assert_eq!(payload["ok"], Value::Bool(true));
+    }
+
+    #[test]
+    fn health_payload_marks_malformed_configured_source_health_as_not_ok() {
+        let mut config = AppConfig::default();
+        config.monitors.tmux.sessions.push(Default::default());
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"tmux": "running"}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_configured_git_stopped_as_not_ok() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_commits: true,
+                ..Default::default()
+            });
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({
+                "git": {
+                    "status": "stopped",
+                    "last_heartbeat_at": OffsetDateTime::now_utc().format(&Rfc3339).expect("timestamp"),
+                    "last_error": "git source stopped"
+                }
+            }),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_configured_workspace_missing_health_as_not_ok() {
+        let mut config = AppConfig::default();
+        config.monitors.workspace.push(Default::default());
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_marks_configured_cron_stale_as_not_ok() {
+        let mut config = AppConfig::default();
+        config.monitors.poll_interval_secs = 1;
+        config.cron.jobs.push(crate::config::CronJob {
+            id: "test-job".into(),
+            schedule: "* * * * *".into(),
+            timezone: "UTC".into(),
+            enabled: true,
+            channel: None,
+            mention: None,
+            format: None,
+            state_file: None,
+            kind: crate::config::CronJobKind::CustomMessage {
+                message: "test".into(),
+            },
+        });
+        let stale = (OffsetDateTime::now_utc() - Duration::from_secs(300))
+            .format(&Rfc3339)
+            .expect("timestamp");
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"cron": {"status": "running", "last_heartbeat_at": stale}}),
         );
         assert_eq!(payload["ok"], Value::Bool(false));
     }
