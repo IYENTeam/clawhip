@@ -351,7 +351,7 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
     if !config.monitors.workspace.is_empty() {
         required_sources.push("workspace");
     }
-    if !config.cron.jobs.is_empty() {
+    if config.cron.jobs.iter().any(|job| job.enabled) {
         required_sources.push("cron");
     }
 
@@ -362,6 +362,14 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
 }
 
 fn source_health_entry_is_ok(source: Option<&Value>, allowed_age: Duration) -> bool {
+    source_health_entry_is_ok_at(source, allowed_age, OffsetDateTime::now_utc())
+}
+
+fn source_health_entry_is_ok_at(
+    source: Option<&Value>,
+    allowed_age: Duration,
+    now: OffsetDateTime,
+) -> bool {
     let Some(source) = source.and_then(Value::as_object) else {
         return false;
     };
@@ -373,7 +381,7 @@ fn source_health_entry_is_ok(source: Option<&Value>, allowed_age: Duration) -> b
     else {
         return false;
     };
-    OffsetDateTime::now_utc() - heartbeat <= allowed_age
+    now - heartbeat <= allowed_age
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -1322,6 +1330,132 @@ mod tests {
             json!({}),
         );
         assert_eq!(payload["ok"], Value::Bool(false));
+    }
+
+    #[test]
+    fn health_payload_ignores_disabled_cron_jobs_when_health_entry_is_absent() {
+        let mut config = AppConfig::default();
+        config.cron.jobs.push(crate::config::CronJob {
+            id: "disabled-job".into(),
+            schedule: "* * * * *".into(),
+            timezone: "UTC".into(),
+            enabled: false,
+            channel: None,
+            mention: None,
+            format: None,
+            state_file: None,
+            kind: crate::config::CronJobKind::CustomMessage {
+                message: "disabled".into(),
+            },
+        });
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(true));
+    }
+
+    #[test]
+    fn health_payload_requires_git_but_not_github_for_branch_only_monitor() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_branch_changes: true,
+                emit_commits: false,
+                emit_issue_opened: false,
+                emit_pr_status: false,
+                ..Default::default()
+            });
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .expect("timestamp");
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"git": {"status": "running", "last_heartbeat_at": now}}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(true));
+    }
+
+    #[test]
+    fn health_payload_requires_git_and_github_for_issue_monitor() {
+        let mut config = AppConfig::default();
+        config
+            .monitors
+            .git
+            .repos
+            .push(crate::config::GitRepoMonitor {
+                emit_commits: false,
+                emit_branch_changes: false,
+                emit_issue_opened: true,
+                emit_pr_status: false,
+                ..Default::default()
+            });
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .expect("timestamp");
+        let github_only = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({"github": {"status": "running", "last_heartbeat_at": now}}),
+        );
+        assert_eq!(github_only["ok"], Value::Bool(false));
+
+        let both_sources = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({
+                "git": {"status": "running", "last_heartbeat_at": now},
+                "github": {"status": "running", "last_heartbeat_at": now}
+            }),
+        );
+        assert_eq!(both_sources["ok"], Value::Bool(true));
+    }
+
+    #[test]
+    fn health_payload_ignores_unconfigured_tmux_workspace_and_cron_sources() {
+        let config = AppConfig::default();
+        let payload = health_payload(
+            &config,
+            25294,
+            0,
+            snapshot_shared(&new_shared_native_hook_observability()),
+            json!({}),
+        );
+        assert_eq!(payload["ok"], Value::Bool(true));
+    }
+
+    #[test]
+    fn source_health_entry_accepts_exact_allowed_age_and_rejects_older() {
+        let now = OffsetDateTime::now_utc();
+        let allowed_age = Duration::from_secs(121);
+        let exact = (now - allowed_age).format(&Rfc3339).expect("timestamp");
+        let older = (now - allowed_age - Duration::from_secs(1))
+            .format(&Rfc3339)
+            .expect("timestamp");
+
+        assert!(source_health_entry_is_ok_at(
+            Some(&json!({"status": "running", "last_heartbeat_at": exact})),
+            allowed_age,
+            now,
+        ));
+        assert!(!source_health_entry_is_ok_at(
+            Some(&json!({"status": "running", "last_heartbeat_at": older})),
+            allowed_age,
+            now,
+        ));
     }
 
     #[test]

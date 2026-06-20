@@ -141,3 +141,23 @@ On March 11, 2026, a real validation was run for the custom send path:
 - `cargo run -q -- send --message "🧪 clawhip live verification (...)"` exited successfully
 - guild-wide search confirmed actual Discord delivery by the `clawhip` webhook bot
 - delivery landed in `#ops` (`1477003109564678174`), confirming the configured wildcard webhook route was active
+
+## Daemon health contract
+
+`GET /health` and `clawhip status` expose a single top-level `ok` boolean plus a `sources` map.
+`ok: true` means every configured active source that contributes to daemon monitoring is present,
+`status: "running"`, and has a fresh `last_heartbeat_at`. A configured source with
+`status: "degraded"`, `status: "stopped"`, a missing health entry, malformed health entry, or a stale
+heartbeat makes `ok: false`.
+
+The active source set is derived from configuration:
+
+- `git`: required when any `[[monitors.git.repos]]` emits branch, commit, issue, or PR events.
+- `github`: required when any git repo emits GitHub issue or PR status events.
+- `tmux`: required when any `[[monitors.tmux.sessions]]` entry is configured.
+- `workspace`: required when any `[[monitors.workspace]]` entry is configured.
+- `cron`: required only when at least one `[[cron.jobs]]` entry is enabled. Disabled cron jobs do not make cron health required.
+
+The freshness window is `monitors.poll_interval_secs + 120s`; a heartbeat exactly at the boundary is
+still accepted, while anything older is stale. Unconfigured sources are excluded from `ok` even when
+their worker exits cleanly without emitting a health entry.
