@@ -12,17 +12,18 @@ use tokio::time::sleep;
 use crate::Result;
 use crate::config::{AppConfig, GitRepoMonitor};
 use crate::events::IncomingEvent;
-use crate::source::Source;
 use crate::source::git::{GitSnapshot, repo_display_name, snapshot_git_repo};
+use crate::source::{SharedSourceHealth, Source, mark_source_error, mark_source_success};
 use crate::telemetry;
 
 pub struct GitHubSource {
     config: Arc<AppConfig>,
+    health: SharedSourceHealth,
 }
 
 impl GitHubSource {
-    pub fn new(config: Arc<AppConfig>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<AppConfig>, health: SharedSourceHealth) -> Self {
+        Self { config, health }
     }
 }
 
@@ -49,14 +50,18 @@ impl Source for GitHubSource {
         let mut poll_count: u64 = 0;
 
         loop {
-            run_github_poll_cycle(
+            match run_github_poll_cycle(
                 self.config.as_ref(),
                 github_client.as_ref(),
                 &tx,
                 &mut state,
                 state_was_restored,
             )
-            .await;
+            .await
+            {
+                Ok(()) => mark_source_success(&self.health, self.name()).await,
+                Err(error) => mark_source_error(&self.health, self.name(), error.to_string()).await,
+            }
 
             poll_count += 1;
 
@@ -189,7 +194,7 @@ async fn run_github_poll_cycle(
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
     state_was_restored: bool,
-) {
+) -> Result<()> {
     if let Err(error) = poll_github(config, github_client, tx, state, state_was_restored).await {
         telemetry::emit(source_record(
             telemetry::event_name::SOURCE_DEGRADED,
@@ -198,7 +203,9 @@ async fn run_github_poll_cycle(
             Some(error.to_string()),
         ));
         eprintln!("clawhip source github poll failed: {error}");
+        return Err(error);
     }
+    Ok(())
 }
 
 async fn snapshot_github_repo(repo: &GitRepoMonitor) -> Result<GitSnapshot> {
@@ -238,6 +245,7 @@ async fn poll_github(
     state: &mut HashMap<String, GitHubRepoState>,
     state_was_restored: bool,
 ) -> Result<()> {
+    let mut errors = Vec::new();
     for repo in &config.monitors.git.repos {
         if !repo.emit_issue_opened && !repo.emit_pr_status {
             continue;
@@ -256,6 +264,7 @@ async fn poll_github(
                     "clawhip source github snapshot failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} snapshot: {error}", repo.path));
                 continue;
             }
         };
@@ -270,6 +279,7 @@ async fn poll_github(
                     "clawhip source GitHub issue processing failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} issues: {error}", repo.path));
                 previous
                     .map(|entry| entry.issues.clone())
                     .unwrap_or_default()
@@ -288,6 +298,7 @@ async fn poll_github(
                         "clawhip source GitHub pull request processing failed for {}: {error}",
                         repo.path
                     );
+                    errors.push(format!("{} pulls: {error}", repo.path));
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
             };
@@ -305,6 +316,7 @@ async fn poll_github(
                     "clawhip source GitHub CI processing failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} ci: {error}", repo.path));
                 previous.map(|entry| entry.ci.clone()).unwrap_or_default()
             }
         };
@@ -312,7 +324,16 @@ async fn poll_github(
         state.insert(repo.path.clone(), GitHubRepoState { issues, prs, ci });
     }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "GitHub poll completed with {} repo/path error(s): {}",
+            errors.len(),
+            errors.join("; ")
+        )
+        .into())
+    }
 }
 
 async fn backfill_issues(
@@ -1800,7 +1821,7 @@ mod tests {
             ..GitRepoMonitor::default()
         }];
 
-        let source = GitHubSource::new(Arc::new(config));
+        let source = GitHubSource::new(Arc::new(config), crate::source::new_shared_source_health());
         let (tx, _rx) = mpsc::channel(4);
         let source_task = tokio::spawn(async move { source.run(tx).await });
 
