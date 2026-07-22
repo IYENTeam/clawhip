@@ -96,7 +96,7 @@ pub async fn run(
         "discord".into(),
         Box::new(DiscordSink::from_config(config.clone())?),
     );
-    sinks.insert("slack".into(), Box::new(SlackSink::default()));
+    sinks.insert("slack".into(), Box::new(SlackSink::from_config(config.clone())?));
     sinks.insert("localfile".into(), Box::new(LocalFileSink));
     let renderer: Box<dyn Renderer> = Box::new(DefaultRenderer);
     let router = Router::new(config.clone());

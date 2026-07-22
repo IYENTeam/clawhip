@@ -225,6 +225,7 @@ impl Router {
             SinkTarget::DiscordChannel(channel) => Ok((channel, delivery.format, content)),
             SinkTarget::DiscordThread(_)
             | SinkTarget::DiscordWebhook(_)
+            | SinkTarget::SlackChannel(_)
             | SinkTarget::SlackWebhook(_)
             | SinkTarget::LocalFile(_) => Err("matched route uses a non-channel target".into()),
         }
@@ -377,16 +378,24 @@ impl Router {
 
                 Ok(SinkTarget::DiscordChannel(channel))
             }
-            "slack" => route
-                .and_then(RouteRule::slack_webhook_target)
-                .map(|webhook| SinkTarget::SlackWebhook(webhook.to_string()))
-                .ok_or_else(|| {
-                    format!(
-                        "no Slack webhook configured for event {}",
-                        event.canonical_kind()
-                    )
-                    .into()
-                }),
+            "slack" => {
+                if let Some(webhook) = route.and_then(RouteRule::slack_webhook_target) {
+                    return Ok(SinkTarget::SlackWebhook(webhook.to_string()));
+                }
+
+                let channel = route
+                    .and_then(|route| route.slack_channel_target().map(str::to_string))
+                    .or_else(|| event.channel.clone())
+                    .or_else(|| self.config.default_slack_channel())
+                    .ok_or_else(|| {
+                        format!(
+                            "no Slack webhook or channel configured for event {}",
+                            event.canonical_kind()
+                        )
+                    })?;
+
+                Ok(SinkTarget::SlackChannel(channel))
+            }
             "localfile" => route
                 .and_then(RouteRule::local_file_target)
                 .map(|path| SinkTarget::LocalFile(path.to_string()))
@@ -479,6 +488,7 @@ fn delivery_explanation(
         }
         SinkTarget::DiscordThread(_) => (telemetry::safe_target_id(&delivery.target), None),
         SinkTarget::DiscordWebhook(url) => (format!("DiscordWebhook({url})"), None),
+        SinkTarget::SlackChannel(name) => (format!("SlackChannel({name:?})"), Some(name.clone())),
         SinkTarget::SlackWebhook(url) => (format!("SlackWebhook({url})"), None),
         SinkTarget::LocalFile(path) => (format!("LocalFile({path})"), None),
     };
@@ -2684,5 +2694,76 @@ mod tests {
             assert!(rendered.contains("discord:thread:redacted:"));
             assert!(!rendered.contains(raw_thread_id));
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_slack_channel_route_to_slack_channel_target() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                sink: "slack".into(),
+                channel: Some("C123OPS".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent::github_issue_opened("app".into(), 42, "bug".into(), None);
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::SlackChannel("C123OPS".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_slack_route_falls_back_to_default_channel() {
+        let mut config = AppConfig::default();
+        config.providers.slack.default_channel = Some("C-DEFAULT".into());
+        config.routes = vec![RouteRule {
+            event: "github.*".into(),
+            sink: "slack".into(),
+            channel: None,
+            ..RouteRule::default()
+        }];
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent::github_issue_opened("app".into(), 42, "bug".into(), None);
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::SlackChannel("C-DEFAULT".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_slack_webhook_route_still_targets_webhook() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "ci.failed-twice".into(),
+                sink: "slack".into(),
+                slack_webhook: Some("https://hooks.slack.com/services/T/B/xxx".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent::tmux_keyword("ops".into(), "error".into(), "boom".into(), None);
+        // route glob "ci.failed-twice" will not match; use a matching custom kind instead
+        let event = IncomingEvent {
+            kind: "ci.failed-twice".into(),
+            ..event
+        };
+
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::SlackWebhook("https://hooks.slack.com/services/T/B/xxx".into())
+        );
     }
 }

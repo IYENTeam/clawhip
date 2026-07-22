@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::config::AppConfig;
 use crate::slack::SlackClient;
 
 use super::{Sink, SinkMessage, SinkTarget};
@@ -13,6 +16,10 @@ pub struct SlackSink {
 impl SlackSink {
     pub fn new(client: SlackClient) -> Self {
         Self { client }
+    }
+
+    pub fn from_config(config: Arc<AppConfig>) -> Result<Self> {
+        Ok(Self::new(SlackClient::from_config(config)?))
     }
 }
 

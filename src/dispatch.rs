@@ -934,6 +934,7 @@ fn sink_target_key(target: &SinkTarget) -> String {
         SinkTarget::DiscordChannel(channel) => format!("discord-channel:{channel}"),
         SinkTarget::DiscordThread(thread) => format!("discord-thread:{thread}"),
         SinkTarget::DiscordWebhook(webhook) => format!("discord-webhook:{webhook}"),
+        SinkTarget::SlackChannel(channel) => format!("slack-channel:{channel}"),
         SinkTarget::SlackWebhook(webhook) => format!("slack-webhook:{webhook}"),
         SinkTarget::LocalFile(path) => format!("localfile:{path}"),
     }

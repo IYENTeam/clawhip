@@ -94,7 +94,13 @@ pub struct DiscordConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SlackConfig {}
+pub struct SlackConfig {
+    #[serde(alias = "token")]
+    pub bot_token: Option<String>,
+    #[serde(alias = "default_channel")]
+    pub default_channel: Option<String>,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -239,7 +245,7 @@ impl Default for RouteRule {
 
 impl SlackConfig {
     fn is_empty(&self) -> bool {
-        true
+        self.bot_token.is_none() && self.default_channel.is_none()
     }
 }
 
@@ -276,6 +282,12 @@ impl RouteRule {
     pub fn local_file_target(&self) -> Option<&str> {
         (self.effective_sink() == "localfile")
             .then(|| non_empty_trimmed(self.local_path.as_deref()))
+            .flatten()
+    }
+
+    pub fn slack_channel_target(&self) -> Option<&str> {
+        (self.effective_sink() == "slack")
+            .then(|| non_empty_trimmed(self.channel.as_deref()))
             .flatten()
     }
 
@@ -805,6 +817,26 @@ impl AppConfig {
         Ok(())
     }
 
+    pub fn effective_slack_token(&self) -> Option<String> {
+        env::var("CLAWHIP_SLACK_BOT_TOKEN")
+            .ok()
+            .and_then(|value| normalize_secret(Some(value)))
+            .or_else(|| normalize_secret(self.providers.slack.bot_token.clone()))
+    }
+
+    pub fn default_slack_channel(&self) -> Option<String> {
+        normalize_text(self.providers.slack.default_channel.clone())
+    }
+
+    fn has_slack_channel_routes(&self) -> bool {
+        self.routes.iter().any(|route| {
+            route.slack_channel_target().is_some()
+                || (route.effective_sink() == "slack"
+                    && route.slack_webhook_target().is_none()
+                    && self.default_slack_channel().is_some())
+        })
+    }
+
     pub fn effective_token(&self) -> Option<String> {
         self.effective_token_with(|name| env::var(name).ok())
     }
@@ -1013,27 +1045,21 @@ impl AppConfig {
                     }
                 }
                 "slack" => {
-                    if has_channel {
+                    let has_slack_channel = route.slack_channel_target().is_some();
+                    let configured_targets = usize::from(has_slack_channel)
+                        + usize::from(normalize_secret(route.webhook.clone()).is_some())
+                        + usize::from(normalize_secret(route.slack_webhook.clone()).is_some());
+                    if configured_targets > 1 {
                         return Err(format!(
-                            "route #{} ({}) cannot set channel when sink = \"slack\"",
+                            "route #{} ({}) must set only one Slack target: channel, webhook, or slack_webhook",
                             index + 1,
                             route.event
                         )
                         .into());
                     }
-                    if normalize_secret(route.webhook.clone()).is_some()
-                        && normalize_secret(route.slack_webhook.clone()).is_some()
-                    {
+                    if configured_targets == 0 && self.default_slack_channel().is_none() {
                         return Err(format!(
-                            "route #{} ({}) cannot set both webhook and slack_webhook for Slack delivery",
-                            index + 1,
-                            route.event
-                        )
-                        .into());
-                    }
-                    if !has_slack_webhook {
-                        return Err(format!(
-                            "route #{} ({}) must set webhook or slack_webhook when sink = \"slack\"",
+                            "route #{} ({}) must set channel, webhook, or slack_webhook when sink = \"slack\" (or configure [providers.slack].default_channel)",
                             index + 1,
                             route.event
                         )
@@ -1094,6 +1120,13 @@ impl AppConfig {
             }
         }
 
+        if self.has_slack_channel_routes() && self.effective_slack_token().is_none() {
+            return Err(
+                "missing Slack bot token for configured Slack channel delivery; configure [providers.slack].token (or CLAWHIP_SLACK_BOT_TOKEN), use route webhooks, or remove Slack channel routes"
+                    .into(),
+            );
+        }
+
         if self.effective_token().is_none() {
             if self.has_discord_delivery_requiring_bot_token() {
                 return Err(
@@ -1104,6 +1137,7 @@ impl AppConfig {
 
             if !self.has_webhook_routes()
                 && !self.has_localfile_routes()
+                && !self.has_slack_channel_routes()
                 && !self.discord_watch.enabled
             {
                 return Err(
@@ -1893,7 +1927,7 @@ thread = "123456789012345678"
         };
 
         let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("cannot set channel when sink = \"slack\""));
+        assert!(error.contains("must set only one Slack target"));
     }
 
     #[test]
@@ -2505,5 +2539,102 @@ name = "general"
         assert!(toml.contains("[discord_watch]"));
         assert!(toml.contains("pending_mentions_threshold = 7"));
         assert!(toml.contains("doctrine_template = \"Sweep <#{channel_id}>\""));
+    }
+
+    fn slack_channel_route(event: &str, channel: Option<&str>) -> RouteRule {
+        RouteRule {
+            event: event.into(),
+            sink: "slack".into(),
+            channel: channel.map(str::to_string),
+            ..RouteRule::default()
+        }
+    }
+
+    #[test]
+    fn slack_channel_route_valid_with_bot_token() {
+        let mut config = AppConfig::default();
+        config.providers.slack.bot_token = Some("xoxb-test".into());
+        config.routes = vec![slack_channel_route("github.*", Some("C123OPS"))];
+
+        config
+            .validate()
+            .expect("slack channel route with bot token should validate");
+    }
+
+    #[test]
+    fn slack_channel_route_requires_bot_token() {
+        let mut config = AppConfig::default();
+        config.routes = vec![slack_channel_route("github.*", Some("C123OPS"))];
+
+        let error = config
+            .validate()
+            .expect_err("slack channel route without bot token must fail");
+        assert!(error.to_string().contains("missing Slack bot token"));
+    }
+
+    #[test]
+    fn slack_route_rejects_channel_plus_webhook() {
+        let mut config = AppConfig::default();
+        config.providers.slack.bot_token = Some("xoxb-test".into());
+        let mut route = slack_channel_route("github.*", Some("C123OPS"));
+        route.webhook = Some("https://hooks.slack.com/services/T/B/xxx".into());
+        config.routes = vec![route];
+
+        let error = config
+            .validate()
+            .expect_err("channel plus webhook must fail");
+        assert!(error.to_string().contains("only one Slack target"));
+    }
+
+    #[test]
+    fn slack_webhook_route_remains_valid_without_bot_token() {
+        let mut config = AppConfig::default();
+        let route = RouteRule {
+            event: "ci.failed-twice".into(),
+            sink: "slack".into(),
+            slack_webhook: Some("https://hooks.slack.com/services/T/B/xxx".into()),
+            ..RouteRule::default()
+        };
+        config.routes = vec![route];
+
+        config
+            .validate()
+            .expect("existing slack webhook routes must keep validating (back-compat)");
+    }
+
+    #[test]
+    fn slack_route_uses_default_channel_when_configured() {
+        let mut config = AppConfig::default();
+        config.providers.slack.bot_token = Some("xoxb-test".into());
+        config.providers.slack.default_channel = Some("C-DEFAULT".into());
+        config.routes = vec![slack_channel_route("github.*", None)];
+
+        config
+            .validate()
+            .expect("slack route without explicit target should validate via default_channel");
+    }
+
+    #[test]
+    fn slack_route_without_target_or_default_channel_fails() {
+        let mut config = AppConfig::default();
+        config.providers.slack.bot_token = Some("xoxb-test".into());
+        config.routes = vec![slack_channel_route("github.*", None)];
+
+        let error = config
+            .validate()
+            .expect_err("slack route with no target and no default channel must fail");
+        assert!(error.to_string().contains("default_channel"));
+    }
+
+    #[test]
+    fn slack_default_channel_route_still_requires_bot_token() {
+        let mut config = AppConfig::default();
+        config.providers.slack.default_channel = Some("C-DEFAULT".into());
+        config.routes = vec![slack_channel_route("github.*", None)];
+
+        let error = config
+            .validate()
+            .expect_err("default-channel slack route without bot token must fail");
+        assert!(error.to_string().contains("missing Slack bot token"));
     }
 }

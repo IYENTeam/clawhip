@@ -111,6 +111,7 @@ pub fn safe_target_id(target: &SinkTarget) -> String {
         SinkTarget::DiscordWebhook(webhook_url) => {
             format!("discord:webhook:{}", redacted_url_fingerprint(webhook_url))
         }
+        SinkTarget::SlackChannel(channel_id) => format!("slack:channel:{channel_id}"),
         SinkTarget::SlackWebhook(webhook_url) => {
             format!("slack:webhook:{}", redacted_url_fingerprint(webhook_url))
         }

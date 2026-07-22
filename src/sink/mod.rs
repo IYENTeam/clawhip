@@ -17,6 +17,7 @@ pub enum SinkTarget {
     DiscordChannel(String),
     DiscordThread(String),
     DiscordWebhook(String),
+    SlackChannel(String),
     SlackWebhook(String),
     LocalFile(String),
 }
