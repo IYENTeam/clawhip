@@ -68,6 +68,7 @@ struct AppState {
     native_observability: SharedNativeHookObservability,
     cron_state_path: PathBuf,
     discord_watch_lock: Arc<Mutex<()>>,
+    sns_cert_cache: Arc<crate::intake::SnsCertCache>,
 }
 
 pub async fn run(
@@ -154,6 +155,14 @@ pub async fn run(
         .route("/api/tmux/register", post(register_tmux))
         .route("/api/tmux", get(list_tmux))
         .route("/github", post(post_github))
+        .route("/aws/sns", post(post_aws_sns))
+        .route("/aws/eventbridge", post(post_aws_eventbridge))
+        .route("/cloudflare", post(post_cloudflare_notification))
+        .route(
+            "/cloudflare/logpush",
+            post(post_cloudflare_logpush)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::intake::LOGPUSH_MAX_BODY_BYTES)),
+        )
         .route("/api/update/status", get(update_status))
         .route("/api/update/approve", post(approve_update))
         .route("/api/update/dismiss", post(dismiss_update));
@@ -168,6 +177,7 @@ pub async fn run(
         native_observability,
         cron_state_path,
         discord_watch_lock: Arc::new(Mutex::new(())),
+        sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
     });
     let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -995,6 +1005,110 @@ fn gajae_hold_target(config: &AppConfig, repo: &str) -> Option<String> {
         .or_else(|| config.gajae.hold_target_channel.clone())
 }
 
+async fn post_aws_sns(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let topic_arn = payload
+        .get("TopicArn")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !crate::intake::topic_allowed(&state.config.aws.topic_allowlist, topic_arn) {
+        return (StatusCode::FORBIDDEN, "SNS topic is not allowlisted").into_response();
+    }
+    if let Err(error) = crate::intake::verify_sns_signature(&payload, &state.sns_cert_cache).await {
+        return (StatusCode::FORBIDDEN, error.to_string()).into_response();
+    }
+    match crate::intake::normalize_sns_envelope(&payload) {
+        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn post_aws_eventbridge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    if state.config.aws.webhook_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "aws.eventbridge intake is not configured; set [aws].webhook_secret",
+        )
+            .into_response();
+    }
+    if let Err(error) = crate::intake::verify_secret(
+        headers.get("x-api-key").and_then(|value| value.to_str().ok()),
+        state.config.aws.webhook_secret.as_deref(),
+    ) {
+        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    }
+    match crate::intake::normalize_eventbridge(&payload) {
+        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn post_cloudflare_notification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    if state.config.cloudflare.webhook_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cloudflare notification intake is not configured; set [cloudflare].webhook_secret",
+        )
+            .into_response();
+    }
+    if let Err(error) = crate::intake::verify_secret(
+        headers
+            .get("cf-webhook-auth")
+            .and_then(|value| value.to_str().ok()),
+        state.config.cloudflare.webhook_secret.as_deref(),
+    ) {
+        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    }
+    match crate::intake::normalize_cf_notification(&payload) {
+        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn post_cloudflare_logpush(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::BTreeMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    if state.config.cloudflare.logpush_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cloudflare logpush intake is not configured; set [cloudflare].logpush_secret",
+        )
+            .into_response();
+    }
+    if let Err(error) = crate::intake::verify_secret(
+        headers
+            .get("x-logpush-secret")
+            .and_then(|value| value.to_str().ok()),
+        state.config.cloudflare.logpush_secret.as_deref(),
+    ) {
+        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    }
+    let dataset = params
+        .get("dataset")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let content_encoding = headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok());
+    match crate::intake::normalize_cf_logpush_batch(&dataset, &body, content_encoding) {
+        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
 async fn post_github(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1295,6 +1409,7 @@ mod tests {
                 pending_update: update::new_shared_pending_update(),
                 native_observability: new_shared_native_hook_observability(),
                 cron_state_path: PathBuf::from("cron-state.json"),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
                 discord_watch_lock: Arc::new(Mutex::new(())),
             },
             rx,
@@ -1312,6 +1427,7 @@ mod tests {
                 pending_update: update::new_shared_pending_update(),
                 native_observability: new_shared_native_hook_observability(),
                 cron_state_path: PathBuf::from("cron-state.json"),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
                 discord_watch_lock: Arc::new(Mutex::new(())),
             },
             rx,
@@ -1644,6 +1760,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = accept_event(
@@ -1691,6 +1808,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = accept_event(
@@ -1843,6 +1961,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -1882,6 +2001,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -1914,6 +2034,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let event = IncomingEvent::agent_started(
             "worker-1".into(),
@@ -1958,6 +2079,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = accept_event(
@@ -2013,6 +2135,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = accept_event(
@@ -2073,6 +2196,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = accept_event(
@@ -2131,6 +2255,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let event = |id: &str| IncomingEvent {
@@ -2187,6 +2312,7 @@ mod tests {
             native_observability: observability.clone(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -2215,6 +2341,7 @@ mod tests {
             native_observability: observability.clone(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let payload = json!({"provider": "codex", "event_name": "Bogus"});
 
@@ -2242,6 +2369,7 @@ mod tests {
             native_observability: observability.clone(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -2283,6 +2411,7 @@ mod tests {
             native_observability: observability.clone(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -2323,6 +2452,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let payload = json!({
             "provider": "codex",
@@ -2392,6 +2522,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let payload = json!({
             "provider": "claude-code",
@@ -2558,6 +2689,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -2614,6 +2746,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = list_tmux(State(state)).await.into_response();
@@ -2651,6 +2784,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -2682,6 +2816,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -2706,6 +2841,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = approve_update(State(state)).await.into_response();
@@ -2742,6 +2878,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
@@ -2766,6 +2903,7 @@ mod tests {
             native_observability: new_shared_native_hook_observability(),
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
+                sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
@@ -2774,5 +2912,186 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["ok"], Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn aws_sns_rejects_non_allowlisted_topic() {
+        let mut config = AppConfig::default();
+        config.aws.topic_allowlist =
+            vec!["arn:aws:sns:us-east-1:123456789012:clawhip-alarms".into()];
+        let (state, _rx) = app_state_with_config(config);
+
+        let response = post_aws_sns(
+            State(state),
+            Json(json!({
+                "Type": "Notification",
+                "MessageId": "evil",
+                "TopicArn": "arn:aws:sns:us-east-1:999999999999:evil",
+                "Message": "hi"
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn aws_sns_enqueues_cloudwatch_alarm_event() {
+        const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sns");
+        const CERT_URL: &str =
+            "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem";
+        let (state, mut rx) = app_state_with_config(AppConfig::default());
+        let cert_pem = std::fs::read_to_string(format!("{FIXTURE_DIR}/cert.pem")).unwrap();
+        let (key, not_after) = crate::intake::parse_signing_cert(&cert_pem).unwrap();
+        state.sns_cert_cache.insert(CERT_URL, key, not_after);
+
+        let response = post_aws_sns(
+            State(state),
+            Json(json!({
+                "Type": "Notification",
+                "MessageId": "22b80b92",
+                "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+                "Subject": "ALARM: ServerCpuTooHigh",
+                "Message": "{\"AlarmName\":\"ServerCpuTooHigh\",\"NewStateValue\":\"ALARM\"}",
+                "Timestamp": "2026-07-22T12:00:01.000Z",
+                "SignatureVersion": "2",
+                "Signature": std::fs::read_to_string(format!("{FIXTURE_DIR}/sig.b64")).unwrap().trim(),
+                "SigningCertURL": CERT_URL
+            })),
+        )
+        .await;
+
+        assert!(response.status().is_success());
+        let event = rx.recv().await.expect("event should be enqueued");
+        assert_eq!(event.kind, "aws.cloudwatch-alarm");
+    }
+
+    #[tokio::test]
+    async fn aws_sns_rejects_unsigned_forged_alarm() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+
+        let response = post_aws_sns(
+            State(state),
+            Json(json!({
+                "Type": "Notification",
+                "MessageId": "forged",
+                "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+                "Message": "{\"AlarmName\":\"Forged\",\"NewStateValue\":\"ALARM\"}",
+                "Timestamp": "2026-07-22T12:00:01.000Z"
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn aws_eventbridge_unconfigured_returns_503() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+
+        let response = post_aws_eventbridge(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"source": "aws.ec2", "detail-type": "EC2 Instance State-change Notification"})),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn cloudflare_endpoints_unconfigured_return_503() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+        let response = post_cloudflare_notification(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"alert_type": "x"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+        let response = post_cloudflare_logpush(
+            State(state),
+            HeaderMap::new(),
+            axum::extract::Query(std::collections::BTreeMap::new()),
+            axum::body::Bytes::from("{}\n"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn aws_eventbridge_requires_secret_when_configured() {
+        let mut config = AppConfig::default();
+        config.aws.webhook_secret = Some("eb-secret".into());
+        let payload = json!({
+            "source": "aws.guardduty",
+            "detail-type": "GuardDuty Finding",
+            "id": "abc",
+            "detail": {"severity": 8.0}
+        });
+
+        let (state, _rx) = app_state_with_config(config.clone());
+        let response = post_aws_eventbridge(State(state), HeaderMap::new(), Json(payload.clone())).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (state, mut rx) = app_state_with_config(config);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "eb-secret".parse().unwrap());
+        let response = post_aws_eventbridge(State(state), headers, Json(payload)).await;
+        assert!(response.status().is_success());
+        let event = rx.recv().await.expect("event should be enqueued");
+        assert_eq!(event.kind, "aws.eventbridge.guardduty-finding");
+    }
+
+    #[tokio::test]
+    async fn cloudflare_notification_rejects_wrong_secret_and_accepts_correct() {
+        let mut config = AppConfig::default();
+        config.cloudflare.webhook_secret = Some("cf-secret".into());
+        let payload = json!({
+            "alert_type": "health_check_status_notification",
+            "text": "origin-api unhealthy",
+            "data": {"new_health_status": "unhealthy"}
+        });
+
+        let (state, _rx) = app_state_with_config(config.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-webhook-auth", "wrong".parse().unwrap());
+        let response =
+            post_cloudflare_notification(State(state), headers, Json(payload.clone())).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (state, mut rx) = app_state_with_config(config);
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-webhook-auth", "cf-secret".parse().unwrap());
+        let response = post_cloudflare_notification(State(state), headers, Json(payload)).await;
+        assert!(response.status().is_success());
+        let event = rx.recv().await.expect("event should be enqueued");
+        assert_eq!(event.kind, "cloudflare.health_check_status_notification");
+    }
+
+    #[tokio::test]
+    async fn cloudflare_logpush_enqueues_capped_batch_event() {
+        let mut config = AppConfig::default();
+        config.cloudflare.logpush_secret = Some("lp-secret".into());
+        let (state, mut rx) = app_state_with_config(config);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-logpush-secret", "lp-secret".parse().unwrap());
+        let params: std::collections::BTreeMap<String, String> =
+            [("dataset".to_string(), "firewall_events".to_string())].into_iter().collect();
+        let body = axum::body::Bytes::from(
+            "{\"RayID\":\"ray-1\"}\n{\"RayID\":\"ray-2\"}\n",
+        );
+
+        let response =
+            post_cloudflare_logpush(State(state), headers, axum::extract::Query(params), body)
+                .await;
+
+        assert!(response.status().is_success());
+        let event = rx.recv().await.expect("event should be enqueued");
+        assert_eq!(event.kind, "cloudflare.logpush.firewall_events");
+        assert_eq!(event.payload["record_count"], 2);
     }
 }

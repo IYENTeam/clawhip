@@ -14,6 +14,7 @@ mod events;
 mod gajae;
 mod gateway_allowlist;
 mod hooks;
+mod intake;
 mod keyword_window;
 mod lifecycle;
 mod memory;

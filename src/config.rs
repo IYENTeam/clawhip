@@ -35,6 +35,10 @@ pub struct AppConfig {
     pub update: crate::update::UpdateConfig,
     #[serde(default, skip_serializing_if = "GajaeConfig::is_empty")]
     pub gajae: GajaeConfig,
+    #[serde(default, skip_serializing_if = "AwsConfig::is_empty")]
+    pub aws: AwsConfig,
+    #[serde(default, skip_serializing_if = "CloudflareConfig::is_empty")]
+    pub cloudflare: CloudflareConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +105,30 @@ pub struct SlackConfig {
     pub default_channel: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AwsConfig {
+    #[serde(default)]
+    pub topic_allowlist: Vec<String>,
+    pub webhook_secret: Option<String>,
+}
+
+impl AwsConfig {
+    fn is_empty(&self) -> bool {
+        self.topic_allowlist.is_empty() && self.webhook_secret.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CloudflareConfig {
+    pub webhook_secret: Option<String>,
+    pub logpush_secret: Option<String>,
+}
+
+impl CloudflareConfig {
+    fn is_empty(&self) -> bool {
+        self.webhook_secret.is_none() && self.logpush_secret.is_none()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
