@@ -296,7 +296,7 @@ pub async fn list_active_tmux_registrations(
                 None,
                 Some(error.to_string()),
             ));
-            eprintln!("clawhip source tmux list-sessions failed: {error}");
+            eprintln!("op-pi source tmux list-sessions failed: {error}");
         }
     }
 
@@ -319,7 +319,7 @@ async fn poll_tmux(
                 None,
                 Some(error.to_string()),
             ));
-            eprintln!("clawhip source tmux list-sessions failed: {error}");
+            eprintln!("op-pi source tmux list-sessions failed: {error}");
             None
         }
     };
@@ -372,7 +372,7 @@ async fn poll_tmux(
                     Some(error.to_string()),
                 ));
                 eprintln!(
-                    "clawhip source tmux has-session failed for {}: {error}",
+                    "op-pi source tmux has-session failed for {}: {error}",
                     session_name
                 );
                 continue;
@@ -483,7 +483,7 @@ async fn poll_tmux(
                     Some(error.to_string()),
                 ));
                 eprintln!(
-                    "clawhip source tmux snapshot failed for {}: {error}",
+                    "op-pi source tmux snapshot failed for {}: {error}",
                     session_name
                 );
             }
@@ -998,7 +998,9 @@ pub(crate) fn last_nonempty_line(content: &str) -> String {
 }
 
 pub(crate) fn tmux_bin() -> String {
-    std::env::var("CLAWHIP_TMUX_BIN").unwrap_or_else(|_| "tmux".to_string())
+    std::env::var("OP_PI_TMUX_BIN")
+        .or_else(|_| std::env::var("CLAWHIP_TMUX_BIN"))
+        .unwrap_or_else(|_| "tmux".to_string())
 }
 
 fn tmux_stderr(stderr: &[u8]) -> String {
@@ -1110,23 +1112,23 @@ PR created #7",
     fn tmux_keyword_event_carries_registered_routing_metadata() {
         let mut registration = registration(vec!["error"]);
         registration.routing = RoutingMetadata {
-            project: Some("clawhip".into()),
-            repo_name: Some("clawhip".into()),
-            worktree_path: Some("/repo/clawhip.worktrees/issue-152".into()),
+            project: Some("op-pi".into()),
+            repo_name: Some("op-pi".into()),
+            worktree_path: Some("/repo/op-pi.worktrees/issue-152".into()),
             ..RoutingMetadata::default()
         };
 
         let event = tmux_keyword_event(
             &registration,
-            "clawhip-issue-152".into(),
+            "op-pi-issue-152".into(),
             vec![keyword_hit("error", "boom")],
         );
 
-        assert_eq!(event.payload["project"], "clawhip");
-        assert_eq!(event.payload["repo_name"], "clawhip");
+        assert_eq!(event.payload["project"], "op-pi");
+        assert_eq!(event.payload["repo_name"], "op-pi");
         assert_eq!(
             event.payload["worktree_path"],
-            "/repo/clawhip.worktrees/issue-152"
+            "/repo/op-pi.worktrees/issue-152"
         );
     }
 

@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn converts_aggregated_git_commits() {
         let event = IncomingEvent::git_commit_events(
-            "clawhip".into(),
+            "op-pi".into(),
             "main".into(),
             vec![
                 ("abcdef123456".into(), "first".into()),
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn maps_pr_open_and_merge_statuses() {
         let opened = IncomingEvent::github_pr_status_changed(
-            "clawhip".into(),
+            "op-pi".into(),
             48,
             "Phase 1".into(),
             "<new>".into(),
@@ -543,7 +543,7 @@ mod tests {
             None,
         );
         let merged = IncomingEvent::github_pr_status_changed(
-            "clawhip".into(),
+            "op-pi".into(),
             48,
             "Phase 1".into(),
             "open".into(),
@@ -588,13 +588,13 @@ mod tests {
     fn keeps_github_ci_failed_route_compatibility_fields() {
         let event = IncomingEvent::github_ci(
             "github.ci-failed",
-            "clawhip".into(),
+            "op-pi".into(),
             Some(58),
             "CI / test".into(),
             "completed".into(),
             Some("failure".into()),
             "abcdef1234567890".into(),
-            "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            "https://github.com/IYENTeam/op-pi/actions/runs/1".into(),
             Some("feat/branch".into()),
             Some("alerts".into()),
         );
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(envelope.metadata.channel_hint.as_deref(), Some("alerts"));
         match envelope.body {
             EventBody::GitHubCIFailed(body) => {
-                assert_eq!(body.repo, "clawhip");
+                assert_eq!(body.repo, "op-pi");
                 assert_eq!(body.number, Some(58));
                 assert_eq!(body.workflow.as_deref(), Some("CI / test"));
                 assert_eq!(body.status.as_deref(), Some("completed"));
@@ -611,7 +611,7 @@ mod tests {
                 assert_eq!(body.sha.as_deref(), Some("abcdef1234567890"));
                 assert_eq!(
                     body.url.as_deref(),
-                    Some("https://github.com/Yeachan-Heo/clawhip/actions/runs/1")
+                    Some("https://github.com/IYENTeam/op-pi/actions/runs/1")
                 );
             }
             other => panic!("expected GitHubCIFailed body, got {other:?}"),
@@ -727,12 +727,12 @@ mod tests {
             "status": normalized_event,
             "normalized_event": normalized_event,
             "session_id": "sess-65",
-            "project": "clawhip",
-            "repo_path": "/repo/clawhip",
+            "project": "op-pi",
+            "repo_path": "/repo/op-pi",
             "branch": "feat/issue-65",
             "issue_number": 65,
             "pr_number": 72,
-            "pr_url": "https://github.com/Yeachan-Heo/clawhip/pull/72",
+            "pr_url": "https://github.com/IYENTeam/op-pi/pull/72",
             "command": "cargo test",
             "tool_name": "Bash",
             "tmux_session": "issue-65",
@@ -755,12 +755,12 @@ mod tests {
             status: normalized_event.into(),
             normalized_event: Some(normalized_event.into()),
             session_id: Some("sess-65".into()),
-            project: Some("clawhip".into()),
-            repo_path: Some("/repo/clawhip".into()),
+            project: Some("op-pi".into()),
+            repo_path: Some("/repo/op-pi".into()),
             branch: Some("feat/issue-65".into()),
             issue_number: Some(65),
             pr_number: Some(72),
-            pr_url: Some("https://github.com/Yeachan-Heo/clawhip/pull/72".into()),
+            pr_url: Some("https://github.com/IYENTeam/op-pi/pull/72".into()),
             command: Some("cargo test".into()),
             tool_name: Some("Bash".into()),
             tmux_session: Some("issue-65".into()),
@@ -813,11 +813,11 @@ mod tests {
     fn maps_github_release_published_event() {
         let event = IncomingEvent::github_release(
             "published",
-            "Yeachan-Heo/clawhip".into(),
+            "IYENTeam/op-pi".into(),
             "v0.6.0".into(),
-            "clawhip 0.6.0".into(),
+            "op-pi 0.6.0".into(),
             false,
-            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.0".into(),
+            "https://github.com/IYENTeam/op-pi/releases/tag/v0.6.0".into(),
             Some("Yeachan-Heo".into()),
             Some("releases".into()),
         );
@@ -828,9 +828,9 @@ mod tests {
         assert_eq!(envelope.metadata.priority, EventPriority::High);
         match envelope.body {
             EventBody::GitHubReleasePublished(body) => {
-                assert_eq!(body.repo, "Yeachan-Heo/clawhip");
+                assert_eq!(body.repo, "IYENTeam/op-pi");
                 assert_eq!(body.tag, "v0.6.0");
-                assert_eq!(body.name, "clawhip 0.6.0");
+                assert_eq!(body.name, "op-pi 0.6.0");
                 assert!(!body.is_prerelease);
                 assert_eq!(body.actor.as_deref(), Some("Yeachan-Heo"));
             }
@@ -842,11 +842,11 @@ mod tests {
     fn maps_github_release_prereleased_event() {
         let event = IncomingEvent::github_release(
             "prereleased",
-            "Yeachan-Heo/clawhip".into(),
+            "IYENTeam/op-pi".into(),
             "v0.6.0-rc.1".into(),
-            "clawhip 0.6.0-rc.1".into(),
+            "op-pi 0.6.0-rc.1".into(),
             true,
-            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.0-rc.1".into(),
+            "https://github.com/IYENTeam/op-pi/releases/tag/v0.6.0-rc.1".into(),
             None,
             None,
         );
@@ -867,11 +867,11 @@ mod tests {
     fn maps_github_release_edited_event() {
         let event = IncomingEvent::github_release(
             "edited",
-            "Yeachan-Heo/clawhip".into(),
+            "IYENTeam/op-pi".into(),
             "v0.5.4".into(),
-            "clawhip 0.5.4".into(),
+            "op-pi 0.5.4".into(),
             false,
-            "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.5.4".into(),
+            "https://github.com/IYENTeam/op-pi/releases/tag/v0.5.4".into(),
             Some("Yeachan-Heo".into()),
             None,
         );
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn maps_gajae_hold_event_as_high_priority_custom_event() {
         let event = IncomingEvent::gajae_release_hold(
-            "Yeachan-Heo/clawhip".into(),
+            "IYENTeam/op-pi".into(),
             "owner-maintainer".into(),
             "edited".into(),
             "v0.6.9".into(),

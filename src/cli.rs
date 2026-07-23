@@ -13,13 +13,13 @@ pub const DEFAULT_DELIVER_MAX_ENTERS: u32 = crate::hooks::prompt_deliver::DEFAUL
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "clawhip",
+    name = op_pi::brand::CLI_NAME,
     version,
-    about = "Daemon-first event gateway for Discord"
+    about = "Local-first operation pipeline for typed event routing"
 )]
 pub struct Cli {
     /// Override the config file path.
-    #[arg(long, global = true, env = "CLAWHIP_CONFIG")]
+    #[arg(long, global = true, env = op_pi::brand::CONFIG_ENV)]
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -28,9 +28,14 @@ pub struct Cli {
 
 impl Cli {
     pub fn config_path(&self) -> PathBuf {
-        self.config
-            .clone()
-            .unwrap_or_else(crate::config::default_config_path)
+        self.config_path_with(crate::config::default_config_path)
+    }
+
+    fn config_path_with<F>(&self, default_config_path: F) -> PathBuf
+    where
+        F: FnOnce() -> PathBuf,
+    {
+        self.config.clone().unwrap_or_else(default_config_path)
     }
 
     pub fn runtime_worker_threads(&self) -> Option<usize> {
@@ -56,7 +61,7 @@ pub enum Commands {
     Status,
     #[command(
         about = "Scaffold common setup presets without editing advanced routes or monitors",
-        long_about = "Scaffold the bounded quickstart preset catalog.\n\nAdvanced routes and monitors still require manual config editing or the bounded clawhip config editor."
+        long_about = "Scaffold the bounded quickstart preset catalog.\n\nAdvanced routes and monitors still require manual config editing or the bounded op-pi config editor."
     )]
     Setup(SetupArgs),
     /// Send a custom event to the local daemon.
@@ -95,12 +100,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: NativeCommands,
     },
-    /// Run configured cron jobs via clawhip.
+    /// Run configured cron jobs via op-pi.
     Cron {
         #[command(subcommand)]
         command: CronCommands,
     },
-    /// Install clawhip from the current git clone.
+    /// Install op-pi from the current git clone.
     Install {
         /// Install and start the bundled systemd service.
         #[arg(long, default_value_t = false)]
@@ -109,7 +114,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         skip_star_prompt: bool,
     },
-    /// Update clawhip from the current git clone.
+    /// Update op-pi from the current git clone.
     ///
     /// Without a subcommand, behaves like the legacy `clawhip update --restart`
     /// (pull + reinstall + optional restart). Use subcommands for daemon-aware
@@ -121,7 +126,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         restart: bool,
     },
-    /// Uninstall clawhip.
+    /// Uninstall op-pi.
     Uninstall {
         #[arg(long, default_value_t = false)]
         remove_systemd: bool,
@@ -185,14 +190,14 @@ pub struct EmitArgs {
     pub fields: Vec<String>,
 }
 
-/// Arguments for `clawhip explain`.
+/// Arguments for `op-pi explain`.
 ///
 /// Mirrors `EmitArgs` so operators can explain the exact same event shape
 /// they would normally emit — with `--channel`, `--format`, `--payload` JSON,
 /// and ad-hoc `--key value` fields.
 #[derive(Debug, Clone, Args)]
 pub struct ExplainArgs {
-    /// Event type (canonical or alias, same as `clawhip emit`).
+    /// Event type (canonical or alias, same as `op-pi emit`).
     pub event_type: String,
     /// Emit output as JSON instead of the human-readable text report.
     #[arg(long, default_value_t = false)]
@@ -428,7 +433,7 @@ pub enum PluginCommands {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum NativeCommands {
-    /// Forward a provider-native hook payload to clawhip.
+    /// Forward a provider-native hook payload to op-pi.
     Hook(NativeHookArgs),
 }
 
@@ -453,7 +458,7 @@ impl NativeHookArgs {
     pub fn read_payload(&self, stdin: &mut dyn Read) -> crate::Result<serde_json::Value> {
         match (&self.payload, &self.file) {
             (Some(_), Some(_)) => {
-                Err("provide either --payload or --file for clawhip native hook, not both".into())
+                Err("provide either --payload or --file for op-pi native hook, not both".into())
             }
             (Some(payload), None) => Ok(serde_json::from_str(payload)?),
             (None, Some(path)) => {
@@ -472,7 +477,7 @@ impl NativeHookArgs {
         let trimmed = buffer.trim();
         if trimmed.is_empty() {
             return Err(
-                "clawhip native hook expects a JSON payload via stdin, --payload, or --file".into(),
+                "op-pi native hook expects a JSON payload via stdin, --payload, or --file".into(),
             );
         }
         Ok(serde_json::from_str(trimmed)?)
@@ -487,7 +492,7 @@ pub enum GajaeCommands {
     Preflight,
     /// Diagnose GAJAE CLI/profile conformance without mutating local profiles.
     Doctor(GajaeDoctorArgs),
-    /// Manage gajae-installed clawhip profiles.
+    /// Manage gajae-installed op-pi profiles.
     Profile {
         #[command(subcommand)]
         command: GajaeProfileCommands,
@@ -511,11 +516,11 @@ pub enum GajaeCommands {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GajaeProfileCommands {
-    /// Install the clawhip profile through gajae.
+    /// Install the op-pi profile through gajae.
     Install,
-    /// Verify the installed GAJAE clawhip profile and handler commands without executing routes.
+    /// Verify the installed GAJAE op-pi profile and handler commands without executing routes.
     Verify(GajaeProfileVerifyArgs),
-    /// Inspect the installed GAJAE clawhip route profile without executing routes.
+    /// Inspect the installed GAJAE op-pi route profile without executing routes.
     Inspect(GajaeProfileFileArgs),
     /// Explain which GAJAE route would match an event without executing it.
     Explain(GajaeProfileExplainArgs),
@@ -558,7 +563,7 @@ pub struct GajaeProfileApplyArgs {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct GajaeDoctorArgs {
-    /// Optional owner/repo used to check whether GAJAE can produce a dry-run clawhip onboard plan.
+    /// Optional owner/repo used to check whether GAJAE can produce a dry-run op-pi onboard plan.
     #[arg(long)]
     pub repo: Option<String>,
     /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
@@ -575,7 +580,7 @@ pub struct GajaeProfileVerifyArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GajaeReceiptCommands {
-    /// Validate a receipt and emit a bounded public-safe clawhip event.
+    /// Validate a receipt and emit a bounded public-safe op-pi event.
     Ingest(GajaeReceiptIngestArgs),
 }
 
@@ -590,7 +595,7 @@ pub struct GajaeReceiptIngestArgs {
     /// Read receipt JSON from stdin before validation.
     #[arg(long, conflicts_with = "file")]
     pub stdin: bool,
-    /// Send the validated event to the local clawhip daemon.
+    /// Send the validated event to the local op-pi daemon.
     #[arg(long, default_value_t = false)]
     pub send: bool,
     /// Override the destination channel when sending to the daemon.
@@ -890,7 +895,7 @@ pub struct HooksInstallArgs {
     /// Project root for project-scoped Codex install. Ignored for global installs.
     #[arg(long)]
     pub root: Option<PathBuf>,
-    /// Overwrite clawhip-managed generated files when they already exist.
+    /// Overwrite op-pi-managed generated files when they already exist.
     #[arg(long, default_value_t = false)]
     pub force: bool,
 }
@@ -910,10 +915,10 @@ pub enum ConfigCommand {
     /// then queries the Discord API to confirm each channel exists and (optionally)
     /// matches the `channel_name` hint set alongside the ID.
     VerifyBindings(VerifyBindingsArgs),
-    /// Verify clawhip channel destinations are allowed by the local Clawdbot gateway config.
+    /// Verify op-pi channel destinations are allowed by the local Clawdbot gateway config.
     ///
     /// Reads only the public-safe gateway channel allowlist shape and reports
-    /// channel IDs plus clawhip source labels; never dumps gateway tokens,
+    /// channel IDs plus op-pi source labels; never dumps gateway tokens,
     /// webhooks, payloads, or unrelated config fields.
     VerifyGatewayAllowlist(VerifyGatewayAllowlistArgs),
 }
@@ -924,6 +929,19 @@ mod tests {
     use crate::event::compat::from_incoming_event;
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+
+    #[test]
+    fn explicit_config_path_wins_over_environment_resolution() {
+        let cli = Cli {
+            config: Some(PathBuf::from("/explicit/config.toml")),
+            command: None,
+        };
+
+        assert_eq!(
+            cli.config_path_with(|| panic!("explicit --config must bypass environment resolution")),
+            PathBuf::from("/explicit/config.toml")
+        );
+    }
 
     #[test]
     fn parses_start_subcommand_with_worker_threads_override() {
@@ -1315,14 +1333,14 @@ mod tests {
 
     #[test]
     fn setup_without_flags_fails_with_help() {
-        let error = Cli::try_parse_from(["clawhip", "setup"]).expect_err("setup should fail");
+        let error = Cli::try_parse_from(["op-pi", "setup"]).expect_err("setup should fail");
         assert_eq!(
             error.kind(),
             ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
 
         let rendered = error.to_string();
-        assert!(rendered.contains("Usage: clawhip setup [OPTIONS]"));
+        assert!(rendered.contains("Usage: op-pi setup [OPTIONS]"));
         assert!(rendered.contains("--webhook"));
         assert!(rendered.contains("--bot-token"));
     }
@@ -1604,7 +1622,7 @@ mod tests {
             "checkpoint",
             "zero-backlog",
             "--repo",
-            "Yeachan-Heo/clawhip",
+            "IYENTeam/op-pi",
             "--open-prs",
             "0",
             "--source",
@@ -1618,7 +1636,7 @@ mod tests {
             panic!("expected gajae checkpoint command");
         };
         let GajaeCheckpointCommands::ZeroBacklog(args) = command;
-        assert_eq!(args.repo, "Yeachan-Heo/clawhip");
+        assert_eq!(args.repo, "IYENTeam/op-pi");
         assert_eq!(args.open_issues, 0);
         assert_eq!(args.open_prs, 0);
         assert_eq!(args.source, "github-api");
@@ -1657,7 +1675,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("clawhip native hook expects a JSON payload")
+                .contains("op-pi native hook expects a JSON payload")
         );
     }
 

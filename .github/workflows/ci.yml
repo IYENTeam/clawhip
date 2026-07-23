@@ -260,5 +260,5 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: clawhip-linux-x86_64
-          path: target/release/clawhip
+          name: op-pi-linux-x86_64
+          path: target/release/op-pi

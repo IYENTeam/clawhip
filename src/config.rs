@@ -232,7 +232,7 @@ pub struct RouteRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
     /// Human-readable Discord channel name hint for binding verification.
-    /// When set, `clawhip config verify-bindings` compares the live channel
+    /// When set, `op-pi config verify-bindings` compares the live channel
     /// name against this value to detect drift.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
@@ -652,11 +652,7 @@ pub enum CronJobKind {
 }
 
 pub fn default_config_path() -> PathBuf {
-    if let Ok(override_path) = env::var("CLAWHIP_CONFIG") {
-        return PathBuf::from(override_path);
-    }
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".clawhip").join("config.toml")
+    op_pi::brand::default_config_path()
 }
 
 fn default_bind_host() -> String {
@@ -741,7 +737,19 @@ pub fn default_sink_name() -> String {
     "discord".to_string()
 }
 
-const DISCORD_TOKEN_ENV_VARS: [&str; 2] = ["DISCORD_TOKEN", "CLAWHIP_DISCORD_BOT_TOKEN"];
+const DISCORD_TOKEN_ENV_VARS: [&str; 3] = [
+    "OP_PI_DISCORD_BOT_TOKEN",
+    "DISCORD_TOKEN",
+    "CLAWHIP_DISCORD_BOT_TOKEN",
+];
+const SLACK_TOKEN_ENV_VARS: [&str; 3] = [
+    "OP_PI_SLACK_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "CLAWHIP_SLACK_BOT_TOKEN",
+];
+const DAEMON_URL_ENV_VARS: [&str; 2] = ["OP_PI_DAEMON_URL", "CLAWHIP_DAEMON_URL"];
+const GITHUB_TOKEN_ENV_VARS: [&str; 3] =
+    ["OP_PI_GITHUB_TOKEN", "GITHUB_TOKEN", "CLAWHIP_GITHUB_TOKEN"];
 pub const CONFIG_EDITOR_MENU_ITEMS: [&str; 8] = [
     "Set Discord bot token",
     "Set daemon base URL",
@@ -818,13 +826,29 @@ fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
     })
 }
 
-fn discord_token_from_env_with<F>(mut get_env: F) -> Option<String>
+fn text_from_env_with<F>(env_vars: &[&str], mut get_env: F) -> Option<String>
 where
     F: FnMut(&str) -> Option<String>,
 {
-    DISCORD_TOKEN_ENV_VARS
+    env_vars
+        .iter()
+        .find_map(|name| normalize_text(get_env(name)))
+}
+
+fn secret_from_env_with<F>(env_vars: &[&str], mut get_env: F) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    env_vars
         .iter()
         .find_map(|name| normalize_secret(get_env(name)))
+}
+
+fn discord_token_from_env_with<F>(get_env: F) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    secret_from_env_with(&DISCORD_TOKEN_ENV_VARS, get_env)
 }
 
 impl AppConfig {
@@ -879,9 +903,14 @@ impl AppConfig {
     }
 
     pub fn effective_slack_token(&self) -> Option<String> {
-        env::var("CLAWHIP_SLACK_BOT_TOKEN")
-            .ok()
-            .and_then(|value| normalize_secret(Some(value)))
+        self.effective_slack_token_with(|name| env::var(name).ok())
+    }
+
+    fn effective_slack_token_with<F>(&self, get_env: F) -> Option<String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        secret_from_env_with(&SLACK_TOKEN_ENV_VARS, get_env)
             .or_else(|| normalize_secret(self.providers.slack.bot_token.clone()))
     }
 
@@ -1214,7 +1243,7 @@ impl AppConfig {
 
         if self.has_slack_channel_routes() && self.effective_slack_token().is_none() {
             return Err(
-                "missing Slack bot token for configured Slack channel delivery; configure [providers.slack].token (or CLAWHIP_SLACK_BOT_TOKEN), use route webhooks, or remove Slack channel routes"
+                "missing Slack bot token for configured Slack channel delivery; configure [providers.slack].token (or OP_PI_SLACK_BOT_TOKEN; fallbacks: SLACK_BOT_TOKEN, CLAWHIP_SLACK_BOT_TOKEN), use route webhooks, or remove Slack channel routes"
                     .into(),
             );
         }
@@ -1222,7 +1251,7 @@ impl AppConfig {
         if self.effective_token().is_none() {
             if self.has_discord_delivery_requiring_bot_token() {
                 return Err(
-                    "missing Discord bot token for configured Discord channel delivery; configure [providers.discord].token (or legacy [discord].token), use route webhooks, or remove Discord channel routes"
+                    "missing Discord bot token for configured Discord channel delivery; configure [providers.discord].token (or OP_PI_DISCORD_BOT_TOKEN; fallbacks: DISCORD_TOKEN, CLAWHIP_DISCORD_BOT_TOKEN), use route webhooks, or remove Discord channel routes"
                         .into(),
                 );
             }
@@ -1234,7 +1263,7 @@ impl AppConfig {
                 && !self.discord_watch.enabled
             {
                 return Err(
-                    "missing Discord delivery config: configure [providers.discord].token (or legacy [discord].token), at least one route webhook, a localfile route, or a drop route"
+                    "missing Discord delivery config: configure [providers.discord].token (or OP_PI_DISCORD_BOT_TOKEN; fallbacks: DISCORD_TOKEN, CLAWHIP_DISCORD_BOT_TOKEN), at least one route webhook, a localfile route, or a drop route"
                         .into(),
                 );
             }
@@ -1415,21 +1444,31 @@ impl AppConfig {
     }
 
     pub fn daemon_base_url(&self) -> String {
-        env::var("CLAWHIP_DAEMON_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        self.daemon_base_url_with(|name| env::var(name).ok())
+    }
+
+    fn daemon_base_url_with<F>(&self, get_env: F) -> String
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        text_from_env_with(&DAEMON_URL_ENV_VARS, get_env)
             .unwrap_or_else(|| self.daemon.base_url.clone())
     }
 
     pub fn monitor_github_token(&self) -> Option<String> {
-        env::var("CLAWHIP_GITHUB_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        self.monitor_github_token_with(|name| env::var(name).ok())
+    }
+
+    fn monitor_github_token_with<F>(&self, get_env: F) -> Option<String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        secret_from_env_with(&GITHUB_TOKEN_ENV_VARS, get_env)
             .or_else(|| self.monitors.github_token.clone())
     }
 
     pub fn run_interactive_editor(&mut self, path: &Path) -> Result<()> {
-        println!("clawhip config editor");
+        println!("op-pi config editor");
         println!("Path: {}", path.display());
         println!();
         loop {
@@ -1725,6 +1764,71 @@ mod tests {
                 (name == "DISCORD_TOKEN").then(|| "env-token".to_string())
             }),
             "env"
+        );
+    }
+
+    #[test]
+    fn op_pi_environment_variables_precede_generic_and_legacy_fallbacks() {
+        let config = AppConfig::default();
+
+        assert_eq!(
+            config.effective_token_with(|name| match name {
+                "OP_PI_DISCORD_BOT_TOKEN" => Some("op-pi-discord".into()),
+                "DISCORD_TOKEN" => Some("generic-discord".into()),
+                "CLAWHIP_DISCORD_BOT_TOKEN" => Some("legacy-discord".into()),
+                _ => None,
+            }),
+            Some("op-pi-discord".into())
+        );
+        assert_eq!(
+            config.effective_slack_token_with(|name| match name {
+                "OP_PI_SLACK_BOT_TOKEN" => Some("op-pi-slack".into()),
+                "SLACK_BOT_TOKEN" => Some("generic-slack".into()),
+                "CLAWHIP_SLACK_BOT_TOKEN" => Some("legacy-slack".into()),
+                _ => None,
+            }),
+            Some("op-pi-slack".into())
+        );
+        assert_eq!(
+            config.daemon_base_url_with(|name| match name {
+                "OP_PI_DAEMON_URL" => Some("http://op-pi".into()),
+                "CLAWHIP_DAEMON_URL" => Some("http://legacy".into()),
+                _ => None,
+            }),
+            "http://op-pi"
+        );
+        assert_eq!(
+            config.monitor_github_token_with(|name| match name {
+                "OP_PI_GITHUB_TOKEN" => Some("op-pi-github".into()),
+                "GITHUB_TOKEN" => Some("generic-github".into()),
+                "CLAWHIP_GITHUB_TOKEN" => Some("legacy-github".into()),
+                _ => None,
+            }),
+            Some("op-pi-github".into())
+        );
+    }
+
+    #[test]
+    fn legacy_environment_variables_remain_fallbacks() {
+        let config = AppConfig::default();
+
+        assert_eq!(
+            config.effective_slack_token_with(|name| {
+                (name == "CLAWHIP_SLACK_BOT_TOKEN").then(|| "legacy-slack".into())
+            }),
+            Some("legacy-slack".into())
+        );
+        assert_eq!(
+            config.daemon_base_url_with(|name| {
+                (name == "CLAWHIP_DAEMON_URL").then(|| "http://legacy".into())
+            }),
+            "http://legacy"
+        );
+        assert_eq!(
+            config.monitor_github_token_with(|name| {
+                (name == "CLAWHIP_GITHUB_TOKEN").then(|| "legacy-github".into())
+            }),
+            Some("legacy-github".into())
         );
     }
 

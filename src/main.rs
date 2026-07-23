@@ -35,6 +35,7 @@ mod update;
 use std::sync::Arc;
 
 use clap::Parser;
+use op_pi::brand;
 use tokio::runtime::Builder;
 
 use crate::cli::{
@@ -60,13 +61,13 @@ fn main() {
     let runtime = match build_runtime(&cli) {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("clawhip error: {error}");
+            eprintln!("{} error: {error}", brand::CLI_NAME);
             std::process::exit(1);
         }
     };
 
     if let Err(error) = runtime.block_on(real_main(cli)) {
-        eprintln!("clawhip error: {error}");
+        eprintln!("{} error: {error}", brand::CLI_NAME);
         std::process::exit(1);
     }
 }
@@ -206,7 +207,7 @@ async fn real_main(cli: Cli) -> Result<()> {
             None => lifecycle::update(restart),
             Some(UpdateCommands::Check) => {
                 let http = reqwest::Client::builder()
-                    .user_agent(format!("clawhip/{VERSION}"))
+                    .user_agent(format!("{}/{VERSION}", brand::CLI_NAME))
                     .build()?;
                 match update::check_latest_version(&http).await {
                     Ok(Some((version, url))) => {
@@ -373,7 +374,8 @@ async fn real_main(cli: Cli) -> Result<()> {
                         Ok(())
                     } else {
                         eprintln!(
-                            "clawhip error: {}",
+                            "{} error: {}",
+                            brand::CLI_NAME,
                             gajae::profile_install_failure_message(status)
                         );
                         std::process::exit(status.code.unwrap_or(1));

@@ -41,17 +41,17 @@ if [ ! -f Cargo.toml ]; then
 fi
 
 if [ "$fix" -eq 1 ]; then
-  echo "[clawhip] auto-fixing format with cargo fmt --all"
+  echo "[op-pi] auto-fixing format with cargo fmt --all"
   cargo fmt --all
 fi
 
 if cargo fmt --all -- --check; then
-  echo "[clawhip] format gate passed"
+  echo "[op-pi] format gate passed"
   exit 0
 fi
 
 cat >&2 <<'MSG'
-[clawhip] format gate failed
+[op-pi] format gate failed
 - Run: cargo fmt --all
 - Re-run: scripts/internal-pr-format-gate.sh
 - Or auto-fix: scripts/internal-pr-format-gate.sh --fix

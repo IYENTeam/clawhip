@@ -1,12 +1,12 @@
 //! Gateway allowlist coverage diagnostics.
 //!
-//! This is a local, read-only preflight for the clawhip -> Clawdbot gateway
-//! boundary. It compares clawhip's configured Discord channel destinations
+//! This is a local, read-only preflight for the op-pi -> Clawdbot gateway
+//! boundary. It compares op-pi's configured Discord channel destinations
 //! against the public-safe channel allowlist shape used by Clawdbot:
 //!
 //! `channels.discord.guilds[*].channels.<channel_id>.allow = true`
 //!
-//! The report intentionally carries only channel IDs plus clawhip source labels;
+//! The report intentionally carries only channel IDs plus op-pi source labels;
 //! it never serializes the gateway config, tokens, webhooks, or payload fields.
 
 use std::collections::BTreeSet;
@@ -157,10 +157,7 @@ pub fn verify_from_path(
 impl fmt::Display for GatewayAllowlistReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.verdicts.is_empty() {
-            writeln!(
-                f,
-                "No Discord channel destinations found in clawhip config."
-            )?;
+            writeln!(f, "No Discord channel destinations found in op-pi config.")?;
             return Ok(());
         }
 
@@ -233,7 +230,7 @@ mod tests {
 
     fn config_with_route(channel: &str) -> AppConfig {
         let mut filter = BTreeMap::new();
-        filter.insert("repo".to_string(), "clawhip".to_string());
+        filter.insert("repo".to_string(), "op-pi".to_string());
         AppConfig {
             routes: vec![RouteRule {
                 event: "github.*".into(),

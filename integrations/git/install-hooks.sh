@@ -8,5 +8,5 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -m 0755 "$script_dir/post-commit.sh" "$hooks_dir/post-commit"
 install -m 0755 "$script_dir/post-checkout.sh" "$hooks_dir/post-checkout"
 
-echo "Installed clawhip example git hooks into $hooks_dir"
-echo "Optional: export CLAWHIP_CHANNEL=<discord-channel-id> inside your shell or hook wrapper."
+echo "Installed op-pi example git hooks into $hooks_dir"
+echo "Optional: export OP_PI_CHANNEL=<discord-channel-id> inside your shell or hook wrapper."

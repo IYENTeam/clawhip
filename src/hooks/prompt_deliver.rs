@@ -15,8 +15,10 @@ const DEFAULT_TUI_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_VERIFY_DELAY: Duration = Duration::from_millis(350);
 const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(4);
-const PROMPT_SUBMIT_MARKER: &str = ".clawhip/state/prompt-submit.json";
-const NATIVE_HOOK_SCRIPT: &str = ".clawhip/hooks/native-hook.mjs";
+const PROMPT_SUBMIT_MARKER: &str = ".op-pi/state/prompt-submit.json";
+const NATIVE_HOOK_SCRIPT: &str = ".op-pi/hooks/native-hook.mjs";
+const LEGACY_PROMPT_SUBMIT_MARKER: &str = ".clawhip/state/prompt-submit.json";
+const LEGACY_NATIVE_HOOK_SCRIPT: &str = ".clawhip/hooks/native-hook.mjs";
 const PROMPT_CHARS: &[char] = &['$', '%', '>', '#', '❯', '›'];
 const TARGET_PANE_FORMAT: &str =
     "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}";
@@ -142,7 +144,11 @@ pub async fn deliver(config: &PromptDeliverConfig) -> Result<DeliveryResult> {
     }
     let provider = ensure_provider_ready(&mut pane, &hook_setup, config).await?;
     let effective_workdir = effective_workdir(&hook_setup, &pane.cwd)?;
-    let marker_path = effective_workdir.join(PROMPT_SUBMIT_MARKER);
+    let marker_relative_path = hook_setup
+        .marker_path
+        .strip_prefix(&hook_setup.workdir)
+        .unwrap_or(Path::new(PROMPT_SUBMIT_MARKER));
+    let marker_path = effective_workdir.join(marker_relative_path);
 
     wait_for_tui_ready(&pane.pane_id, config.tui_timeout, config.poll_interval).await?;
 
@@ -256,7 +262,7 @@ fn detect_hook_setup(cwd: &Path) -> Result<HookSetup> {
 
 fn non_repo_delivery_error(cwd: &Path) -> crate::DynError {
     format!(
-        "refusing delivery: '{}' is not inside a repo/workdir with prompt-submit-aware hook setup, and no global ~/.codex / ~/.claude clawhip hook install was detected",
+        "refusing delivery: '{}' is not inside a repo/workdir with prompt-submit-aware hook setup, and no global ~/.codex / ~/.claude op-pi hook install was detected",
         cwd.display()
     )
     .into()
@@ -276,14 +282,14 @@ fn hook_setup_at(root: &Path, install_scope: HookDetectionScope) -> Option<HookS
         && has_global_native_script
     {
         providers.push(ProviderKind::Omc);
-        sources.push("~/.claude/settings.json + ~/.clawhip/hooks/native-hook.mjs");
+        sources.push("~/.claude/settings.json + ~/.op-pi/hooks/native-hook.mjs");
     }
     if has_codex_prompt_submit_hook(root) && (has_local_native_script || has_global_native_script) {
         providers.push(ProviderKind::Omx);
         sources.push(if install_scope == HookDetectionScope::Global {
-            "~/.codex/hooks.json or ~/.codex/config.toml + ~/.clawhip/hooks/native-hook.mjs"
+            "~/.codex/hooks.json or ~/.codex/config.toml + ~/.op-pi/hooks/native-hook.mjs"
         } else {
-            ".codex/hooks.json + ~/.clawhip/hooks/native-hook.mjs"
+            ".codex/hooks.json + ~/.op-pi/hooks/native-hook.mjs"
         });
     }
     if install_scope == HookDetectionScope::Project
@@ -291,7 +297,7 @@ fn hook_setup_at(root: &Path, install_scope: HookDetectionScope) -> Option<HookS
         && !providers.contains(&ProviderKind::Omx)
     {
         providers.push(ProviderKind::Omx);
-        sources.push(".omx/hooks/clawhip.mjs");
+        sources.push(".omx/hooks/op-pi.mjs");
     }
 
     if providers.is_empty() {
@@ -300,7 +306,7 @@ fn hook_setup_at(root: &Path, install_scope: HookDetectionScope) -> Option<HookS
 
     Some(HookSetup {
         workdir: root.to_path_buf(),
-        marker_path: root.join(PROMPT_SUBMIT_MARKER),
+        marker_path: root.join(prompt_submit_marker_path(root)),
         supported_providers: providers,
         sources,
         install_scope,
@@ -318,10 +324,10 @@ fn has_claude_prompt_submit_hook(root: &Path) -> bool {
     value
         .pointer("/hooks/UserPromptSubmit")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|entries| entries.iter().any(json_hook_entry_mentions_clawhip))
+        .is_some_and(|entries| entries.iter().any(json_hook_entry_mentions_op_pi))
 }
 
-fn json_hook_entry_mentions_clawhip(entry: &serde_json::Value) -> bool {
+fn json_hook_entry_mentions_op_pi(entry: &serde_json::Value) -> bool {
     entry
         .get("hooks")
         .and_then(serde_json::Value::as_array)
@@ -329,7 +335,7 @@ fn json_hook_entry_mentions_clawhip(entry: &serde_json::Value) -> bool {
             hooks.iter().any(|hook| {
                 hook.get("command")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(command_mentions_clawhip)
+                    .is_some_and(command_mentions_op_pi)
             })
         })
 }
@@ -349,7 +355,7 @@ fn has_codex_prompt_submit_hook_json(root: &Path) -> bool {
     value
         .pointer("/hooks/UserPromptSubmit")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|entries| entries.iter().any(json_hook_entry_mentions_clawhip))
+        .is_some_and(|entries| entries.iter().any(json_hook_entry_mentions_op_pi))
 }
 
 fn has_codex_prompt_submit_hook_toml(root: &Path) -> bool {
@@ -365,28 +371,43 @@ fn has_codex_prompt_submit_hook_toml(root: &Path) -> bool {
         .and_then(|native| native.get("events"))
         .and_then(|events| events.get("UserPromptSubmit"))
         .and_then(toml::Value::as_str)
-        .is_some_and(command_mentions_clawhip)
+        .is_some_and(command_mentions_op_pi)
+}
+
+fn prompt_submit_marker_path(root: &Path) -> &'static str {
+    if root.join(LEGACY_NATIVE_HOOK_SCRIPT).is_file()
+        || root.join(".omx/hooks/clawhip.mjs").is_file()
+    {
+        LEGACY_PROMPT_SUBMIT_MARKER
+    } else {
+        PROMPT_SUBMIT_MARKER
+    }
 }
 
 fn has_native_prompt_submit_hook_script(root: &Path) -> bool {
-    let path = root.join(NATIVE_HOOK_SCRIPT);
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    content.contains("prompt-submit.json") || content.contains("maybeWritePromptSubmitState")
+    [NATIVE_HOOK_SCRIPT, LEGACY_NATIVE_HOOK_SCRIPT]
+        .into_iter()
+        .filter_map(|path| fs::read_to_string(root.join(path)).ok())
+        .any(|content| {
+            content.contains("prompt-submit.json")
+                || content.contains("maybeWritePromptSubmitState")
+        })
 }
 
 fn has_omx_prompt_submit_hook(root: &Path) -> bool {
-    let path = root.join(".omx/hooks/clawhip.mjs");
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    content.contains("prompt-submit.json") || content.contains("prompt_submit_recorded")
+    [".omx/hooks/op-pi.mjs", ".omx/hooks/clawhip.mjs"]
+        .into_iter()
+        .filter_map(|path| fs::read_to_string(root.join(path)).ok())
+        .any(|content| {
+            content.contains("prompt-submit.json") || content.contains("prompt_submit_recorded")
+        })
 }
 
-fn command_mentions_clawhip(command: &str) -> bool {
+fn command_mentions_op_pi(command: &str) -> bool {
     let normalized = command.trim().to_ascii_lowercase();
-    normalized.contains("clawhip native hook")
+    normalized.contains("op-pi native hook")
+        || normalized.contains(".op-pi/hooks/native-hook.mjs")
+        || normalized.contains("clawhip native hook")
         || normalized.contains(".clawhip/hooks/native-hook.mjs")
         || normalized.contains("native-hook.mjs")
 }
@@ -862,7 +883,7 @@ mod tests {
     fn has_prompt_char_rejects_empty_and_output_lines() {
         assert!(!has_prompt_char(""));
         assert!(!has_prompt_char("   "));
-        assert!(!has_prompt_char("compiling clawhip v0.5.0"));
+        assert!(!has_prompt_char("compiling op-pi v0.5.0"));
         assert!(!has_prompt_char("error[E0308]: mismatched types"));
     }
 
@@ -885,14 +906,33 @@ mod tests {
         fs::create_dir_all(&hook_dir).expect("create hook dir");
         fs::create_dir_all(&nested).expect("create nested dir");
         fs::write(
-            hook_dir.join("clawhip.mjs"),
-            "export async function onHookEvent(event, sdk) { return { promptSubmitState: '.clawhip/state/prompt-submit.json' }; }\nfunction maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            hook_dir.join("op-pi.mjs"),
+            "export async function onHookEvent(event, sdk) { return { promptSubmitState: '.op-pi/state/prompt-submit.json' }; }\nfunction maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write omx hook");
 
         let setup = detect_hook_setup(&nested).expect("hook setup");
         assert_eq!(setup.workdir, repo);
         assert_eq!(setup.supported_providers, vec![ProviderKind::Omx]);
+    }
+
+    #[test]
+    fn accepts_legacy_clawhip_hook_command_and_marker_paths() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join(".clawhip/hooks")).expect("create legacy hook dir");
+        fs::write(
+            dir.path().join(LEGACY_NATIVE_HOOK_SCRIPT),
+            "function maybeWritePromptSubmitState() {}",
+        )
+        .expect("write legacy hook");
+
+        assert!(command_mentions_op_pi(
+            "clawhip native hook --provider codex"
+        ));
+        assert_eq!(
+            prompt_submit_marker_path(dir.path()),
+            LEGACY_PROMPT_SUBMIT_MARKER
+        );
     }
 
     #[test]
@@ -903,11 +943,11 @@ mod tests {
         let nested = repo.join("src/bin");
         let fake_home = tempdir.path().join("home");
         fs::create_dir_all(repo.join(".codex")).expect("create codex dir");
-        fs::create_dir_all(fake_home.join(".clawhip/hooks")).expect("create hook dir");
+        fs::create_dir_all(fake_home.join(".op-pi/hooks")).expect("create hook dir");
         fs::create_dir_all(&nested).expect("create nested dir");
         let command = format!(
             "node {} --provider codex",
-            shell_escape_path(&fake_home.join(".clawhip/hooks/native-hook.mjs"))
+            shell_escape_path(&fake_home.join(".op-pi/hooks/native-hook.mjs"))
         );
         fs::write(
             repo.join(".codex/hooks.json"),
@@ -917,8 +957,8 @@ mod tests {
         )
         .expect("write codex hooks");
         fs::write(
-            fake_home.join(".clawhip/hooks/native-hook.mjs"),
-            "function maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            fake_home.join(".op-pi/hooks/native-hook.mjs"),
+            "function maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write native hook");
 
@@ -951,11 +991,11 @@ mod tests {
         let nested = repo.join("src/bin");
         let fake_home = tempdir.path().join("home");
         fs::create_dir_all(fake_home.join(".codex")).expect("create codex dir");
-        fs::create_dir_all(fake_home.join(".clawhip/hooks")).expect("create hook dir");
+        fs::create_dir_all(fake_home.join(".op-pi/hooks")).expect("create hook dir");
         fs::create_dir_all(&nested).expect("create nested dir");
         let command = format!(
             "node {} --provider codex",
-            shell_escape_path(&fake_home.join(".clawhip/hooks/native-hook.mjs"))
+            shell_escape_path(&fake_home.join(".op-pi/hooks/native-hook.mjs"))
         );
         fs::write(
             fake_home.join(".codex/hooks.json"),
@@ -965,8 +1005,8 @@ mod tests {
         )
         .expect("write codex hooks");
         fs::write(
-            fake_home.join(".clawhip/hooks/native-hook.mjs"),
-            "function maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            fake_home.join(".op-pi/hooks/native-hook.mjs"),
+            "function maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write native hook");
 
@@ -998,11 +1038,11 @@ mod tests {
         let repo = tempdir.path().join("repo/src");
         let fake_home = tempdir.path().join("home");
         fs::create_dir_all(fake_home.join(".claude")).expect("create claude dir");
-        fs::create_dir_all(fake_home.join(".clawhip/hooks")).expect("create hook dir");
+        fs::create_dir_all(fake_home.join(".op-pi/hooks")).expect("create hook dir");
         fs::create_dir_all(&repo).expect("create repo dir");
         let command = format!(
             "node {} --provider claude-code",
-            shell_escape_path(&fake_home.join(".clawhip/hooks/native-hook.mjs"))
+            shell_escape_path(&fake_home.join(".op-pi/hooks/native-hook.mjs"))
         );
         fs::write(
             fake_home.join(".claude/settings.json"),
@@ -1012,8 +1052,8 @@ mod tests {
         )
         .expect("write settings");
         fs::write(
-            fake_home.join(".clawhip/hooks/native-hook.mjs"),
-            "function maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            fake_home.join(".op-pi/hooks/native-hook.mjs"),
+            "function maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write native hook");
 
@@ -1052,8 +1092,8 @@ mod tests {
         let hook_dir = repo.join(".omx/hooks");
         fs::create_dir_all(&hook_dir).expect("create hook dir");
         fs::write(
-            hook_dir.join("clawhip.mjs"),
-            "import { createClawhipOmxClient } from './clawhip-sdk.mjs';\nexport async function onHookEvent(event, sdk) { return { ok: true }; }\n",
+            hook_dir.join("op-pi.mjs"),
+            "import { createOpPiOmxClient } from './op-pi-sdk.mjs';\nexport async function onHookEvent(event, sdk) { return { ok: true }; }\n",
         )
         .expect("write old hook");
 
@@ -1117,10 +1157,10 @@ mod tests {
     fn infer_provider_from_hook_setup_requires_single_provider() {
         let setup = HookSetup {
             workdir: PathBuf::from("/tmp/repo"),
-            marker_path: PathBuf::from("/tmp/repo/.clawhip/state/prompt-submit.json"),
+            marker_path: PathBuf::from("/tmp/repo/.op-pi/state/prompt-submit.json"),
             supported_providers: vec![ProviderKind::Omx],
             sources: vec![
-                "~/.codex/hooks.json or ~/.codex/config.toml + ~/.clawhip/hooks/native-hook.mjs",
+                "~/.codex/hooks.json or ~/.codex/config.toml + ~/.op-pi/hooks/native-hook.mjs",
             ],
             install_scope: HookDetectionScope::Global,
         };
@@ -1144,10 +1184,10 @@ mod tests {
         let fake_home = tempdir.path().join("home");
         init_git_repo_for_prompt_delivery_test(&workdir);
         fs::create_dir_all(fake_home.join(".codex")).expect("create codex dir");
-        fs::create_dir_all(fake_home.join(".clawhip/hooks")).expect("create hook dir");
+        fs::create_dir_all(fake_home.join(".op-pi/hooks")).expect("create hook dir");
         let command = format!(
             "node {} --provider codex",
-            shell_escape_path(&fake_home.join(".clawhip/hooks/native-hook.mjs"))
+            shell_escape_path(&fake_home.join(".op-pi/hooks/native-hook.mjs"))
         );
         fs::write(
             fake_home.join(".codex/hooks.json"),
@@ -1157,8 +1197,8 @@ mod tests {
         )
         .expect("write codex hooks");
         fs::write(
-            fake_home.join(".clawhip/hooks/native-hook.mjs"),
-            "function maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            fake_home.join(".op-pi/hooks/native-hook.mjs"),
+            "function maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write native hook");
 
@@ -1183,10 +1223,10 @@ mod tests {
         fs::set_permissions(&tmux_path, perms).expect("chmod fake tmux");
 
         let previous_home = std::env::var_os("HOME");
-        let previous_tmux = std::env::var_os("CLAWHIP_TMUX_BIN");
+        let previous_tmux = std::env::var_os("OP_PI_TMUX_BIN");
         unsafe {
             std::env::set_var("HOME", &fake_home);
-            std::env::set_var("CLAWHIP_TMUX_BIN", &tmux_path);
+            std::env::set_var("OP_PI_TMUX_BIN", &tmux_path);
         }
 
         let config = PromptDeliverConfig {
@@ -1206,11 +1246,11 @@ mod tests {
 
         if let Some(previous) = previous_tmux {
             unsafe {
-                std::env::set_var("CLAWHIP_TMUX_BIN", previous);
+                std::env::set_var("OP_PI_TMUX_BIN", previous);
             }
         } else {
             unsafe {
-                std::env::remove_var("CLAWHIP_TMUX_BIN");
+                std::env::remove_var("OP_PI_TMUX_BIN");
             }
         }
         if let Some(previous) = previous_home {
@@ -1232,10 +1272,10 @@ mod tests {
         let fake_home = tempdir.path().join("home");
         init_git_repo_for_prompt_delivery_test(&workdir);
         fs::create_dir_all(fake_home.join(".codex")).expect("create codex dir");
-        fs::create_dir_all(fake_home.join(".clawhip/hooks")).expect("create hook dir");
+        fs::create_dir_all(fake_home.join(".op-pi/hooks")).expect("create hook dir");
         let command = format!(
             "node {} --provider codex",
-            shell_escape_path(&fake_home.join(".clawhip/hooks/native-hook.mjs"))
+            shell_escape_path(&fake_home.join(".op-pi/hooks/native-hook.mjs"))
         );
         fs::write(
             fake_home.join(".codex/hooks.json"),
@@ -1245,8 +1285,8 @@ mod tests {
         )
         .expect("write codex hooks");
         fs::write(
-            fake_home.join(".clawhip/hooks/native-hook.mjs"),
-            "function maybeWritePromptSubmitState() { return '.clawhip/state/prompt-submit.json'; }\n",
+            fake_home.join(".op-pi/hooks/native-hook.mjs"),
+            "function maybeWritePromptSubmitState() { return '.op-pi/state/prompt-submit.json'; }\n",
         )
         .expect("write native hook");
 
@@ -1271,10 +1311,10 @@ mod tests {
         fs::set_permissions(&tmux_path, perms).expect("chmod fake tmux");
 
         let previous_home = std::env::var_os("HOME");
-        let previous_tmux = std::env::var_os("CLAWHIP_TMUX_BIN");
+        let previous_tmux = std::env::var_os("OP_PI_TMUX_BIN");
         unsafe {
             std::env::set_var("HOME", &fake_home);
-            std::env::set_var("CLAWHIP_TMUX_BIN", &tmux_path);
+            std::env::set_var("OP_PI_TMUX_BIN", &tmux_path);
         }
 
         let config = PromptDeliverConfig {
@@ -1295,11 +1335,11 @@ mod tests {
 
         if let Some(previous) = previous_tmux {
             unsafe {
-                std::env::set_var("CLAWHIP_TMUX_BIN", previous);
+                std::env::set_var("OP_PI_TMUX_BIN", previous);
             }
         } else {
             unsafe {
-                std::env::remove_var("CLAWHIP_TMUX_BIN");
+                std::env::remove_var("OP_PI_TMUX_BIN");
             }
         }
         if let Some(previous) = previous_home {

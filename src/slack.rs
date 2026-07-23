@@ -48,7 +48,8 @@ impl SlackClient {
         Ok(Self {
             webhook_client: reqwest::Client::new(),
             bot_client,
-            api_base: std::env::var("CLAWHIP_SLACK_API_BASE")
+            api_base: std::env::var("OP_PI_SLACK_API_BASE")
+                .or_else(|_| std::env::var("CLAWHIP_SLACK_API_BASE"))
                 .unwrap_or_else(|_| default_api_base()),
         })
     }
@@ -68,7 +69,7 @@ impl SlackClient {
 
     pub async fn send_channel(&self, channel: &str, message: &SinkMessage) -> Result<()> {
         let client = self.bot_client.as_ref().ok_or(
-            "Slack channel delivery requires a bot token; configure [providers.slack].token or CLAWHIP_SLACK_BOT_TOKEN",
+            "Slack channel delivery requires a bot token; configure [providers.slack].token or OP_PI_SLACK_BOT_TOKEN",
         )?;
         let url = format!("{}/chat.postMessage", self.api_base);
 

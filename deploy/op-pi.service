@@ -1,14 +1,15 @@
 [Unit]
-Description=clawhip daemon
+Description=op-pi daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/clawhip start
+ExecStart=/usr/local/bin/op-pi start
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
 
 [Install]
 WantedBy=multi-user.target
+Alias=clawhip.service

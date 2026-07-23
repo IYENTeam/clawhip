@@ -8,7 +8,7 @@ usage() {
 
 session=""
 keywords=""
-channel="${CLAWHIP_CHANNEL:-}"
+channel="${OP_PI_CHANNEL:-${CLAWHIP_CHANNEL:-}}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --session) session="$2"; shift 2 ;;
@@ -20,7 +20,12 @@ done
 
 [[ -n "$session" && -n "$keywords" ]] || usage
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/clawhip/tmux-keywords"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+state_dir="$state_root/op-pi/tmux-keywords"
+legacy_state_dir="$state_root/clawhip/tmux-keywords"
+if [[ ! -d "$state_dir" && -d "$legacy_state_dir" ]]; then
+  state_dir="$legacy_state_dir"
+fi
 mkdir -p "$state_dir"
 patterns=(${keywords//,/ })
 
@@ -38,7 +43,7 @@ while IFS='|' read -r pane_id pane_name; do
     [[ "$previous_output" == *"$line"* ]] && continue
     for keyword in "${patterns[@]}"; do
       if [[ "$line" == *"$keyword"* ]]; then
-        args=(clawhip tmux keyword --session "$session" --keyword "$keyword" --line "$line")
+        args=(op-pi tmux keyword --session "$session" --keyword "$keyword" --line "$line")
         if [[ -n "$channel" ]]; then args+=(--channel "$channel"); fi
         "${args[@]}"
       fi

@@ -52,13 +52,13 @@ mod tests {
             event_kind: "github.ci-failed".into(),
             format: "compact".into(),
             content: "msg".into(),
-            payload: json!({"repo":"clawhip"}),
+            payload: json!({"repo":"op-pi"}),
             correlation_id: Some("corr-1".into()),
             content_bytes: Some(3),
             payload_bytes: Some(18),
         });
         assert_eq!(dlq.entries().len(), 1);
-        assert_eq!(dlq.entries()[0].payload["repo"], "clawhip");
+        assert_eq!(dlq.entries()[0].payload["repo"], "op-pi");
         assert_eq!(dlq.entries()[0].correlation_id.as_deref(), Some("corr-1"));
     }
 }

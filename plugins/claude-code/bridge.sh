@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[clawhip:claude-code] hook=$*"
+echo "[op-pi:claude-code] hook=$*"

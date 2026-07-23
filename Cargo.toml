@@ -1,12 +1,21 @@
 [package]
-name = "clawhip"
+name = "op-pi"
 version = "0.6.11"
 edition = "2024"
-description = "Event-to-channel notification router for Discord — bypass gateway sessions, just events in, messages out"
+default-run = "op-pi"
+description = "Operation Pipeline Interface"
 license = "MIT"
-repository = "https://github.com/Yeachan-Heo/clawhip"
+repository = "https://github.com/IYENTeam/op-pi"
 keywords = ["discord", "notifications", "tmux", "github", "devops"]
 categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "op-pi"
+path = "src/main.rs"
+
+[[bin]]
+name = "clawhip"
+path = "src/bin/clawhip.rs"
 
 [dependencies]
 anyhow = "1"

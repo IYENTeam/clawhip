@@ -6,7 +6,8 @@ use serde::Deserialize;
 
 use crate::Result;
 
-const PLUGIN_DIR_ENV: &str = "CLAWHIP_PLUGIN_DIR";
+const PLUGIN_DIR_ENV: &str = "OP_PI_PLUGIN_DIR";
+const LEGACY_PLUGIN_DIR_ENV: &str = "CLAWHIP_PLUGIN_DIR";
 
 #[derive(Debug, Clone, Deserialize)]
 struct PluginManifest {
@@ -93,14 +94,17 @@ fn resolve_plugins_dir() -> Option<PathBuf> {
 fn plugin_dir_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Some(dir) = env::var_os(PLUGIN_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        candidates.push(dir);
+    for variable in [PLUGIN_DIR_ENV, LEGACY_PLUGIN_DIR_ENV] {
+        if let Some(dir) = env::var_os(variable)
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            candidates.push(dir);
+        }
     }
 
     candidates.push(app_plugins_dir());
+    candidates.push(legacy_app_plugins_dir());
     candidates.push(bundled_plugins_dir());
 
     if let Ok(exe) = env::current_exe()
@@ -120,6 +124,12 @@ fn bundled_plugins_dir() -> PathBuf {
 }
 
 fn app_plugins_dir() -> PathBuf {
+    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+        .join(".op-pi")
+        .join("plugins")
+}
+
+fn legacy_app_plugins_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string()))
         .join(".clawhip")
         .join("plugins")
@@ -234,6 +244,11 @@ bridge = "bridge.sh"
         let message = error.to_string();
         assert!(message.contains("missing bridge script"));
         assert!(message.contains("broken"));
+    }
+
+    #[test]
+    fn legacy_plugin_directory_remains_a_fallback_candidate() {
+        assert!(plugin_dir_candidates().contains(&legacy_app_plugins_dir()));
     }
 
     #[test]

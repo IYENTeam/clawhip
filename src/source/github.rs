@@ -42,7 +42,7 @@ impl Source for GitHubSource {
         let github_client = match build_github_client(self.config.monitor_github_token()) {
             Ok(client) => Some(client),
             Err(error) => {
-                eprintln!("clawhip source github: failed to build GitHub client: {error}");
+                eprintln!("op-pi source github: failed to build GitHub client: {error}");
                 None
             }
         };
@@ -83,7 +83,7 @@ impl Source for GitHubSource {
                             None,
                             Some(error.clone()),
                         ));
-                        eprintln!("clawhip source github poll failed: {error}");
+                        eprintln!("op-pi source github poll failed: {error}");
                     }
                 }
             }
@@ -96,11 +96,11 @@ impl Source for GitHubSource {
                 && let Err(error) =
                     run_reconciliation(self.config.as_ref(), client, &tx, &state).await
             {
-                eprintln!("clawhip source github reconciliation failed: {error}");
+                eprintln!("op-pi source github reconciliation failed: {error}");
             }
 
             if let Err(error) = save_state(&state_path, &state).await {
-                eprintln!("clawhip source github failed to save state: {error}");
+                eprintln!("op-pi source github failed to save state: {error}");
             }
 
             sleep(Duration::from_secs(
@@ -139,7 +139,7 @@ async fn load_state(path: &Option<PathBuf>) -> HashMap<String, GitHubRepoState> 
             }
             serde_json::from_str(&content).unwrap_or_else(|error| {
                 eprintln!(
-                    "clawhip source github: failed to parse state file at {}: {error}",
+                    "op-pi source github: failed to parse state file at {}: {error}",
                     path.display()
                 );
                 HashMap::new()
@@ -148,7 +148,7 @@ async fn load_state(path: &Option<PathBuf>) -> HashMap<String, GitHubRepoState> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
         Err(error) => {
             eprintln!(
-                "clawhip source github: failed to read state file at {}: {error}",
+                "op-pi source github: failed to read state file at {}: {error}",
                 path.display()
             );
             HashMap::new()
@@ -238,7 +238,7 @@ async fn snapshot_github_repo(repo: &GitRepoMonitor) -> Result<GitSnapshot> {
                     Some(error.to_string()),
                 ));
                 eprintln!(
-                    "clawhip source github snapshot failed for {}: {error}; using configured github_repo={github_repo}",
+                    "op-pi source github snapshot failed for {}: {error}; using configured github_repo={github_repo}",
                     repo.path
                 );
                 Ok(GitSnapshot {
@@ -279,7 +279,7 @@ async fn poll_github(
                     Some(error.to_string()),
                 ));
                 eprintln!(
-                    "clawhip source github snapshot failed for {}: {error}",
+                    "op-pi source github snapshot failed for {}: {error}",
                     repo.path
                 );
                 errors.push(format!("{} snapshot: {error}", repo.path));
@@ -382,7 +382,7 @@ async fn backfill_issues(
         }
         send_event(tx, event).await?;
         eprintln!(
-            "clawhip source github backfill: issued issue #{} for {}",
+            "op-pi source github backfill: issued issue #{} for {}",
             number, snapshot.repo_name
         );
     }
@@ -412,7 +412,7 @@ async fn backfill_prs(
         }
         send_event(tx, event).await?;
         eprintln!(
-            "clawhip source github backfill: issued PR #{} for {}",
+            "op-pi source github backfill: issued PR #{} for {}",
             number, snapshot.repo_name
         );
     }
@@ -587,7 +587,7 @@ async fn run_reconciliation(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 eprintln!(
-                    "clawhip source github reconciliation: snapshot failed for {}: {error}",
+                    "op-pi source github reconciliation: snapshot failed for {}: {error}",
                     repo.path
                 );
                 continue;
@@ -603,7 +603,7 @@ async fn run_reconciliation(
                 reconcile_issues(config, client, repo, &snapshot, repo_state, tx).await
         {
             eprintln!(
-                "clawhip source github reconciliation: issue check failed for {}: {error}",
+                "op-pi source github reconciliation: issue check failed for {}: {error}",
                 repo.path
             );
         }
@@ -612,7 +612,7 @@ async fn run_reconciliation(
             && let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state, tx).await
         {
             eprintln!(
-                "clawhip source github reconciliation: PR check failed for {}: {error}",
+                "op-pi source github reconciliation: PR check failed for {}: {error}",
                 repo.path
             );
         }
@@ -679,7 +679,7 @@ async fn reconcile_issues(
 
     if emitted > 0 {
         eprintln!(
-            "clawhip source github reconciliation: emitted {} issue(s) for {}",
+            "op-pi source github reconciliation: emitted {} issue(s) for {}",
             emitted, snapshot.repo_name
         );
     }
@@ -751,7 +751,7 @@ async fn reconcile_prs(
 
     if emitted > 0 {
         eprintln!(
-            "clawhip source github reconciliation: emitted {} PR(s) for {}",
+            "op-pi source github reconciliation: emitted {} PR(s) for {}",
             emitted, snapshot.repo_name
         );
     }
@@ -1265,7 +1265,7 @@ fn epoch_days_to_ymd(epoch_days: i64) -> (i64, u32, u32) {
 
 fn build_github_client(token: Option<String>) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static("clawhip/0.1"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("op-pi/0.1"));
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
@@ -1383,8 +1383,8 @@ mod tests {
     #[tokio::test]
     async fn new_issue_events_apply_route_channel_and_mention_over_repo_monitor_channel() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             channel: Some("dev-channel".into()),
             ..GitRepoMonitor::default()
         };
@@ -1399,10 +1399,10 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        let events = collect_issue_events(&repo, "op-pi", &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.issue-opened");
-        assert_eq!(events[0].payload["repo"], "clawhip");
+        assert_eq!(events[0].payload["repo"], "op-pi");
 
         let config = AppConfig {
             defaults: DefaultsConfig {
@@ -1413,7 +1413,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "github.*".into(),
                 sink: "discord".into(),
-                filter: [("repo".to_string(), "clawhip".to_string())]
+                filter: [("repo".to_string(), "op-pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("route-channel".into()),
@@ -1440,8 +1440,8 @@ mod tests {
     #[test]
     fn pr_review_activity_events_are_emitted() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             channel: Some("dev-channel".into()),
             mention: Some("<@123>".into()),
             format: Some(MessageFormat::Compact),
@@ -1476,7 +1476,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let events = collect_pr_events(&repo, "clawhip", &previous, &current);
+        let events = collect_pr_events(&repo, "op-pi", &previous, &current);
 
         assert_eq!(events.len(), 2);
         assert!(
@@ -1504,8 +1504,8 @@ mod tests {
     #[test]
     fn issue_comment_and_close_events_are_emitted() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             ..GitRepoMonitor::default()
         };
         let previous = [(
@@ -1528,7 +1528,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        let events = collect_issue_events(&repo, "op-pi", &previous, &current);
         assert!(
             events
                 .iter()
@@ -1553,7 +1553,7 @@ mod tests {
             status: status.into(),
             conclusion: conclusion.map(ToString::to_string),
             sha: "abcdef1234567890".into(),
-            url: "https://github.com/Yeachan-Heo/clawhip/actions/runs/1".into(),
+            url: "https://github.com/IYENTeam/op-pi/actions/runs/1".into(),
             branch: Some("feat/github-ci-events".into()),
             run_id: Some("1".into()),
             run_job_count: 1,
@@ -1755,8 +1755,8 @@ mod tests {
     #[test]
     fn initial_ci_detection_emits_started_event_with_route_metadata() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             channel: Some("dev-channel".into()),
             mention: Some("<@123>".into()),
             format: Some(MessageFormat::Alert),
@@ -1768,27 +1768,27 @@ mod tests {
             .into_iter()
             .collect();
 
-        let events = collect_ci_events(&repo, "clawhip", false, &previous, &current);
+        let events = collect_ci_events(&repo, "op-pi", false, &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.ci-started");
         assert_eq!(events[0].channel.as_deref(), Some("dev-channel"));
         assert_eq!(events[0].mention.as_deref(), Some("<@123>"));
         assert_eq!(events[0].format, Some(MessageFormat::Alert));
-        assert_eq!(events[0].payload["repo"], json!("clawhip"));
+        assert_eq!(events[0].payload["repo"], json!("op-pi"));
         assert_eq!(events[0].payload["number"], json!(58));
         assert_eq!(events[0].payload["workflow"], json!("CI / test"));
         assert_eq!(events[0].payload["status"], json!("in_progress"));
         assert_eq!(events[0].payload["sha"], json!("abcdef1234567890"));
         assert_eq!(
             events[0].payload["url"],
-            json!("https://github.com/Yeachan-Heo/clawhip/actions/runs/1")
+            json!("https://github.com/IYENTeam/op-pi/actions/runs/1")
         );
     }
 
     #[test]
     fn initial_terminal_ci_detection_is_suppressed_as_baseline() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
         for conclusion in ["success", "failure", "cancelled"] {
@@ -1798,7 +1798,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-            let events = collect_ci_events(&repo, "clawhip", false, &previous, &current);
+            let events = collect_ci_events(&repo, "op-pi", false, &previous, &current);
             assert!(
                 events.is_empty(),
                 "initial completed CI with conclusion {conclusion} should only seed the baseline"
@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn absent_terminal_ci_after_baseline_emits_completion_events() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
 
@@ -1824,7 +1824,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-            let events = collect_ci_events(&repo, "clawhip", true, &previous, &current);
+            let events = collect_ci_events(&repo, "op-pi", true, &previous, &current);
             assert_eq!(
                 events.len(),
                 1,
@@ -1839,21 +1839,21 @@ mod tests {
     #[test]
     fn unchanged_ci_state_is_suppressed() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
         let ci = ci_snapshot(58, "CI / test", "in_progress", None);
         let previous = [(ci.dedupe_key(), ci.clone())].into_iter().collect();
         let current = [(ci.dedupe_key(), ci)].into_iter().collect();
 
-        let events = collect_ci_events(&repo, "clawhip", true, &previous, &current);
+        let events = collect_ci_events(&repo, "op-pi", true, &previous, &current);
         assert!(events.is_empty());
     }
 
     #[test]
     fn ci_state_transition_to_failed_emits_failed_event() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
         let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
@@ -1865,7 +1865,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let events = collect_ci_events(&repo, "clawhip", true, &previous, &current);
+        let events = collect_ci_events(&repo, "op-pi", true, &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.ci-failed");
         assert_eq!(events[0].payload["workflow"], json!("CI / test"));
@@ -1876,7 +1876,7 @@ mod tests {
     #[test]
     fn ci_state_transition_to_passed_emits_passed_event() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
         let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
@@ -1888,7 +1888,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let events = collect_ci_events(&repo, "clawhip", true, &previous, &current);
+        let events = collect_ci_events(&repo, "op-pi", true, &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.ci-passed");
     }
@@ -1896,7 +1896,7 @@ mod tests {
     #[test]
     fn ci_state_transition_to_cancelled_emits_cancelled_event() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
+            path: "/tmp/op-pi".into(),
             ..GitRepoMonitor::default()
         };
         let previous_ci = ci_snapshot(58, "CI / test", "in_progress", None);
@@ -1908,7 +1908,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let events = collect_ci_events(&repo, "clawhip", true, &previous, &current);
+        let events = collect_ci_events(&repo, "op-pi", true, &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.ci-cancelled");
     }
@@ -1947,7 +1947,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_falls_back_to_configured_github_repo_without_local_clone() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip-test-private-repo-missing".into(),
+            path: "/tmp/op-pi-test-private-repo-missing".into(),
             name: Some("private-repo".into()),
             github_repo: Some("owner/private-repo".into()),
             ..GitRepoMonitor::default()
@@ -1990,7 +1990,7 @@ mod tests {
         config.monitors.poll_interval_secs = 1;
         config.monitors.github_api_base = format!("http://{addr}");
         config.monitors.git.repos = vec![GitRepoMonitor {
-            path: "/tmp/clawhip-test-private-repo-missing".into(),
+            path: "/tmp/op-pi-test-private-repo-missing".into(),
             name: Some("private-repo".into()),
             github_repo: Some("owner/private-repo".into()),
             emit_commits: false,
@@ -2141,9 +2141,9 @@ mod tests {
         let mut config = AppConfig::default();
         config.monitors.github_api_base = format!("http://{addr}");
         config.monitors.git.repos = vec![GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
-            github_repo: Some("owner/clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
+            github_repo: Some("owner/op-pi".into()),
             emit_issue_opened: true,
             emit_pr_status: false,
             ..GitRepoMonitor::default()
@@ -2154,7 +2154,7 @@ mod tests {
 
         let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
         state.insert(
-            "/tmp/clawhip".to_string(),
+            "/tmp/op-pi".to_string(),
             GitHubRepoState {
                 issues: HashMap::new(),
                 prs: HashMap::new(),
@@ -2211,9 +2211,9 @@ mod tests {
         let mut config = AppConfig::default();
         config.monitors.github_api_base = format!("http://{addr}");
         config.monitors.git.repos = vec![GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
-            github_repo: Some("owner/clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
+            github_repo: Some("owner/op-pi".into()),
             emit_issue_opened: true,
             emit_pr_status: false,
             ..GitRepoMonitor::default()
@@ -2233,7 +2233,7 @@ mod tests {
         );
         let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
         state.insert(
-            "/tmp/clawhip".to_string(),
+            "/tmp/op-pi".to_string(),
             GitHubRepoState {
                 issues,
                 prs: HashMap::new(),
@@ -2291,9 +2291,9 @@ mod tests {
         let mut config = AppConfig::default();
         config.monitors.github_api_base = format!("http://{addr}");
         config.monitors.git.repos = vec![GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
-            github_repo: Some("owner/clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
+            github_repo: Some("owner/op-pi".into()),
             emit_issue_opened: false,
             emit_pr_status: true,
             ..GitRepoMonitor::default()
@@ -2304,7 +2304,7 @@ mod tests {
 
         let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
         state.insert(
-            "/tmp/clawhip".to_string(),
+            "/tmp/op-pi".to_string(),
             GitHubRepoState {
                 issues: HashMap::new(),
                 prs: HashMap::new(),
@@ -2331,8 +2331,8 @@ mod tests {
     #[tokio::test]
     async fn github_events_route_through_discord_sink_correctly() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             channel: Some("dev-channel".into()),
             format: Some(MessageFormat::Alert),
             ..GitRepoMonitor::default()
@@ -2348,7 +2348,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        let events = collect_issue_events(&repo, "op-pi", &previous, &current);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].canonical_kind(), "github.issue-opened");
 
@@ -2361,7 +2361,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "github.*".into(),
                 sink: "discord".into(),
-                filter: [("repo".to_string(), "clawhip".to_string())]
+                filter: [("repo".to_string(), "op-pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("route-channel".into()),
@@ -2385,15 +2385,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconciliation_marked_events_route_through_discord_sink() {
-        let event = IncomingEvent::github_issue_opened(
-            "clawhip".into(),
-            99,
-            "reconciled issue".into(),
-            None,
-        )
-        .with_mention(Some("<@bot>".into()))
-        .with_format(Some(MessageFormat::Alert))
-        .with_source("reconciliation");
+        let event =
+            IncomingEvent::github_issue_opened("op-pi".into(), 99, "reconciled issue".into(), None)
+                .with_mention(Some("<@bot>".into()))
+                .with_format(Some(MessageFormat::Alert))
+                .with_source("reconciliation");
 
         assert_eq!(event.payload["source"], json!("reconciliation"));
 
@@ -2406,7 +2402,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "github.*".into(),
                 sink: "discord".into(),
-                filter: [("repo".to_string(), "clawhip".to_string())]
+                filter: [("repo".to_string(), "op-pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("recon-route".into()),
@@ -2434,19 +2430,19 @@ mod tests {
     #[tokio::test]
     async fn backfill_emits_only_open_issues_with_source_marker() {
         let repo = GitRepoMonitor {
-            path: "/tmp/clawhip".into(),
-            name: Some("clawhip".into()),
+            path: "/tmp/op-pi".into(),
+            name: Some("op-pi".into()),
             channel: Some("dev-channel".into()),
             ..GitRepoMonitor::default()
         };
         let snapshot = GitSnapshot {
-            repo_name: "clawhip".into(),
-            repo_path: "/tmp/clawhip".into(),
-            worktree_path: "/tmp/clawhip".into(),
+            repo_name: "op-pi".into(),
+            repo_path: "/tmp/op-pi".into(),
+            worktree_path: "/tmp/op-pi".into(),
             branch: "main".into(),
             head: "abc".into(),
             commits: Vec::new(),
-            github_repo: Some("owner/clawhip".into()),
+            github_repo: Some("owner/op-pi".into()),
         };
         let mut issues = HashMap::new();
         // Open issue — should emit

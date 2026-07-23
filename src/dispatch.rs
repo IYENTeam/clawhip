@@ -148,7 +148,7 @@ impl Dispatcher {
                     Some(error_message),
                 );
                 eprintln!(
-                    "clawhip dispatcher failed to resolve {}: {error}",
+                    "op-pi dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
                 );
                 return;
@@ -188,7 +188,7 @@ impl Dispatcher {
                     Some(error_message),
                 );
                 eprintln!(
-                    "clawhip dispatcher failed to resolve {}: {error}",
+                    "op-pi dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
                 );
                 return;
@@ -247,7 +247,7 @@ impl Dispatcher {
         });
 
         eprintln!(
-            "clawhip native hook routed: {} route={} deliveries={} error={}",
+            "op-pi native hook routed: {} route={} deliveries={} error={}",
             native_event_telemetry_fields(event),
             route_kind,
             count,
@@ -264,7 +264,7 @@ impl Dispatcher {
                 format!("missing sink '{}'", delivery.sink),
             );
             eprintln!(
-                "clawhip dispatcher missing sink '{}' for target {}",
+                "op-pi dispatcher missing sink '{}' for target {}",
                 delivery.sink,
                 safe_target_for_log(&delivery.target)
             );
@@ -285,7 +285,7 @@ impl Dispatcher {
                     error.to_string(),
                 );
                 eprintln!(
-                    "clawhip dispatcher failed to render {} for {}/ {}: {error}",
+                    "op-pi dispatcher failed to render {} for {}/ {}: {error}",
                     event.canonical_kind(),
                     delivery.sink,
                     safe_target_for_log(&delivery.target)
@@ -325,7 +325,7 @@ impl Dispatcher {
                 format!("missing sink '{}'", first.delivery.sink),
             );
             eprintln!(
-                "clawhip dispatcher missing sink '{}' for batched target {}",
+                "op-pi dispatcher missing sink '{}' for batched target {}",
                 first.delivery.sink,
                 safe_target_for_log(&first.delivery.target)
             );
@@ -352,7 +352,7 @@ impl Dispatcher {
                         error.to_string(),
                     );
                     eprintln!(
-                        "clawhip dispatcher failed to render batched {} for {}/ {}: {error}",
+                        "op-pi dispatcher failed to render batched {} for {}/ {}: {error}",
                         item.event.canonical_kind(),
                         item.delivery.sink,
                         safe_target_for_log(&item.delivery.target)
@@ -401,7 +401,7 @@ impl Dispatcher {
             record.insert("event_kind".to_string(), json!(message.event_kind));
             record.insert("error".to_string(), json!(error.to_string()));
             telemetry::emit(record);
-            eprintln!("clawhip dispatcher delivery failed to {safe_target}: {error}");
+            eprintln!("op-pi dispatcher delivery failed to {safe_target}: {error}");
         }
     }
 
@@ -986,9 +986,9 @@ mod tests {
             payload: json!({
                 "provider": "codex",
                 "hook_event_name": "SessionStart",
-                "repo_name": "clawhip",
-                "repo_path": "/tmp/clawhip",
-                "worktree_path": "/tmp/clawhip",
+                "repo_name": "op-pi",
+                "repo_path": "/tmp/op-pi",
+                "worktree_path": "/tmp/op-pi",
                 "session_id": "sess-route"
             }),
         }
@@ -1318,13 +1318,13 @@ mod tests {
         for workflow in ["Build", "Test"] {
             let mut event = IncomingEvent::github_ci(
                 "github.ci-passed",
-                "clawhip".into(),
+                "op-pi".into(),
                 Some(85),
                 workflow.into(),
                 "completed".into(),
                 Some("success".into()),
                 "abcdef1234567".into(),
-                format!("https://github.com/Yeachan-Heo/clawhip/actions/runs/123/jobs/{workflow}"),
+                format!("https://github.com/IYENTeam/op-pi/actions/runs/123/jobs/{workflow}"),
                 Some("feat/retry".into()),
                 None,
             );
@@ -1486,7 +1486,7 @@ mod tests {
         tx.send(IncomingEvent::agent_failed(
             "codex".into(),
             Some("session-1".into()),
-            Some("clawhip".into()),
+            Some("op-pi".into()),
             Some(3),
             Some("boom".into()),
             "stacktrace".into(),
@@ -1555,13 +1555,13 @@ mod tests {
         for workflow in ["Build", "Test"] {
             let mut event = IncomingEvent::github_ci(
                 "github.ci-passed",
-                "clawhip".into(),
+                "op-pi".into(),
                 Some(122),
                 workflow.into(),
                 "completed".into(),
                 Some("success".into()),
                 "abcdef1234567".into(),
-                format!("https://github.com/Yeachan-Heo/clawhip/actions/runs/456/jobs/{workflow}"),
+                format!("https://github.com/IYENTeam/op-pi/actions/runs/456/jobs/{workflow}"),
                 Some("feat/routine-batch".into()),
                 None,
             );
@@ -1679,7 +1679,7 @@ mod tests {
         .await
         .unwrap();
         tx.send(IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op-pi".into(),
             "main".into(),
             "1234567890abcdef".into(),
             "ship it".into(),
@@ -1705,19 +1705,19 @@ mod tests {
                 || second.contains("tmux:issue-132 matched 'error' => boom")
         );
         assert!(
-            first.contains("git:clawhip@main 1234567 ship it")
-                || second.contains("git:clawhip@main 1234567 ship it")
+            first.contains("git:op-pi@main 1234567 ship it")
+                || second.contains("git:op-pi@main 1234567 ship it")
         );
         assert!(
             (first.contains("tmux:issue-132 matched 'error' => boom")
-                && !first.contains("git:clawhip@main 1234567 ship it"))
+                && !first.contains("git:op-pi@main 1234567 ship it"))
                 || (second.contains("tmux:issue-132 matched 'error' => boom")
-                    && !second.contains("git:clawhip@main 1234567 ship it"))
+                    && !second.contains("git:op-pi@main 1234567 ship it"))
         );
         assert!(
-            (first.contains("git:clawhip@main 1234567 ship it")
+            (first.contains("git:op-pi@main 1234567 ship it")
                 && !first.contains("tmux:issue-132 matched 'error' => boom"))
-                || (second.contains("git:clawhip@main 1234567 ship it")
+                || (second.contains("git:op-pi@main 1234567 ship it")
                     && !second.contains("tmux:issue-132 matched 'error' => boom"))
         );
     }
@@ -1725,12 +1725,12 @@ mod tests {
     #[test]
     fn batch_key_prefers_workflow_run_id() {
         let payload = json!({
-            "repo": "clawhip",
+            "repo": "op-pi",
             "number": 86,
             "sha": "abc",
             "url": "https://github.com/org/repo/actions/runs/123456789/jobs/42"
         });
-        assert_eq!(ci_batch_key(&payload), "clawhip:86:abc:123456789");
+        assert_eq!(ci_batch_key(&payload), "op-pi:86:abc:123456789");
     }
 
     #[test]
@@ -1756,7 +1756,7 @@ mod tests {
 
         let mut first = IncomingEvent::github_ci(
             "github.ci-started",
-            "clawhip".into(),
+            "op-pi".into(),
             Some(86),
             "Build".into(),
             "in_progress".into(),
@@ -1772,7 +1772,7 @@ mod tests {
 
         let mut second = IncomingEvent::github_ci(
             "github.ci-passed",
-            "clawhip".into(),
+            "op-pi".into(),
             Some(86),
             "Build".into(),
             "completed".into(),
@@ -1788,7 +1788,7 @@ mod tests {
 
         let mut third = IncomingEvent::github_ci(
             "github.ci-failed",
-            "clawhip".into(),
+            "op-pi".into(),
             Some(86),
             "Test".into(),
             "completed".into(),

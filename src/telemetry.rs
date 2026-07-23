@@ -214,10 +214,10 @@ mod tests {
 
     #[test]
     fn local_file_target_id_does_not_expose_path() {
-        let safe = safe_target_id(&SinkTarget::LocalFile("/tmp/clawhip/events.jsonl".into()));
+        let safe = safe_target_id(&SinkTarget::LocalFile("/tmp/op-pi/events.jsonl".into()));
 
         assert!(safe.starts_with("localfile:"));
-        assert!(!safe.contains("/tmp/clawhip/events.jsonl"));
+        assert!(!safe.contains("/tmp/op-pi/events.jsonl"));
     }
 
     #[test]

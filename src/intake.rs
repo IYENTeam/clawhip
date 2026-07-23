@@ -1,7 +1,7 @@
 //! External intake normalization for AWS and Cloudflare webhooks.
 //!
 //! Each source has a pure `normalize_*` function that maps the provider's
-//! wire format into an [`IncomingEvent`] following clawhip's event model, so
+//! wire format into an [`IncomingEvent`] following op-pi's event model, so
 //! daemon handlers stay thin and the mapping is unit-testable.
 
 use std::collections::HashMap;
@@ -541,7 +541,7 @@ mod tests {
         json!({
             "Type": "Notification",
             "MessageId": "22b80b92-idea",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
             "Subject": "ALARM: \"ServerCpuTooHigh\" in US East (N. Virginia)",
             "Message": "{\"AlarmName\":\"ServerCpuTooHigh\",\"NewStateValue\":\"ALARM\",\"OldStateValue\":\"OK\",\"NewStateReason\":\"Threshold Crossed\",\"StateChangeTime\":\"2026-07-22T12:00:00.000+0000\",\"Region\":\"US East (N. Virginia)\",\"AlarmArn\":\"arn:aws:cloudwatch:us-east-1:123456789012:alarm:ServerCpuTooHigh\",\"Trigger\":{\"MetricName\":\"CPUUtilization\"}}",
             "Timestamp": "2026-07-22T12:00:01.000Z"
@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(event.payload["old_state"], "OK");
         assert_eq!(
             event.payload["topic_arn"],
-            "arn:aws:sns:us-east-1:123456789012:clawhip-alarms"
+            "arn:aws:sns:us-east-1:123456789012:op-pi-alarms"
         );
         assert_eq!(event.payload["message_id"], "22b80b92-idea");
     }
@@ -587,7 +587,7 @@ mod tests {
             "Type": "SubscriptionConfirmation",
             "MessageId": "165545c9",
             "Token": "2336412f37",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
             "Message": "You have chosen to subscribe ...",
             "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=2336412f37",
             "Timestamp": "2026-07-22T12:00:01.000Z"
@@ -610,7 +610,7 @@ mod tests {
         let unsubscribe = json!({
             "Type": "UnsubscribeConfirmation",
             "MessageId": "x",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
             "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc"
         });
         let event = normalize_sns_envelope(&unsubscribe).unwrap();
@@ -619,11 +619,11 @@ mod tests {
 
     #[test]
     fn topic_allowlist_enforced() {
-        let allowlist = vec!["arn:aws:sns:us-east-1:123456789012:clawhip-alarms".to_string()];
+        let allowlist = vec!["arn:aws:sns:us-east-1:123456789012:op-pi-alarms".to_string()];
 
         assert!(topic_allowed(
             &allowlist,
-            "arn:aws:sns:us-east-1:123456789012:clawhip-alarms"
+            "arn:aws:sns:us-east-1:123456789012:op-pi-alarms"
         ));
         assert!(!topic_allowed(
             &allowlist,
@@ -762,7 +762,7 @@ mod sns_signature_tests {
         parse_signing_cert(&pem).unwrap().0
     }
 
-    fn signed_payload() -> Value {
+    fn legacy_signed_payload() -> Value {
         json!({
             "Type": "Notification",
             "MessageId": "22b80b92",
@@ -777,9 +777,12 @@ mod sns_signature_tests {
     }
 
     #[test]
-    fn canonical_string_matches_openssl_signed_fixture() {
+    fn legacy_signed_canonical_string_matches_openssl_fixture() {
         let expected = std::fs::read_to_string(format!("{FIXTURE_DIR}/canonical.txt")).unwrap();
-        assert_eq!(sns_canonical_string(&signed_payload()).unwrap(), expected);
+        assert_eq!(
+            sns_canonical_string(&legacy_signed_payload()).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -818,23 +821,23 @@ mod sns_signature_tests {
     }
 
     #[test]
-    fn valid_signature_accepted() {
-        let payload = signed_payload();
+    fn legacy_signed_payload_is_accepted() {
+        let payload = legacy_signed_payload();
         let key = fixture_key();
         verify_sns_signature_with_key(&payload, &key).expect("valid signature must verify");
     }
 
     #[test]
-    fn tampered_message_rejected() {
-        let mut payload = signed_payload();
+    fn legacy_signed_payload_rejects_tampered_message() {
+        let mut payload = legacy_signed_payload();
         payload["Message"] = json!("{\"AlarmName\":\"Forged\"}");
         let key = fixture_key();
         assert!(verify_sns_signature_with_key(&payload, &key).is_err());
     }
 
     #[test]
-    fn tampered_signature_rejected() {
-        let mut payload = signed_payload();
+    fn legacy_signed_payload_rejects_tampered_signature() {
+        let mut payload = legacy_signed_payload();
         let mut sig = payload["Signature"].as_str().unwrap().to_string();
         sig.replace_range(0..4, "AAAA");
         payload["Signature"] = json!(sig);
@@ -854,11 +857,11 @@ mod sns_signature_tests {
     }
 
     #[tokio::test]
-    async fn verify_sns_signature_uses_prepopulated_cache_without_network() {
+    async fn legacy_signed_payload_uses_prepopulated_cache_without_network() {
         let cache = SnsCertCache::new();
         let far_future = 4_102_444_800; // 2100-01-01
         cache.insert(CERT_URL, fixture_key(), far_future);
-        verify_sns_signature(&signed_payload(), &cache)
+        verify_sns_signature(&legacy_signed_payload(), &cache)
             .await
             .expect("cached cert should verify without network");
     }

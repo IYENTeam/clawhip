@@ -14,12 +14,12 @@ Usage:
   scripts/live-verify-default-presets.sh tmux-wrapper
 
 Required env vars for GitHub/Discord verification:
-  CLAWHIP_REPO           e.g. Yeachan-Heo/clawhip
-  CLAWHIP_CHANNEL        Discord test channel id
-  CLAWHIP_BOT_TOKEN      Discord bot token
-  CLAWHIP_DAEMON_URL     e.g. http://127.0.0.1:25294
+  OP_PI_REPO           e.g. IYENTeam/op-pi
+  OP_PI_CHANNEL        Discord test channel id
+  OP_PI_BOT_TOKEN      Discord bot token
+  OP_PI_DAEMON_URL     e.g. http://127.0.0.1:25294
 Optional:
-  CLAWHIP_MENTION        mention tag to assert in messages
+  OP_PI_MENTION        mention tag to assert in messages
 USAGE
 }
 
@@ -27,22 +27,22 @@ mode=${1:-}
 [[ -n "$mode" ]] || { usage; exit 1; }
 
 require_common() {
-  : "${CLAWHIP_REPO:?set CLAWHIP_REPO}"
-  : "${CLAWHIP_CHANNEL:?set CLAWHIP_CHANNEL}"
-  : "${CLAWHIP_BOT_TOKEN:?set CLAWHIP_BOT_TOKEN}"
-  : "${CLAWHIP_DAEMON_URL:?set CLAWHIP_DAEMON_URL}"
+  : "${OP_PI_REPO:?set OP_PI_REPO}"
+  : "${OP_PI_CHANNEL:?set OP_PI_CHANNEL}"
+  : "${OP_PI_BOT_TOKEN:?set OP_PI_BOT_TOKEN}"
+  : "${OP_PI_DAEMON_URL:?set OP_PI_DAEMON_URL}"
 }
 
 fetch_messages() {
   curl -fsS \
-    -H "Authorization: Bot $CLAWHIP_BOT_TOKEN" \
+    -H "Authorization: Bot $OP_PI_BOT_TOKEN" \
     -H 'Content-Type: application/json' \
-    "https://discord.com/api/v10/channels/$CLAWHIP_CHANNEL/messages?limit=20"
+    "https://discord.com/api/v10/channels/$OP_PI_CHANNEL/messages?limit=20"
 }
 
 assert_message_contains() {
   local needle="$1"
-  local mention="${CLAWHIP_MENTION:-}"
+  local mention="${OP_PI_MENTION:-}"
   python3 - "$needle" "$mention" <<'PY'
 import json, sys
 needle = sys.argv[1]
@@ -60,24 +60,24 @@ PY
 case "$mode" in
   issue-opened)
     require_common
-    echo "Create a real issue in $CLAWHIP_REPO, then confirm Discord delivery."
-    echo "Example: gh issue create --repo $CLAWHIP_REPO --title 'clawhip live issue-opened <ts>' --body 'verification'"
+    echo "Create a real issue in $OP_PI_REPO, then confirm Discord delivery."
+    echo "Example: gh issue create --repo $OP_PI_REPO --title 'op-pi live issue-opened <ts>' --body 'verification'"
     ;;
   issue-comment)
     require_common
-    echo "Add a real comment to an existing open issue in $CLAWHIP_REPO, then confirm Discord delivery."
+    echo "Add a real comment to an existing open issue in $OP_PI_REPO, then confirm Discord delivery."
     ;;
   issue-closed)
     require_common
-    echo "Close a real issue in $CLAWHIP_REPO, then confirm Discord delivery."
+    echo "Close a real issue in $OP_PI_REPO, then confirm Discord delivery."
     ;;
   pr-opened)
     require_common
-    echo "Open a real PR in $CLAWHIP_REPO from a temporary branch/base branch, then confirm Discord delivery."
+    echo "Open a real PR in $OP_PI_REPO from a temporary branch/base branch, then confirm Discord delivery."
     ;;
   pr-merged)
     require_common
-    echo "Merge a real temporary PR in $CLAWHIP_REPO, then confirm Discord delivery."
+    echo "Merge a real temporary PR in $OP_PI_REPO, then confirm Discord delivery."
     ;;
   tmux-keyword)
     require_common
@@ -89,7 +89,7 @@ case "$mode" in
     ;;
   tmux-wrapper)
     require_common
-    echo "Run clawhip tmux new ... with keywords/mention/channel and verify wrapper-generated delivery in Discord."
+    echo "Run op-pi tmux new ... with keywords/mention/channel and verify wrapper-generated delivery in Discord."
     ;;
   *)
     usage
@@ -98,7 +98,7 @@ case "$mode" in
 esac
 
 echo
-echo "Recent Discord messages for channel $CLAWHIP_CHANNEL:"
+echo "Recent Discord messages for channel $OP_PI_CHANNEL:"
 fetch_messages | python3 -c 'import json,sys; msgs=json.load(sys.stdin); print(json.dumps(msgs[:5], indent=2)[:4000])'
 
 echo

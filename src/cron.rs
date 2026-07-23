@@ -601,7 +601,7 @@ fn should_suppress(
 fn suppression_notice(job_id: &str, suppression: &ZeroBacklogSuppression, now: i64) -> String {
     let remaining = (suppression.expires_at - now).max(0);
     format!(
-        "clawhip cron '{job_id}' zero-backlog follow-up suppressed (key={}, expires_in={remaining}s); nudge intentionally withheld, not dropped",
+        "op-pi cron '{job_id}' zero-backlog follow-up suppressed (key={}, expires_in={remaining}s); nudge intentionally withheld, not dropped",
         suppression.key
     )
 }
@@ -822,7 +822,7 @@ fn load_scheduler_state(path: &Path) -> Result<CronSchedulerState> {
         Ok(state) => Ok(state),
         Err(error) => {
             eprintln!(
-                "clawhip cron state '{}' is invalid; ignoring persisted state: {error}",
+                "op-pi cron state '{}' is invalid; ignoring persisted state: {error}",
                 path.display()
             );
             Ok(CronSchedulerState::default())
@@ -1505,7 +1505,7 @@ mod tests {
     fn write_lightweight_checkpoint(path: &Path, open_prs: u64) -> std::io::Result<()> {
         let checkpoint = crate::gajae::zero_backlog_followup_checkpoint(
             crate::gajae::ZeroBacklogCheckpointRequest {
-                repo: "Yeachan-Heo/clawhip".into(),
+                repo: "IYENTeam/op-pi".into(),
                 open_issues: 0,
                 open_prs,
                 action_needed_sessions: 0,
