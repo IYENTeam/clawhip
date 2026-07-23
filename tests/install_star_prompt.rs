@@ -95,6 +95,16 @@ fn format_gate_script_is_directly_executable() {
 }
 
 #[test]
+fn installer_script_is_directly_executable() {
+    let mode = fs::metadata(repo_root().join("install.sh"))
+        .expect("installer metadata")
+        .permissions()
+        .mode();
+
+    assert_ne!(mode & 0o111, 0, "installer must be executable");
+}
+
+#[test]
 fn skips_star_prompt_when_not_interactive() {
     let temp = TempDir::new().expect("tempdir");
     let output = run_shell(
