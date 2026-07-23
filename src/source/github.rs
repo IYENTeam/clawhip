@@ -293,10 +293,6 @@ async fn poll_github(
         let issues = match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
             Ok(issues) => issues,
             Err(error) => {
-                eprintln!(
-                    "clawhip source GitHub issue processing failed for {}: {error}",
-                    repo.path
-                );
                 errors.push(format!("{} issues: {error}", repo.path));
                 previous
                     .map(|entry| entry.issues.clone())
@@ -312,10 +308,6 @@ async fn poll_github(
             match poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await {
                 Ok(prs) => prs,
                 Err(error) => {
-                    eprintln!(
-                        "clawhip source GitHub pull request processing failed for {}: {error}",
-                        repo.path
-                    );
                     errors.push(format!("{} pulls: {error}", repo.path));
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
@@ -337,10 +329,6 @@ async fn poll_github(
         {
             Ok(ci) => ci,
             Err(error) => {
-                eprintln!(
-                    "clawhip source GitHub CI processing failed for {}: {error}",
-                    repo.path
-                );
                 errors.push(format!("{} ci: {error}", repo.path));
                 (
                     previous.map(|entry| entry.ci.clone()).unwrap_or_default(),
