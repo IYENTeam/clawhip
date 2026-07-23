@@ -1,9 +1,9 @@
 ---
-name: op-pi
-description: Attach/install/use op-pi as a daemon-first notification gateway runtime for OpenClaw / Clawdbot
+name: op_pi
+description: Attach/install/use op_pi as a daemon-first notification gateway runtime for OpenClaw / Clawdbot
 ---
 
-# op-pi skill attachment surface
+# op_pi skill attachment surface
 
 ## Intent
 
@@ -14,10 +14,10 @@ Use this repo as:
 
 ## Prerequisites
 
-⭐ If you want to support op-pi, star this repository. The interactive repo-local installer and `op-pi install` can offer an optional post-install GitHub star prompt via authenticated `gh api` access when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `OP_PI_SKIP_STAR_PROMPT=1`.
+⭐ If you want to support op_pi, star this repository. The interactive repo-local installer and `op_pi install` can offer an optional post-install GitHub star prompt via authenticated `gh api` access when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `OP_PI_SKIP_STAR_PROMPT=1`.
 
 ```bash
-gh api --method PUT /user/starred/IYENTeam/op-pi --silent
+gh api --method PUT /user/starred/IYENTeam/op_pi --silent
 ```
 
 ## Primary install flow
@@ -25,7 +25,7 @@ gh api --method PUT /user/starred/IYENTeam/op-pi --silent
 Preferred operator instruction:
 
 ```text
-@openclaw install https://github.com/IYENTeam/op-pi
+@openclaw install https://github.com/IYENTeam/op_pi
 ```
 
 Expected automation flow:
@@ -34,7 +34,7 @@ Expected automation flow:
 2. run `./install.sh`
 3. read this `SKILL.md`
 4. attach skill
-5. scaffold `~/.op-pi/config.toml`
+5. scaffold `~/.op_pi/config.toml`
 6. start daemon
 7. run live verification presets
 
@@ -49,28 +49,28 @@ http://127.0.0.1:25294
 Core commands:
 
 ```bash
-op-pi
-op-pi start
-op-pi status
-op-pi config
-op-pi send --channel <id> --message "..."
-op-pi github issue-opened ...
-op-pi github pr-status-changed ...
-op-pi git commit ...
-op-pi tmux keyword ...
-op-pi tmux stale ...
-op-pi tmux new -s <session> --channel <id> --keywords error,complete --shell /bin/zsh -- command
-op-pi tmux watch -s <existing-session> --channel <id> --mention '<@id>' --keywords error,complete
+op_pi
+op_pi start
+op_pi status
+op_pi config
+op_pi send --channel <id> --message "..."
+op_pi github issue-opened ...
+op_pi github pr-status-changed ...
+op_pi git commit ...
+op_pi tmux keyword ...
+op_pi tmux stale ...
+op_pi tmux new -s <session> --channel <id> --keywords error,complete --shell /bin/zsh -- command
+op_pi tmux watch -s <existing-session> --channel <id> --mention '<@id>' --keywords error,complete
 ```
 
 ## Lifecycle surface
 
 ```bash
-op-pi install
-op-pi install --systemd
-op-pi install --skip-star-prompt
-op-pi update --restart
-op-pi uninstall --remove-systemd --remove-config
+op_pi install
+op_pi install --systemd
+op_pi install --skip-star-prompt
+op_pi update --restart
+op_pi uninstall --remove-systemd --remove-config
 ./install.sh
 ./install.sh --systemd
 ./install.sh --skip-star-prompt
@@ -78,30 +78,30 @@ op-pi uninstall --remove-systemd --remove-config
 
 ## Discord bot token (recommended setup)
 
-⚠️ **Create a dedicated Discord bot for op-pi notifications.** Do not reuse your Clawdbot / OpenClaw bot token.
+⚠️ **Create a dedicated Discord bot for op_pi notifications.** Do not reuse your Clawdbot / OpenClaw bot token.
 
 Why:
-- op-pi sends high-volume notifications (commits, PRs, tmux events)
+- op_pi sends high-volume notifications (commits, PRs, tmux events)
 - Using the same bot token as your gateway pollutes the bot's identity
 - A separate bot (e.g. "CCNotifier") keeps notifications cleanly separated from AI chat
-- If op-pi restarts or crashes, it won't affect your main bot
+- If op_pi restarts or crashes, it won't affect your main bot
 
 Setup:
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application (e.g. "op-pi-notifier" or "CCNotifier")
+2. Create a new application (e.g. "op_pi-notifier" or "CCNotifier")
 3. Create a bot, copy the token
 4. Invite the bot to your server with Send Messages permission
-5. Use this token in `~/.op-pi/config.toml`:
+5. Use this token in `~/.op_pi/config.toml`:
 
 ```toml
-[discord]
-token = "your-dedicated-op-pi-bot-token"
+[providers.discord]
+bot_token = "your-dedicated-op_pi-bot-token"
 ```
 
 ## Config scaffold expectations
 
 Key sections:
-- `[discord]`
+- `[providers.discord]`
 - `[daemon]`
 - `[defaults]`
 - `[[routes]]`
@@ -114,7 +114,7 @@ Typical preset route:
 ```toml
 [[routes]]
 event = "github.*"
-filter = { repo = "op-pi" }
+filter = { repo = "op_pi" }
 channel = "1480171113253175356"
 mention = "<@1465264645320474637>"
 format = "compact"
@@ -139,7 +139,7 @@ Allowed dynamic tokens:
 
 ## Filesystem-offloaded memory pattern
 
-When using op-pi as part of a broader Claw OS workflow, treat memory as an offloaded filesystem tree:
+When using op_pi as part of a broader Claw OS workflow, treat memory as an offloaded filesystem tree:
 
 - `MEMORY.md` = small pointer/index/current-beliefs layer
 - `memory/` = detailed project/channel/daily/handoff memory
@@ -156,7 +156,7 @@ Read before adopting this pattern:
 
 Use the live operational runbook:
 - `docs/live-verification.md`
-- `scripts/live-verify-default-presets.sh`
+- `scripts/live_verify_default_presets.sh`
 
 Preset verification targets:
 - GitHub issue opened / commented / closed

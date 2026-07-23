@@ -1,6 +1,6 @@
 # AWS / Cloudflare Intake
 
-op-pi daemon accepts push webhooks from AWS and Cloudflare and normalizes
+op_pi daemon accepts push webhooks from AWS and Cloudflare and normalizes
 them into typed events that route through the standard router/renderer/sink
 pipeline.
 
@@ -18,7 +18,7 @@ pipeline.
 ```toml
 [aws]
 # SNS TopicArn allowlist. Empty = accept every topic.
-topic_allowlist = ["arn:aws:sns:us-east-1:123456789012:op-pi-alarms"]
+topic_allowlist = ["arn:aws:sns:us-east-1:123456789012:op_pi-alarms"]
 # Optional shared secret for /aws/eventbridge, checked against the `x-api-key`
 # header. EventBridge API destination connections support API-key auth — use it.
 webhook_secret = "random-long-secret"
@@ -74,5 +74,5 @@ format = "alert"
 [[routes]]
 event = "aws.eventbridge.guardduty-*"
 sink = "localfile"
-local_path = "/var/log/op-pi/security.jsonl"
+local_path = "/var/log/op_pi/security.jsonl"
 ```

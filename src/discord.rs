@@ -75,7 +75,6 @@ impl DiscordClient {
             None
         };
         let api_base = std::env::var("OP_PI_DISCORD_API_BASE")
-            .or_else(|_| std::env::var("CLAWHIP_DISCORD_API_BASE"))
             .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
         let webhook_client = reqwest::Client::new();
 
@@ -283,7 +282,7 @@ impl DiscordClient {
             channel_id
         );
         let client = self.bot_client.as_ref().ok_or_else(|| DiscordSendError {
-            message: "missing Discord bot token for channel delivery; configure [providers.discord].token (or legacy [discord].token) or use a route webhook".to_string(),
+            message: "missing Discord bot token for channel delivery; configure [providers.discord].bot_token or use a route webhook".to_string(),
             retry_after: None,
             status: None,
         })?;
@@ -306,7 +305,7 @@ impl DiscordClient {
             thread_id
         );
         let client = self.bot_client.as_ref().ok_or_else(|| DiscordSendError {
-            message: "missing Discord bot token for thread delivery; configure [providers.discord].token (or legacy [discord].token) or use a channel/webhook route".to_string(),
+            message: "missing Discord bot token for thread delivery; configure [providers.discord].bot_token or use a channel/webhook route".to_string(),
             retry_after: None,
             status: None,
         })?;
@@ -461,7 +460,7 @@ impl DiscordClient {
         }));
 
         eprintln!(
-            "op-pi dlq bury: {}",
+            "op_pi dlq bury: {}",
             serde_json::to_string(&entry)
                 .unwrap_or_else(|_| "{\"error\":\"dlq serialize failed\"}".to_string())
         );
@@ -787,7 +786,7 @@ mod tests {
         let server = tokio::spawn(serve_once(
             listener,
             "HTTP/1.1 200 OK",
-            r#"{"id":"1480171113253175356","name":"op-pi-dev","type":0}"#,
+            r#"{"id":"1480171113253175356","name":"op_pi-dev","type":0}"#,
         ));
 
         let client =
@@ -798,7 +797,7 @@ mod tests {
         match lookup {
             ChannelLookup::Found { id, name } => {
                 assert_eq!(id, "1480171113253175356");
-                assert_eq!(name.as_deref(), Some("op-pi-dev"));
+                assert_eq!(name.as_deref(), Some("op_pi-dev"));
             }
             other => panic!("expected Found, got {other:?}"),
         }
@@ -917,7 +916,7 @@ mod tests {
             event_kind: "github.ci-failed".into(),
             format: MessageFormat::Alert,
             content: "boom".into(),
-            payload: json!({"repo":"op-pi", "correlation_id":"corr-214"}),
+            payload: json!({"repo":"op_pi", "correlation_id":"corr-214"}),
             telemetry: None,
         };
         let error = client
@@ -931,7 +930,7 @@ mod tests {
         server.await.unwrap();
         let dlq = client.dlq_entries();
         assert_eq!(dlq.len(), 1);
-        assert_eq!(dlq[0].payload["repo"], "op-pi");
+        assert_eq!(dlq[0].payload["repo"], "op_pi");
         assert_eq!(dlq[0].retry_count, 3);
         assert!(dlq[0].target.starts_with("discord:webhook:"));
         assert!(!dlq[0].target.contains(&format!("http://{addr}/webhook")));
@@ -947,7 +946,7 @@ mod tests {
             event_kind: "github.ci-failed".into(),
             format: MessageFormat::Alert,
             content: "boom".into(),
-            payload: json!({"repo":"op-pi", "correlation_id":"corr-214"}),
+            payload: json!({"repo":"op_pi", "correlation_id":"corr-214"}),
             telemetry: None,
         };
         let target = SinkTarget::DiscordWebhook(

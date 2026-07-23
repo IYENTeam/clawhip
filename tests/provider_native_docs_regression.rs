@@ -13,8 +13,8 @@ const DOCS_WITHOUT_LEGACY_SURFACES: &[&str] = &[
 ];
 
 const FORBIDDEN_SURFACES: &[&str] = &[
-    "op-pi omx",
-    "op-pi omc",
+    "op_pi omx",
+    "op_pi omc",
     "/api/omx/hook",
     "skills/omx",
     "skills/omc",
@@ -63,7 +63,7 @@ fn provider_native_contract_docs_list_all_shared_events() {
             );
         }
         assert!(
-            contents.contains("op-pi native hook"),
+            contents.contains("op_pi native hook"),
             "{relative} should reference the generic provider-native ingress"
         );
     }

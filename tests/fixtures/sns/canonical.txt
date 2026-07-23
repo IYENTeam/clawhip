@@ -7,6 +7,6 @@ ALARM: ServerCpuTooHigh
 Timestamp
 2026-07-22T12:00:01.000Z
 TopicArn
-arn:aws:sns:us-east-1:123456789012:clawhip-alarms
+arn:aws:sns:us-east-1:123456789012:op_pi-alarms
 Type
 Notification

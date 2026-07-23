@@ -260,5 +260,5 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: op-pi-linux-x86_64
-          path: target/release/op-pi
+          name: op_pi-linux-x86_64
+          path: target/release/op_pi

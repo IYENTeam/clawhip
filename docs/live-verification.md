@@ -4,7 +4,7 @@ This document is for **real operational verification**, not mock-only tests.
 
 ## Preconditions
 
-- running `op-pi` daemon
+- running `op_pi` daemon
 - real Discord bot token with access to the test channel
 - real GitHub auth (`gh auth status` should succeed)
 - tmux installed locally
@@ -13,7 +13,7 @@ This document is for **real operational verification**, not mock-only tests.
 Recommended environment:
 
 ```bash
-export OP_PI_REPO=IYENTeam/op-pi
+export OP_PI_REPO=IYENTeam/op_pi
 export OP_PI_CHANNEL=TEST_CHANNEL_ID
 export OP_PI_DAEMON_URL=http://127.0.0.1:25294
 export OP_PI_BOT_TOKEN='<discord-bot-token>'
@@ -57,37 +57,37 @@ Operational flow:
 ### Provider-native Codex + Claude contract
 
 - shared event set: `SessionStart`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`
-- generic ingestion via `op-pi native hook --provider <codex|claude>`
+- generic ingestion via `op_pi native hook --provider <codex|claude>`
 
 Operational flow:
 
 1. Enable provider-native hooks in a real Codex or Claude Code workspace:
-   - Codex: `op-pi hooks install --provider codex --scope global` or `--scope project` (matching the official Codex `hooks.json` search locations)
-   - Claude Code: `op-pi hooks install --provider claude-code --scope global`
+   - Codex: `op_pi hooks install --provider codex --scope global` or `--scope project` (matching the official Codex `hooks.json` search locations)
+   - Claude Code: `op_pi hooks install --provider claude-code --scope global`
 2. Pipe one representative Codex payload through the generic native ingress:
 
 ```bash
 printf '%s\n' '{
   "session_id": "sess-65",
-  "cwd": "/repo/op-pi",
+  "cwd": "/repo/op_pi",
   "event": "SessionStart"
-}' | op-pi native hook --provider codex
+}' | op_pi native hook --provider codex
 ```
 
-3. Confirm op-pi accepts it and renders a stable lifecycle message with project/repo context.
+3. Confirm op_pi accepts it and renders a stable lifecycle message with project/repo context.
 4. Repeat with a representative Claude payload:
 
 ```bash
 printf '%s\n' '{
   "session_id": "sess-65",
-  "cwd": "/repo/op-pi",
+  "cwd": "/repo/op_pi",
   "event": "SessionStart"
-}' | op-pi native hook --provider claude
+}' | op_pi native hook --provider claude
 ```
 
 5. Confirm both providers normalize into the same shared route family.
 6. Send representative payloads for `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `Stop`.
-7. Confirm additive augmentation still preserves the base routing keys when `.op-pi/hooks/` is enabled.
+7. Confirm additive augmentation still preserves the base routing keys when `.op_pi/hooks/` is enabled.
 
 ### tmux presets
 
@@ -102,7 +102,7 @@ Operational flow:
 3. Confirm routed delivery in Discord.
 4. Print a configured keyword (`error`, `FAILED`, `PR created`, etc) only when intentionally testing keyword behavior.
 5. Leave the session idle beyond the stale threshold only when intentionally testing stale behavior.
-6. Inspect `op-pi tmux list` to confirm exactly which watch registrations exist.
+6. Inspect `op_pi tmux list` to confirm exactly which watch registrations exist.
 7. If alert text disagrees with pane reality, treat it as monitor noise and debug registration overlap / stale math before assuming session failure.
 
 ## Helper script
@@ -110,7 +110,7 @@ Operational flow:
 A helper script is included:
 
 ```bash
-scripts/live-verify-default-presets.sh <mode>
+scripts/live_verify_default_presets.sh <mode>
 ```
 
 Available modes:
@@ -130,7 +130,7 @@ The script is intentionally conservative: it prints the live workflow and fetche
 
 On March 8, 2026, a real validation was run for the GitHub issue-opened monitor path:
 
-- real issue created on `IYENTeam/op-pi`
+- real issue created on `IYENTeam/op_pi`
 - daemon monitor emitted `github.issue-opened`
 - real Discord delivery observed with route-level mention prepended
 - issue closed after verification
@@ -138,6 +138,6 @@ On March 8, 2026, a real validation was run for the GitHub issue-opened monitor 
 On March 11, 2026, a real validation was run for the custom send path:
 
 - local daemon health/status returned ok on `http://127.0.0.1:25294`
-- `cargo run -q -- send --message "🧪 op-pi live verification (...)"` exited successfully
-- guild-wide search confirmed actual Discord delivery by the `op-pi` webhook bot
+- `cargo run -q -- send --message "🧪 op_pi live verification (...)"` exited successfully
+- guild-wide search confirmed actual Discord delivery by the `op_pi` webhook bot
 - delivery landed in the configured test channel, confirming the configured wildcard webhook route was active

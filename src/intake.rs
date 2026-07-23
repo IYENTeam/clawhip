@@ -1,7 +1,7 @@
 //! External intake normalization for AWS and Cloudflare webhooks.
 //!
 //! Each source has a pure `normalize_*` function that maps the provider's
-//! wire format into an [`IncomingEvent`] following op-pi's event model, so
+//! wire format into an [`IncomingEvent`] following op_pi's event model, so
 //! daemon handlers stay thin and the mapping is unit-testable.
 
 use std::collections::HashMap;
@@ -541,7 +541,7 @@ mod tests {
         json!({
             "Type": "Notification",
             "MessageId": "22b80b92-idea",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
             "Subject": "ALARM: \"ServerCpuTooHigh\" in US East (N. Virginia)",
             "Message": "{\"AlarmName\":\"ServerCpuTooHigh\",\"NewStateValue\":\"ALARM\",\"OldStateValue\":\"OK\",\"NewStateReason\":\"Threshold Crossed\",\"StateChangeTime\":\"2026-07-22T12:00:00.000+0000\",\"Region\":\"US East (N. Virginia)\",\"AlarmArn\":\"arn:aws:cloudwatch:us-east-1:123456789012:alarm:ServerCpuTooHigh\",\"Trigger\":{\"MetricName\":\"CPUUtilization\"}}",
             "Timestamp": "2026-07-22T12:00:01.000Z"
@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(event.payload["old_state"], "OK");
         assert_eq!(
             event.payload["topic_arn"],
-            "arn:aws:sns:us-east-1:123456789012:op-pi-alarms"
+            "arn:aws:sns:us-east-1:123456789012:op_pi-alarms"
         );
         assert_eq!(event.payload["message_id"], "22b80b92-idea");
     }
@@ -587,7 +587,7 @@ mod tests {
             "Type": "SubscriptionConfirmation",
             "MessageId": "165545c9",
             "Token": "2336412f37",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
             "Message": "You have chosen to subscribe ...",
             "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=2336412f37",
             "Timestamp": "2026-07-22T12:00:01.000Z"
@@ -610,7 +610,7 @@ mod tests {
         let unsubscribe = json!({
             "Type": "UnsubscribeConfirmation",
             "MessageId": "x",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op-pi-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
             "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc"
         });
         let event = normalize_sns_envelope(&unsubscribe).unwrap();
@@ -619,11 +619,11 @@ mod tests {
 
     #[test]
     fn topic_allowlist_enforced() {
-        let allowlist = vec!["arn:aws:sns:us-east-1:123456789012:op-pi-alarms".to_string()];
+        let allowlist = vec!["arn:aws:sns:us-east-1:123456789012:op_pi-alarms".to_string()];
 
         assert!(topic_allowed(
             &allowlist,
-            "arn:aws:sns:us-east-1:123456789012:op-pi-alarms"
+            "arn:aws:sns:us-east-1:123456789012:op_pi-alarms"
         ));
         assert!(!topic_allowed(
             &allowlist,
@@ -766,7 +766,7 @@ mod sns_signature_tests {
         json!({
             "Type": "Notification",
             "MessageId": "22b80b92",
-            "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+            "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
             "Subject": "ALARM: ServerCpuTooHigh",
             "Message": "{\"AlarmName\":\"ServerCpuTooHigh\",\"NewStateValue\":\"ALARM\"}",
             "Timestamp": "2026-07-22T12:00:01.000Z",

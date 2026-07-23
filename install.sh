@@ -2,8 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GITHUB_REPO="IYENTeam/op-pi"
-INSTALLER_URL="${OP_PI_INSTALLER_URL:-${CLAWHIP_INSTALLER_URL:-https://github.com/${GITHUB_REPO}/releases/latest/download/op-pi-installer.sh}}"
+GITHUB_REPO="IYENTeam/op_pi"
+INSTALLER_URL="${OP_PI_INSTALLER_URL:-https://github.com/${GITHUB_REPO}/releases/latest/download/op_pi-installer.sh}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_HOME
 SYSTEMD=0
@@ -26,7 +26,6 @@ Environment:
   OP_PI_WEBHOOK_URL=<url>
       Provide the Discord webhook URL for quick-start setup.
 
-Legacy CLAWHIP_* environment variables remain supported during migration.
 EOF
 }
 
@@ -49,7 +48,7 @@ parse_args() {
 }
 
 log() {
-  echo "[op-pi] $*"
+  echo "[op_pi] $*"
 }
 
 is_truthy() {
@@ -60,7 +59,7 @@ is_truthy() {
 }
 
 star_prompt_disabled() {
-  is_truthy "${OP_PI_SKIP_STAR_PROMPT:-}" || is_truthy "${CLAWHIP_SKIP_STAR_PROMPT:-}" || is_truthy "${SKIP_STAR_PROMPT:-}"
+  [[ "$SKIP_STAR_PROMPT" == "1" ]] || is_truthy "${OP_PI_SKIP_STAR_PROMPT:-}"
 }
 
 is_interactive_install() {
@@ -77,7 +76,7 @@ star_repo_with_gh() {
 
 prompt_to_star_repo() {
   local response
-  printf '[op-pi] Would you like to star %s on GitHub with gh? [y/N]: ' "$GITHUB_REPO"
+  printf '[op_pi] Would you like to star %s on GitHub with gh? [y/N]: ' "$GITHUB_REPO"
   read -r response || return 0
 
   case "$response" in
@@ -145,10 +144,10 @@ install_prebuilt_binary() {
 install_from_source() {
   if ! command -v cargo >/dev/null 2>&1; then
     cat >&2 <<'MSG'
-[op-pi] A prebuilt binary was not available and Cargo is not installed.
-[op-pi] Install Rust with rustup, then rerun this installer:
-[op-pi]   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-[op-pi]   source "$HOME/.cargo/env"
+[op_pi] A prebuilt binary was not available and Cargo is not installed.
+[op_pi] Install Rust with rustup, then rerun this installer:
+[op_pi]   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+[op_pi]   source "$HOME/.cargo/env"
 MSG
     exit 1
   fi
@@ -158,40 +157,9 @@ MSG
   cargo install --path . --force
 }
 
-copy_missing_dir_contents() {
-  local source_dir="$1"
-  local destination_dir="$2"
-  local source_path name destination_path
-
-  mkdir -p "$destination_dir"
-  for source_path in "$source_dir"/* "$source_dir"/.[!.]* "$source_dir"/..?*; do
-    if [[ ! -e "$source_path" && ! -L "$source_path" ]]; then
-      continue
-    fi
-    name="${source_path##*/}"
-    destination_path="$destination_dir/$name"
-    if [[ -d "$source_path" && ! -L "$source_path" ]]; then
-      copy_missing_dir_contents "$source_path" "$destination_path"
-    elif [[ ! -e "$destination_path" && ! -L "$destination_path" ]]; then
-      cp -Pp "$source_path" "$destination_path"
-    fi
-  done
-}
-
-migrate_legacy_data() {
-  local legacy_dir="$HOME/.clawhip"
-  local current_dir="$HOME/.op-pi"
-
-  mkdir -p "$current_dir"
-  if [[ -d "$legacy_dir" ]]; then
-    copy_missing_dir_contents "$legacy_dir" "$current_dir"
-    log "migrated missing config and state from $legacy_dir to $current_dir"
-  fi
-}
-
 sync_plugins() {
   local source_dir="$REPO_ROOT/plugins"
-  local target_dir="$HOME/.op-pi/plugins"
+  local target_dir="$HOME/.op_pi/plugins"
 
   if [[ ! -d "$source_dir" ]]; then
     return 0
@@ -203,41 +171,32 @@ sync_plugins() {
 }
 
 installed_binary_path() {
-  if [[ -x "$CARGO_HOME/bin/op-pi" ]]; then
-    printf '%s\n' "$CARGO_HOME/bin/op-pi"
+  if [[ -x "$CARGO_HOME/bin/op_pi" ]]; then
+    printf '%s\n' "$CARGO_HOME/bin/op_pi"
     return 0
   fi
 
-  if command -v op-pi >/dev/null 2>&1; then
-    command -v op-pi
+  if command -v op_pi >/dev/null 2>&1; then
+    command -v op_pi
     return 0
   fi
 
   return 1
 }
 
-ensure_legacy_binary_link() {
-  local binary_path binary_dir
-  binary_path="$(installed_binary_path)" || return 1
-  binary_dir="$(dirname "$binary_path")"
-  rm -f "$binary_dir/clawhip"
-  ln -s op-pi "$binary_dir/clawhip"
-  log "linked $binary_dir/clawhip to $binary_path"
-}
-
 setup_quick_start() {
   local binary_path
   binary_path="$(installed_binary_path)" || return 0
 
-  local config_path="$HOME/.op-pi/config.toml"
+  local config_path="$HOME/.op_pi/config.toml"
   if [[ -f "$config_path" ]]; then
     log "existing config found at $config_path; skipping quick-start scaffold"
     return 0
   fi
 
-  local webhook_url="${OP_PI_WEBHOOK_URL:-${CLAWHIP_WEBHOOK_URL:-}}"
+  local webhook_url="${OP_PI_WEBHOOK_URL:-}"
   if [[ -z "${webhook_url// }" && -t 0 ]]; then
-    printf '[op-pi] Discord webhook URL (recommended quick start; press Enter to skip): '
+    printf '[op_pi] Discord webhook URL (recommended quick start; press Enter to skip): '
     read -r webhook_url || true
   fi
 
@@ -246,22 +205,20 @@ setup_quick_start() {
     "$binary_path" setup --webhook "$webhook_url"
     log "webhook config scaffolded at $config_path"
   else
-    log "recommended quick start: op-pi setup --webhook 'https://discord.com/api/webhooks/...'"
-    log "bot-token mode is still supported via ~/.op-pi/config.toml"
+    log "recommended quick start: op_pi setup --webhook 'https://discord.com/api/webhooks/...'"
+    log "bot-token mode is still supported via ~/.op_pi/config.toml"
   fi
 }
 
 install_systemd_binary() {
   local binary_path
   binary_path="$(installed_binary_path)" || {
-    log "unable to find installed op-pi binary for systemd setup"
+    log "unable to find installed op_pi binary for systemd setup"
     exit 1
   }
 
-  log "installing $binary_path to /usr/local/bin/op-pi for systemd"
-  sudo install -m 755 "$binary_path" /usr/local/bin/op-pi
-  sudo rm -f /usr/local/bin/clawhip
-  sudo ln -s op-pi /usr/local/bin/clawhip
+  log "installing $binary_path to /usr/local/bin/op_pi for systemd"
+  sudo install -m 755 "$binary_path" /usr/local/bin/op_pi
 }
 
 main() {
@@ -276,26 +233,23 @@ main() {
     install_from_source
   fi
 
-  migrate_legacy_data
-  log "ensured config dir $HOME/.op-pi"
+  mkdir -p "$HOME/.op_pi"
+  log "ensured config dir $HOME/.op_pi"
   sync_plugins
-  ensure_legacy_binary_link
   log "next: read SKILL.md and attach the skill surface"
   setup_quick_start
 
   if [[ "$SYSTEMD" == "1" ]]; then
     install_systemd_binary
-    sudo systemctl disable --now clawhip 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/clawhip.service
-    sudo cp deploy/op-pi.service /etc/systemd/system/op-pi.service
+    sudo cp deploy/op_pi.service /etc/systemd/system/op_pi.service
     sudo systemctl daemon-reload
-    sudo systemctl enable --now op-pi
+    sudo systemctl enable --now op_pi
     log "systemd unit installed and started"
   fi
 
   maybe_prompt_to_star_repo
 
-  log "recommended verification: scripts/live-verify-default-presets.sh <mode>"
+  log "recommended verification: scripts/live_verify_default_presets.sh <mode>"
   log "install complete"
 }
 

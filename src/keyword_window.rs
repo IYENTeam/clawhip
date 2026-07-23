@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 const LAUNCHER_NOISE_PATTERNS: &[&str] = &[
-    "op-pi emit agent.started",
-    "op-pi emit agent.finished",
-    "op-pi emit agent.failed",
-    "clawhip emit agent.started",
-    "clawhip emit agent.finished",
-    "clawhip emit agent.failed",
+    "op_pi emit agent.started",
+    "op_pi emit agent.finished",
+    "op_pi emit agent.failed",
+    "op_pi emit agent.started",
+    "op_pi emit agent.finished",
+    "op_pi emit agent.failed",
     "function else>",
     "registered_at=",
     "parent_pid=",
@@ -339,7 +339,7 @@ mod tests {
     fn collect_keyword_hits_ignores_wrapper_lifecycle_emit_lines() {
         let hits = collect_keyword_hits(
             "boot",
-            "boot\nfunction else>     op-pi emit agent.failed --agent omx --session omx-pr-1340-review --project oh-my-codex --elapsed \"$elapsed\" --error \"exit $exit_code\" --mention '<@1465264645320474637>' || true\nclawhip emit agent.started --agent legacy\nerror: real failure",
+            "boot\nfunction else>     op_pi emit agent.failed --agent omx --session omx-pr-1340-review --project oh-my-codex --elapsed \"$elapsed\" --error \"exit $exit_code\" --mention '<@1465264645320474637>' || true\nop_pi emit agent.started --agent legacy\nerror: real failure",
             &["error".into(), "FAILED".into(), "started".into()],
         );
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CHANNEL_ARGS=()
-channel="${OP_PI_CHANNEL:-${CLAWHIP_CHANNEL:-}}"
+channel="${OP_PI_CHANNEL:-}"
 if [[ -n "$channel" ]]; then
   CHANNEL_ARGS=(--channel "$channel")
 fi
@@ -12,7 +12,7 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 commit=$(git rev-parse HEAD)
 summary=$(git log -1 --pretty=%s)
 
-exec op-pi git commit \
+exec op_pi git commit \
   --repo "$repo" \
   --branch "$branch" \
   --commit "$commit" \

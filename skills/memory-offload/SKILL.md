@@ -1,4 +1,4 @@
-# op-pi × filesystem-offloaded memory
+# op_pi × filesystem-offloaded memory
 
 Use this skill when you want a Claw OS-style memory system where `MEMORY.md` stays small and points into a structured `memory/` tree.
 

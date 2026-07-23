@@ -7,11 +7,9 @@ use serde_json::{Map, Value, json};
 use crate::Result;
 
 #[allow(dead_code)]
-pub const OP_PI_DIR: &str = ".op-pi";
-pub const OP_PI_PROJECT_FILE: &str = ".op-pi/project.json";
-pub const HOOK_SCRIPT: &str = ".op-pi/hooks/native-hook.mjs";
-const LEGACY_CLAWHIP_PROJECT_FILE: &str = ".clawhip/project.json";
-const LEGACY_CLAWHIP_HOOK_SCRIPT: &str = ".clawhip/hooks/native-hook.mjs";
+pub const OP_PI_DIR: &str = ".op_pi";
+pub const OP_PI_PROJECT_FILE: &str = ".op_pi/project.json";
+pub const HOOK_SCRIPT: &str = ".op_pi/hooks/native-hook.mjs";
 #[allow(dead_code)]
 pub const PROJECT_METADATA_RELATIVE_PATH: &str = OP_PI_PROJECT_FILE;
 #[allow(dead_code)]
@@ -380,7 +378,6 @@ pub fn incoming_event_from_native_hook_json(
 #[allow(dead_code)]
 pub fn native_hooks_installed(workdir: &Path) -> bool {
     workdir.join(HOOK_SCRIPT).is_file()
-        || workdir.join(LEGACY_CLAWHIP_HOOK_SCRIPT).is_file()
         || workdir.join(CLAUDE_SETTINGS_FILE).is_file()
         || workdir.join(CODEX_HOOKS_FILE).is_file()
         || workdir.join(CODEX_CONFIG_FILE).is_file()
@@ -424,11 +421,8 @@ function runGit(args, cwd) {
 }
 
 function loadProjectMetadata(root) {
-  for (const directory of ['.op-pi', '.clawhip']) {
-    const path = join(root, directory, 'project.json');
-    if (existsSync(path)) return parseJson(readFileSync(path, 'utf8'), null);
-  }
-  return null;
+  const path = join(root, '.op_pi', 'project.json');
+  return existsSync(path) ? parseJson(readFileSync(path, 'utf8'), null) : null;
 }
 
 function inferRepoRoot(cwd) {
@@ -491,10 +485,8 @@ function mergeAdditive(base, extra) {
 }
 
 async function collectAugmentation(root, payload) {
-  const augmentDir = ['.op-pi/hooks/augment', '.clawhip/hooks/augment']
-    .map((relativePath) => join(root, relativePath))
-    .find(existsSync);
-  if (!augmentDir) return null;
+  const augmentDir = join(root, '.op_pi/hooks/augment');
+  if (!existsSync(augmentDir)) return null;
 
   let merged = {};
   for (const entry of readdirSync(augmentDir)) {
@@ -621,7 +613,7 @@ function maybeWritePromptSubmitState(repoRoot, provider, eventName, input) {
 
   try {
     const promptText = input.prompt || input.user_prompt || input.message || '';
-    const path = join(repoRoot, '.op-pi', 'state', 'prompt-submit.json');
+    const path = join(repoRoot, '.op_pi', 'state', 'prompt-submit.json');
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify({
       observed_at: new Date().toISOString(),
@@ -640,10 +632,8 @@ function maybeEnrichStopEvent(repoRoot, payload, eventName) {
     return;
   }
   try {
-    const path = ['.op-pi', '.clawhip']
-      .map((directory) => join(repoRoot, directory, 'state', 'prompt-submit.json'))
-      .find(existsSync);
-    if (!path) return;
+    const path = join(repoRoot, '.op_pi', 'state', 'prompt-submit.json');
+    if (!existsSync(path)) return;
     const raw = readFileSync(path, 'utf8');
     const state = parseJson(raw, null);
     if (!state) return;
@@ -656,7 +646,7 @@ function maybeEnrichStopEvent(repoRoot, payload, eventName) {
 }
 
 async function main() {
-  const provider = arg('--provider') || process.env.OP_PI_PROVIDER || process.env.CLAWHIP_PROVIDER || 'unknown';
+  const provider = arg('--provider') || process.env.OP_PI_PROVIDER || 'unknown';
   const cwd = process.cwd();
   const raw = await readStdin();
   const input = parseJson(raw, {});
@@ -715,7 +705,7 @@ async function main() {
   maybeWritePromptSubmitState(worktreeRoot, provider, eventName, input);
   maybeEnrichStopEvent(worktreeRoot, payload, eventName);
 
-  const result = spawnSync('op-pi', ['native', 'hook', '--provider', provider], {
+  const result = spawnSync('op_pi', ['native', 'hook', '--provider', provider], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -726,7 +716,7 @@ async function main() {
       result.error && typeof result.error.message === 'string' && result.error.message.trim()
         ? result.error.message.trim()
         : String(result.error);
-    console.error(`[op-pi] failed to launch native hook bridge: ${detail}`);
+    console.error(`[op_pi] failed to launch native hook bridge: ${detail}`);
     process.exit(typeof result.status === 'number' ? result.status : 1);
   }
 
@@ -734,7 +724,7 @@ async function main() {
     if (typeof result.stderr === 'string' && result.stderr.trim()) {
       process.stderr.write(result.stderr);
     }
-    console.error(`[op-pi] native hook bridge exited with status ${result.status}`);
+    console.error(`[op_pi] native hook bridge exited with status ${result.status}`);
     process.exit(result.status);
   }
 
@@ -742,7 +732,7 @@ async function main() {
     if (typeof result.stderr === 'string' && result.stderr.trim()) {
       process.stderr.write(result.stderr);
     }
-    console.error(`[op-pi] native hook bridge terminated by signal ${result.signal}`);
+    console.error(`[op_pi] native hook bridge terminated by signal ${result.signal}`);
     process.exit(1);
   }
 }
@@ -754,7 +744,7 @@ main().catch((error) => {
       : error && typeof error.message === 'string' && error.message.trim()
         ? error.message.trim()
         : String(error);
-  console.error(`[op-pi] native hook wrapper failed: ${detail}`);
+  console.error(`[op_pi] native hook wrapper failed: ${detail}`);
   process.exit(1);
 });
 "#
@@ -992,12 +982,8 @@ fn load_effective_project_metadata(
 }
 
 fn load_project_metadata_file(root: &str) -> Option<Value> {
-    [OP_PI_PROJECT_FILE, LEGACY_CLAWHIP_PROJECT_FILE]
-        .into_iter()
-        .find_map(|relative_path| {
-            let raw = fs::read_to_string(Path::new(root).join(relative_path)).ok()?;
-            serde_json::from_str::<Value>(&raw).ok()
-        })
+    let raw = fs::read_to_string(Path::new(root).join(OP_PI_PROJECT_FILE)).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()
 }
 
 fn canonicalize_repo_name(
@@ -1281,7 +1267,7 @@ mod tests {
         for (event_name, provider, expected_kind) in cases {
             let event = incoming_event_from_native_hook_json(&json!({
                 "provider": provider,
-                "directory": "/repo/op-pi",
+                "directory": "/repo/op_pi",
                 "event_name": event_name,
                 "event_payload": {
                     "tool_name": "Bash",
@@ -1294,7 +1280,7 @@ mod tests {
                 "unexpected kind for {event_name}"
             );
             assert_eq!(event.payload["provider"], json!(provider));
-            assert_eq!(event.payload["repo_name"], json!("op-pi"));
+            assert_eq!(event.payload["repo_name"], json!("op_pi"));
         }
     }
 
@@ -1311,7 +1297,7 @@ mod tests {
         for (provider, event_name, tool_name) in cases {
             let event = incoming_event_from_native_hook_json(&json!({
                 "provider": provider,
-                "directory": "/repo/op-pi",
+                "directory": "/repo/op_pi",
                 "event_name": event_name,
                 "session_id": "sess-234",
                 "event_payload": {
@@ -1326,7 +1312,7 @@ mod tests {
             assert_eq!(event.kind, "question.requested", "{provider}:{tool_name}");
             assert_eq!(event.payload["route_key"], json!("question.requested"));
             assert_eq!(event.payload["session_id"], json!("sess-234"));
-            assert_eq!(event.payload["repo_name"], json!("op-pi"));
+            assert_eq!(event.payload["repo_name"], json!("op_pi"));
             assert_eq!(event.payload["tool_name"], json!(tool_name));
             assert_eq!(
                 event.payload["summary"],
@@ -1353,7 +1339,7 @@ mod tests {
         let long_question = format!("{}{}", "A".repeat(200), "\nsecret-ish second line");
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "codex",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "PreToolUse",
             "tool_name": "ask_user_question",
             "tool_input": {
@@ -1373,7 +1359,7 @@ mod tests {
     fn does_not_map_question_marks_or_normal_tools_to_question_requested() {
         let prose_question = incoming_event_from_native_hook_json(&json!({
             "provider": "codex",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "UserPromptSubmit",
             "prompt": "Can you run tests?"
         }))
@@ -1382,7 +1368,7 @@ mod tests {
 
         let normal_tool = incoming_event_from_native_hook_json(&json!({
             "provider": "codex",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {
@@ -1396,13 +1382,13 @@ mod tests {
     #[test]
     fn loads_project_metadata_from_project_json() {
         let dir = tempdir().expect("tempdir");
-        fs::create_dir_all(dir.path().join(".op-pi")).unwrap();
+        fs::create_dir_all(dir.path().join(".op_pi")).unwrap();
         fs::write(
             dir.path().join(OP_PI_PROJECT_FILE),
             serde_json::to_string_pretty(&json!({
-                "id": "op-pi-core",
-                "name": "op-pi",
-                "repo_name": "op-pi"
+                "id": "op_pi-core",
+                "name": "op_pi",
+                "repo_name": "op_pi"
             }))
             .unwrap(),
         )
@@ -1416,40 +1402,19 @@ mod tests {
         }))
         .expect("event");
 
-        assert_eq!(event.payload["project_id"], json!("op-pi-core"));
-        assert_eq!(event.payload["project_name"], json!("op-pi"));
+        assert_eq!(event.payload["project_id"], json!("op_pi-core"));
+        assert_eq!(event.payload["project_name"], json!("op_pi"));
         assert_eq!(
             event.payload["project_metadata"]["repo_name"],
-            json!("op-pi")
+            json!("op_pi")
         );
-    }
-
-    #[test]
-    fn loads_legacy_clawhip_project_metadata_when_op_pi_metadata_is_absent() {
-        let dir = tempdir().expect("tempdir");
-        fs::create_dir_all(dir.path().join(".clawhip")).expect("create legacy metadata dir");
-        fs::write(
-            dir.path().join(LEGACY_CLAWHIP_PROJECT_FILE),
-            r#"{"name":"legacy-project","repo_name":"legacy-repo"}"#,
-        )
-        .expect("write legacy metadata");
-
-        let event = incoming_event_from_native_hook_json(&json!({
-            "provider": "codex",
-            "directory": dir.path(),
-            "event_name": "SessionStart"
-        }))
-        .expect("event");
-
-        assert_eq!(event.payload["project_name"], json!("legacy-project"));
-        assert_eq!(event.payload["repo_name"], json!("legacy-repo"));
     }
 
     #[test]
     fn augmentation_can_add_context_without_overriding_base_fields() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "claude-code",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "SessionStart",
             "augmentation": {
                 "summary": "extra setup context",
@@ -1465,7 +1430,7 @@ mod tests {
         }))
         .expect("event");
 
-        assert_eq!(event.payload["repo_name"], json!("op-pi"));
+        assert_eq!(event.payload["repo_name"], json!("op_pi"));
         assert_eq!(event.payload["summary"], json!("extra setup context"));
         assert_eq!(
             event.payload["message_context"]["repo_name"],
@@ -1477,8 +1442,8 @@ mod tests {
     #[test]
     fn generated_hook_script_mentions_augment_pipeline() {
         let script = generated_hook_script();
-        assert!(script.contains(".op-pi/hooks/augment"));
-        assert!(script.contains("op-pi', ['native', 'hook'"));
+        assert!(script.contains(".op_pi/hooks/augment"));
+        assert!(script.contains("op_pi', ['native', 'hook'"));
     }
 
     #[test]
@@ -1512,7 +1477,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
-        let hook_dir = repo.join(".op-pi/hooks");
+        let hook_dir = repo.join(".op_pi/hooks");
         std::fs::create_dir_all(&hook_dir).expect("create hook dir");
 
         let hook_path = hook_dir.join("native-hook.mjs");
@@ -1525,17 +1490,17 @@ mod tests {
 
         let fake_bin = temp.path().join("bin");
         std::fs::create_dir_all(&fake_bin).expect("create fake bin");
-        let fake_op_pi = fake_bin.join("op-pi");
+        let fake_op_pi = fake_bin.join("op_pi");
         std::fs::write(
             &fake_op_pi,
             "#!/bin/sh\ncat >/dev/null\necho 'fake native hook bridge failure' >&2\nexit 7\n",
         )
-        .expect("write fake op-pi");
+        .expect("write fake op_pi");
         let mut fake_perms = std::fs::metadata(&fake_op_pi)
             .expect("fake metadata")
             .permissions();
         fake_perms.set_mode(0o755);
-        std::fs::set_permissions(&fake_op_pi, fake_perms).expect("chmod fake op-pi");
+        std::fs::set_permissions(&fake_op_pi, fake_perms).expect("chmod fake op_pi");
 
         let path = std::env::var("PATH").unwrap_or_default();
         let mut child = Command::new("node")
@@ -1573,9 +1538,9 @@ mod tests {
     fn preserves_tmux_metadata_from_native_payloads() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "codex",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "SessionStart",
-            "tmux_session": "omx-op-pi-dev",
+            "tmux_session": "omx-op_pi-dev",
             "tmux_window": "3",
             "tmux_pane": "%17",
             "tmux_pane_tty": "/dev/pts/5",
@@ -1585,7 +1550,7 @@ mod tests {
         }))
         .expect("event");
 
-        assert_eq!(event.payload["tmux_session"], json!("omx-op-pi-dev"));
+        assert_eq!(event.payload["tmux_session"], json!("omx-op_pi-dev"));
         assert_eq!(event.payload["tmux_window"], json!("3"));
         assert_eq!(event.payload["tmux_pane"], json!("%17"));
         assert_eq!(event.payload["tmux_pane_tty"], json!("/dev/pts/5"));
@@ -1606,7 +1571,7 @@ mod tests {
     fn generated_hook_script_mentions_prompt_submit_state_recording() {
         let script = generated_hook_script();
         assert!(script.contains("maybeWritePromptSubmitState"));
-        assert!(script.contains(".op-pi', 'state', 'prompt-submit.json"));
+        assert!(script.contains(".op_pi', 'state', 'prompt-submit.json"));
     }
 
     #[test]
@@ -1677,17 +1642,17 @@ mod tests {
             "provider": "codex",
             "event_name": "UserPromptSubmit",
             "repo_name": "launch-fix-native-hook-malfunction",
-            "repo_path": "/mnt/offloading/Workspace/op-pi",
-            "worktree_path": "/mnt/offloading/Workspace/op-pi.omx-worktrees/launch-fix-native-hook-malfunction",
+            "repo_path": "/mnt/offloading/Workspace/op_pi",
+            "worktree_path": "/mnt/offloading/Workspace/op_pi.omx-worktrees/launch-fix-native-hook-malfunction",
             "event_payload": {}
         }))
         .expect("event");
 
-        assert_eq!(event.payload["repo_name"], json!("op-pi"));
+        assert_eq!(event.payload["repo_name"], json!("op_pi"));
         assert_eq!(
             event.payload["worktree_path"],
             json!(
-                "/mnt/offloading/Workspace/op-pi.omx-worktrees/launch-fix-native-hook-malfunction"
+                "/mnt/offloading/Workspace/op_pi.omx-worktrees/launch-fix-native-hook-malfunction"
             )
         );
     }
@@ -1727,14 +1692,14 @@ mod tests {
         }
 
         git(&repo, &["init"]);
-        std::fs::create_dir_all(repo.join(".op-pi")).expect("create op-pi dir");
+        std::fs::create_dir_all(repo.join(".op_pi")).expect("create op_pi dir");
         std::fs::write(
-            repo.join(".op-pi/project.json"),
-            r#"{"name":"op-pi","repo_name":"op-pi"}"#,
+            repo.join(".op_pi/project.json"),
+            r#"{"name":"op_pi","repo_name":"op_pi"}"#,
         )
         .expect("write project metadata");
         std::fs::write(repo.join("README.md"), "init\n").expect("write");
-        git(&repo, &["add", "README.md", ".op-pi/project.json"]);
+        git(&repo, &["add", "README.md", ".op_pi/project.json"]);
         git(
             &repo,
             &[
@@ -1757,7 +1722,7 @@ mod tests {
         let nested = wt.join("src/bin");
         std::fs::create_dir_all(&nested).expect("create nested dir");
 
-        let hook_dir = repo.join(".op-pi/hooks");
+        let hook_dir = repo.join(".op_pi/hooks");
         std::fs::create_dir_all(&hook_dir).expect("create hook dir");
         let hook_path = hook_dir.join("native-hook.mjs");
         std::fs::write(&hook_path, generated_hook_script()).expect("write hook script");
@@ -1770,17 +1735,17 @@ mod tests {
         let fake_bin = temp.path().join("bin");
         std::fs::create_dir_all(&fake_bin).expect("create fake bin");
         let capture_path = temp.path().join("captured.json");
-        let fake_op_pi = fake_bin.join("op-pi");
+        let fake_op_pi = fake_bin.join("op_pi");
         std::fs::write(
             &fake_op_pi,
             format!("#!/bin/sh\ncat > '{}'\nexit 0\n", capture_path.display()),
         )
-        .expect("write fake op-pi");
+        .expect("write fake op_pi");
         let mut fake_perms = std::fs::metadata(&fake_op_pi)
             .expect("fake metadata")
             .permissions();
         fake_perms.set_mode(0o755);
-        std::fs::set_permissions(&fake_op_pi, fake_perms).expect("chmod fake op-pi");
+        std::fs::set_permissions(&fake_op_pi, fake_perms).expect("chmod fake op_pi");
 
         let path = std::env::var("PATH").unwrap_or_default();
         let mut child = Command::new("node")
@@ -1821,10 +1786,10 @@ mod tests {
             captured["worktree_path"],
             json!(wt.canonicalize().expect("canonical worktree"))
         );
-        assert_eq!(captured["repo_name"], json!("op-pi"));
-        assert_eq!(captured["project_name"], json!("op-pi"));
+        assert_eq!(captured["repo_name"], json!("op_pi"));
+        assert_eq!(captured["project_name"], json!("op_pi"));
         assert!(
-            wt.join(".op-pi/state/prompt-submit.json").is_file(),
+            wt.join(".op_pi/state/prompt-submit.json").is_file(),
             "prompt-submit marker should be stored in the worktree root"
         );
     }
@@ -1833,7 +1798,7 @@ mod tests {
     fn stop_event_payload_surfaces_stop_context_summary() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "claude-code",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "Stop",
             "stop_context": {
                 "last_prompt_at": "2026-04-10T12:34:56Z",
@@ -1867,7 +1832,7 @@ mod tests {
     fn stop_event_without_stop_context_does_not_invent_summary() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "claude-code",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "Stop"
         }))
         .expect("event");
@@ -1882,7 +1847,7 @@ mod tests {
     fn stop_event_respects_preexisting_summary_over_stop_context() {
         let event = incoming_event_from_native_hook_json(&json!({
             "provider": "claude-code",
-            "directory": "/repo/op-pi",
+            "directory": "/repo/op_pi",
             "event_name": "Stop",
             "stop_context": {
                 "last_prompt_summary": "older prompt"

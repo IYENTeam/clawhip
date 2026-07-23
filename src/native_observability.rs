@@ -550,9 +550,9 @@ mod tests {
             payload: json!({
                 "provider": "codex",
                 "hook_event_name": "PostToolUse",
-                "repo_name": "op-pi",
-                "repo_path": "/tmp/op-pi",
-                "worktree_path": "/tmp/op-pi",
+                "repo_name": "op_pi",
+                "repo_path": "/tmp/op_pi",
+                "worktree_path": "/tmp/op_pi",
                 "session_id": session_id,
                 "payload": { "secret": "must-not-appear" }
             }),
@@ -567,7 +567,7 @@ mod tests {
         obs.observe_received_raw(&json!({
             "provider": "codex",
             "event_name": "PostToolUse",
-            "repo_name": "op-pi",
+            "repo_name": "op_pi",
             "session_id": "sess-1"
         }));
         obs.observe_normalized(&event);

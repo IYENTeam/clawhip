@@ -9,7 +9,7 @@ fn runtime_is_configured_from_cli_worker_threads_flag() {
     );
     assert!(
         main_rs.contains("Builder::new_multi_thread()"),
-        "expected op-pi to build the Tokio runtime explicitly"
+        "expected op_pi to build the Tokio runtime explicitly"
     );
     assert!(
         main_rs.contains(".worker_threads(worker_threads)"),

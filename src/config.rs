@@ -13,8 +13,6 @@ use crate::source::workspace::{default_workspace_debounce_ms, default_workspace_
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    #[serde(default, skip_serializing_if = "DiscordConfig::is_empty")]
-    pub discord: DiscordConfig,
     #[serde(default, skip_serializing_if = "ProvidersConfig::is_empty")]
     pub providers: ProvidersConfig,
     #[serde(default)]
@@ -95,8 +93,6 @@ pub struct ProvidersConfig {
 pub struct DiscordConfig {
     #[serde(alias = "token")]
     pub bot_token: Option<String>,
-    #[serde(alias = "default_channel")]
-    pub legacy_default_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -150,7 +146,7 @@ pub struct DaemonConfig {
 
 impl DiscordConfig {
     fn is_empty(&self) -> bool {
-        self.bot_token.is_none() && self.legacy_default_channel.is_none()
+        self.bot_token.is_none()
     }
 }
 
@@ -232,7 +228,7 @@ pub struct RouteRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
     /// Human-readable Discord channel name hint for binding verification.
-    /// When set, `op-pi config verify-bindings` compares the live channel
+    /// When set, `op_pi config verify-bindings` compares the live channel
     /// name against this value to detect drift.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
@@ -737,19 +733,10 @@ pub fn default_sink_name() -> String {
     "discord".to_string()
 }
 
-const DISCORD_TOKEN_ENV_VARS: [&str; 3] = [
-    "OP_PI_DISCORD_BOT_TOKEN",
-    "DISCORD_TOKEN",
-    "CLAWHIP_DISCORD_BOT_TOKEN",
-];
-const SLACK_TOKEN_ENV_VARS: [&str; 3] = [
-    "OP_PI_SLACK_BOT_TOKEN",
-    "SLACK_BOT_TOKEN",
-    "CLAWHIP_SLACK_BOT_TOKEN",
-];
-const DAEMON_URL_ENV_VARS: [&str; 2] = ["OP_PI_DAEMON_URL", "CLAWHIP_DAEMON_URL"];
-const GITHUB_TOKEN_ENV_VARS: [&str; 3] =
-    ["OP_PI_GITHUB_TOKEN", "GITHUB_TOKEN", "CLAWHIP_GITHUB_TOKEN"];
+const DISCORD_TOKEN_ENV_VARS: [&str; 2] = ["OP_PI_DISCORD_BOT_TOKEN", "DISCORD_TOKEN"];
+const SLACK_TOKEN_ENV_VARS: [&str; 2] = ["OP_PI_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN"];
+const DAEMON_URL_ENV_VARS: [&str; 1] = ["OP_PI_DAEMON_URL"];
+const GITHUB_TOKEN_ENV_VARS: [&str; 2] = ["OP_PI_GITHUB_TOKEN", "GITHUB_TOKEN"];
 pub const CONFIG_EDITOR_MENU_ITEMS: [&str; 8] = [
     "Set Discord bot token",
     "Set daemon base URL",
@@ -777,34 +764,6 @@ impl SetupEdits {
             && self.default_channel.is_none()
             && self.default_format.is_none()
             && self.daemon_base_url.is_none()
-    }
-}
-
-fn merge_legacy_discord_field(
-    field: &str,
-    legacy: Option<String>,
-    provider: &mut Option<String>,
-) -> Result<()> {
-    let legacy = normalize_text(legacy);
-    let provider_value = normalize_text(provider.clone());
-
-    match (legacy, provider_value) {
-        (Some(legacy), Some(provider_value)) if legacy != provider_value => Err(format!(
-            "conflicting legacy [discord].{field} and [providers.discord].{field} values"
-        )
-        .into()),
-        (Some(legacy), None) => {
-            *provider = Some(legacy);
-            Ok(())
-        }
-        (_, Some(provider_value)) => {
-            *provider = Some(provider_value);
-            Ok(())
-        }
-        (None, None) => {
-            *provider = None;
-            Ok(())
-        }
     }
 }
 
@@ -857,37 +816,9 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
-        let raw_toml: toml::Value = toml::from_str(&raw)?;
         let mut config: Self = toml::from_str(&raw)?;
-        config.merge_legacy_discord(&raw_toml)?;
         config.normalize();
-        if config.defaults.channel.is_none() {
-            config.defaults.channel = config.discord_default_channel();
-        }
         Ok(config)
-    }
-
-    fn merge_legacy_discord(&mut self, raw_toml: &toml::Value) -> Result<()> {
-        if raw_toml.get("discord").is_some() {
-            merge_legacy_discord_field(
-                "token",
-                self.discord.bot_token.clone(),
-                &mut self.providers.discord.bot_token,
-            )?;
-            merge_legacy_discord_field(
-                "default_channel",
-                self.discord.legacy_default_channel.clone(),
-                &mut self.providers.discord.legacy_default_channel,
-            )?;
-        }
-
-        self.discord = DiscordConfig::default();
-        Ok(())
-    }
-
-    fn discord_default_channel(&self) -> Option<String> {
-        normalize_text(self.providers.discord.legacy_default_channel.clone())
-            .or_else(|| normalize_text(self.discord.legacy_default_channel.clone()))
     }
 
     pub fn to_pretty_toml(&self) -> Result<String> {
@@ -937,7 +868,6 @@ impl AppConfig {
     {
         discord_token_from_env_with(get_env)
             .or_else(|| normalize_secret(self.providers.discord.bot_token.clone()))
-            .or_else(|| normalize_secret(self.discord.bot_token.clone()))
     }
 
     pub fn discord_token_source(&self) -> &'static str {
@@ -950,9 +880,7 @@ impl AppConfig {
     {
         if discord_token_from_env_with(get_env).is_some() {
             "env"
-        } else if normalize_secret(self.providers.discord.bot_token.clone()).is_some()
-            || normalize_secret(self.discord.bot_token.clone()).is_some()
-        {
+        } else if normalize_secret(self.providers.discord.bot_token.clone()).is_some() {
             "config"
         } else {
             "missing"
@@ -977,9 +905,8 @@ impl AppConfig {
             .iter()
             .copied()
             .find(|name| normalize_secret(get_env(name)).is_some())?;
-        let config_token_present = normalize_secret(self.providers.discord.bot_token.clone())
-            .is_some()
-            || normalize_secret(self.discord.bot_token.clone()).is_some();
+        let config_token_present =
+            normalize_secret(self.providers.discord.bot_token.clone()).is_some();
         config_token_present.then_some(env_var)
     }
 
@@ -1243,7 +1170,7 @@ impl AppConfig {
 
         if self.has_slack_channel_routes() && self.effective_slack_token().is_none() {
             return Err(
-                "missing Slack bot token for configured Slack channel delivery; configure [providers.slack].token (or OP_PI_SLACK_BOT_TOKEN; fallbacks: SLACK_BOT_TOKEN, CLAWHIP_SLACK_BOT_TOKEN), use route webhooks, or remove Slack channel routes"
+                "missing Slack bot token for configured Slack channel delivery; configure [providers.slack].token or OP_PI_SLACK_BOT_TOKEN, use route webhooks, or remove Slack channel routes"
                     .into(),
             );
         }
@@ -1251,7 +1178,7 @@ impl AppConfig {
         if self.effective_token().is_none() {
             if self.has_discord_delivery_requiring_bot_token() {
                 return Err(
-                    "missing Discord bot token for configured Discord channel delivery; configure [providers.discord].token (or OP_PI_DISCORD_BOT_TOKEN; fallbacks: DISCORD_TOKEN, CLAWHIP_DISCORD_BOT_TOKEN), use route webhooks, or remove Discord channel routes"
+                    "missing Discord bot token for configured Discord channel delivery; configure [providers.discord].token or OP_PI_DISCORD_BOT_TOKEN, use route webhooks, or remove Discord channel routes"
                         .into(),
                 );
             }
@@ -1263,7 +1190,7 @@ impl AppConfig {
                 && !self.discord_watch.enabled
             {
                 return Err(
-                    "missing Discord delivery config: configure [providers.discord].token (or OP_PI_DISCORD_BOT_TOKEN; fallbacks: DISCORD_TOKEN, CLAWHIP_DISCORD_BOT_TOKEN), at least one route webhook, a localfile route, or a drop route"
+                    "missing Discord delivery config: configure [providers.discord].token or OP_PI_DISCORD_BOT_TOKEN, at least one route webhook, a localfile route, or a drop route"
                         .into(),
                 );
             }
@@ -1468,7 +1395,7 @@ impl AppConfig {
     }
 
     pub fn run_interactive_editor(&mut self, path: &Path) -> Result<()> {
-        println!("op-pi config editor");
+        println!("op_pi config editor");
         println!("Path: {}", path.display());
         println!();
         loop {
@@ -1552,13 +1479,8 @@ impl AppConfig {
     }
 
     fn normalize(&mut self) {
-        self.discord.bot_token = normalize_secret(self.discord.bot_token.clone());
-        self.discord.legacy_default_channel =
-            normalize_text(self.discord.legacy_default_channel.clone());
         self.providers.discord.bot_token =
             normalize_secret(self.providers.discord.bot_token.clone());
-        self.providers.discord.legacy_default_channel =
-            normalize_text(self.providers.discord.legacy_default_channel.clone());
         self.defaults.channel = normalize_text(self.defaults.channel.clone());
         self.monitors.github_token = normalize_secret(self.monitors.github_token.clone());
 
@@ -1768,93 +1690,11 @@ mod tests {
     }
 
     #[test]
-    fn op_pi_environment_variables_precede_generic_and_legacy_fallbacks() {
-        let config = AppConfig::default();
-
-        assert_eq!(
-            config.effective_token_with(|name| match name {
-                "OP_PI_DISCORD_BOT_TOKEN" => Some("op-pi-discord".into()),
-                "DISCORD_TOKEN" => Some("generic-discord".into()),
-                "CLAWHIP_DISCORD_BOT_TOKEN" => Some("legacy-discord".into()),
-                _ => None,
-            }),
-            Some("op-pi-discord".into())
-        );
-        assert_eq!(
-            config.effective_slack_token_with(|name| match name {
-                "OP_PI_SLACK_BOT_TOKEN" => Some("op-pi-slack".into()),
-                "SLACK_BOT_TOKEN" => Some("generic-slack".into()),
-                "CLAWHIP_SLACK_BOT_TOKEN" => Some("legacy-slack".into()),
-                _ => None,
-            }),
-            Some("op-pi-slack".into())
-        );
-        assert_eq!(
-            config.daemon_base_url_with(|name| match name {
-                "OP_PI_DAEMON_URL" => Some("http://op-pi".into()),
-                "CLAWHIP_DAEMON_URL" => Some("http://legacy".into()),
-                _ => None,
-            }),
-            "http://op-pi"
-        );
-        assert_eq!(
-            config.monitor_github_token_with(|name| match name {
-                "OP_PI_GITHUB_TOKEN" => Some("op-pi-github".into()),
-                "GITHUB_TOKEN" => Some("generic-github".into()),
-                "CLAWHIP_GITHUB_TOKEN" => Some("legacy-github".into()),
-                _ => None,
-            }),
-            Some("op-pi-github".into())
-        );
-    }
-
-    #[test]
-    fn legacy_environment_variables_remain_fallbacks() {
-        let config = AppConfig::default();
-
-        assert_eq!(
-            config.effective_slack_token_with(|name| {
-                (name == "CLAWHIP_SLACK_BOT_TOKEN").then(|| "legacy-slack".into())
-            }),
-            Some("legacy-slack".into())
-        );
-        assert_eq!(
-            config.daemon_base_url_with(|name| {
-                (name == "CLAWHIP_DAEMON_URL").then(|| "http://legacy".into())
-            }),
-            "http://legacy"
-        );
-        assert_eq!(
-            config.monitor_github_token_with(|name| {
-                (name == "CLAWHIP_GITHUB_TOKEN").then(|| "legacy-github".into())
-            }),
-            Some("legacy-github".into())
-        );
-    }
-
-    #[test]
     fn discord_token_source_reports_missing_when_unset() {
         let config = AppConfig::default();
 
         assert_eq!(config.discord_token_source_with(|_| None), "missing");
         assert_eq!(config.effective_token_with(|_| None), None);
-    }
-
-    #[test]
-    fn legacy_env_token_is_still_supported() {
-        let config = AppConfig::default();
-
-        let token = config.effective_token_with(|name| {
-            (name == "CLAWHIP_DISCORD_BOT_TOKEN").then(|| "legacy-token".to_string())
-        });
-
-        assert_eq!(token.as_deref(), Some("legacy-token"));
-        assert_eq!(
-            config.discord_token_source_with(|name| {
-                (name == "CLAWHIP_DISCORD_BOT_TOKEN").then(|| "legacy-token".to_string())
-            }),
-            "env"
-        );
     }
 
     #[test]
@@ -1873,25 +1713,6 @@ mod tests {
     fn discord_token_env_shadow_detected_when_env_overrides_config() {
         let mut config = AppConfig::default();
         config.providers.discord.bot_token = Some("config-token".into());
-
-        assert_eq!(
-            config.discord_token_env_shadow_with(|name| {
-                (name == "CLAWHIP_DISCORD_BOT_TOKEN").then(|| "env-token".to_string())
-            }),
-            Some("CLAWHIP_DISCORD_BOT_TOKEN")
-        );
-        assert_eq!(
-            config.discord_token_env_shadow_with(|name| {
-                (name == "DISCORD_TOKEN").then(|| "env-token".to_string())
-            }),
-            Some("DISCORD_TOKEN")
-        );
-    }
-
-    #[test]
-    fn discord_token_env_shadow_uses_legacy_config_token() {
-        let mut config = AppConfig::default();
-        config.discord.bot_token = Some("legacy-config-token".into());
 
         assert_eq!(
             config.discord_token_env_shadow_with(|name| {
@@ -1916,45 +1737,6 @@ mod tests {
         // Config token present but no env token: config wins, no shadow.
         config.providers.discord.bot_token = Some("config-token".into());
         assert_eq!(config.discord_token_env_shadow_with(|_| None), None);
-    }
-
-    #[test]
-    fn load_or_default_migrates_legacy_discord_to_providers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(
-            &path,
-            "[discord]\ntoken = \"legacy-token\"\ndefault_channel = \"123\"\n",
-        )
-        .unwrap();
-
-        let config = AppConfig::load_or_default(&path).unwrap();
-
-        assert_eq!(
-            config.providers.discord.bot_token.as_deref(),
-            Some("legacy-token")
-        );
-        assert_eq!(
-            config.providers.discord.legacy_default_channel.as_deref(),
-            Some("123")
-        );
-        assert!(config.discord.is_empty());
-        assert_eq!(config.defaults.channel.as_deref(), Some("123"));
-    }
-
-    #[test]
-    fn load_or_default_rejects_conflicting_legacy_and_provider_discord() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(
-            &path,
-            "[discord]\ntoken = \"legacy-token\"\n[providers.discord]\ntoken = \"provider-token\"\n",
-        )
-        .unwrap();
-
-        let error = AppConfig::load_or_default(&path).unwrap_err().to_string();
-
-        assert!(error.contains("conflicting legacy [discord].token"));
     }
 
     #[test]
@@ -2038,7 +1820,7 @@ thread = "123456789012345678"
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
                 sink: "localfile".into(),
-                local_path: Some("/tmp/clawhip/events.jsonl".into()),
+                local_path: Some("/tmp/op_pi/events.jsonl".into()),
                 ..RouteRule::default()
             }],
             ..AppConfig::default()
@@ -2054,7 +1836,7 @@ thread = "123456789012345678"
                 RouteRule {
                     event: "tmux.keyword".into(),
                     sink: "localfile".into(),
-                    local_path: Some("/tmp/clawhip/events.jsonl".into()),
+                    local_path: Some("/tmp/op_pi/events.jsonl".into()),
                     ..RouteRule::default()
                 },
                 RouteRule {
@@ -2078,7 +1860,7 @@ thread = "123456789012345678"
                 RouteRule {
                     event: "tmux.keyword".into(),
                     sink: "localfile".into(),
-                    local_path: Some("/tmp/clawhip/events.jsonl".into()),
+                    local_path: Some("/tmp/op_pi/events.jsonl".into()),
                     ..RouteRule::default()
                 },
                 RouteRule {
@@ -2100,7 +1882,6 @@ thread = "123456789012345678"
             providers: ProvidersConfig {
                 discord: DiscordConfig {
                     bot_token: Some("token".into()),
-                    legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
@@ -2176,7 +1957,6 @@ thread = "123456789012345678"
             providers: ProvidersConfig {
                 discord: DiscordConfig {
                     bot_token: Some("old-token".into()),
-                    legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
@@ -2535,7 +2315,6 @@ message = " ping "
             providers: ProvidersConfig {
                 discord: DiscordConfig {
                     bot_token: Some("token".into()),
-                    legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
                 openclaw: None,
@@ -2742,7 +2521,7 @@ poll_interval_secs = 3
     #[test]
     fn discord_watch_defaults_are_backward_compatible_and_local_only() {
         let config: AppConfig =
-            toml::from_str("[[routes]]\nevent = \"custom\"\nsink = \"localfile\"\nlocal_path = \"/tmp/clawhip/events.jsonl\"\n").expect("old config parses");
+            toml::from_str("[[routes]]\nevent = \"custom\"\nsink = \"localfile\"\nlocal_path = \"/tmp/op_pi/events.jsonl\"\n").expect("old config parses");
         assert!(!config.discord_watch.enabled);
         assert!(config.discord_watch.watched_channels.is_empty());
         assert!(config.discord_watch.gaebal_gajae_user_id.is_empty());
@@ -2837,8 +2616,10 @@ name = "general"
 
     #[test]
     fn slack_channel_route_requires_bot_token() {
-        let mut config = AppConfig::default();
-        config.routes = vec![slack_channel_route("github.*", Some("C123OPS"))];
+        let config = AppConfig {
+            routes: vec![slack_channel_route("github.*", Some("C123OPS"))],
+            ..AppConfig::default()
+        };
 
         let error = config
             .validate()

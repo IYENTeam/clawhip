@@ -2,13 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scan-keywords.sh --session <session> --keywords <comma,list> [--channel <id>]" >&2
+  echo "usage: scan_keywords.sh --session <session> --keywords <comma,list> [--channel <id>]" >&2
   exit 1
 }
 
 session=""
 keywords=""
-channel="${OP_PI_CHANNEL:-${CLAWHIP_CHANNEL:-}}"
+channel="${OP_PI_CHANNEL:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --session) session="$2"; shift 2 ;;
@@ -21,11 +21,7 @@ done
 [[ -n "$session" && -n "$keywords" ]] || usage
 
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
-state_dir="$state_root/op-pi/tmux-keywords"
-legacy_state_dir="$state_root/clawhip/tmux-keywords"
-if [[ ! -d "$state_dir" && -d "$legacy_state_dir" ]]; then
-  state_dir="$legacy_state_dir"
-fi
+state_dir="$state_root/op_pi/tmux_keywords"
 mkdir -p "$state_dir"
 patterns=(${keywords//,/ })
 
@@ -43,7 +39,7 @@ while IFS='|' read -r pane_id pane_name; do
     [[ "$previous_output" == *"$line"* ]] && continue
     for keyword in "${patterns[@]}"; do
       if [[ "$line" == *"$keyword"* ]]; then
-        args=(op-pi tmux keyword --session "$session" --keyword "$keyword" --line "$line")
+        args=(op_pi tmux keyword --session "$session" --keyword "$keyword" --line "$line")
         if [[ -n "$channel" ]]; then args+=(--channel "$channel"); fi
         "${args[@]}"
       fi

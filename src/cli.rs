@@ -61,7 +61,7 @@ pub enum Commands {
     Status,
     #[command(
         about = "Scaffold common setup presets without editing advanced routes or monitors",
-        long_about = "Scaffold the bounded quickstart preset catalog.\n\nAdvanced routes and monitors still require manual config editing or the bounded op-pi config editor."
+        long_about = "Scaffold the bounded quickstart preset catalog.\n\nAdvanced routes and monitors still require manual config editing or the bounded op_pi config editor."
     )]
     Setup(SetupArgs),
     /// Send a custom event to the local daemon.
@@ -100,12 +100,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: NativeCommands,
     },
-    /// Run configured cron jobs via op-pi.
+    /// Run configured cron jobs via op_pi.
     Cron {
         #[command(subcommand)]
         command: CronCommands,
     },
-    /// Install op-pi from the current git clone.
+    /// Install op_pi from the current git clone.
     Install {
         /// Install and start the bundled systemd service.
         #[arg(long, default_value_t = false)]
@@ -114,9 +114,9 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         skip_star_prompt: bool,
     },
-    /// Update op-pi from the current git clone.
+    /// Update op_pi from the current git clone.
     ///
-    /// Without a subcommand, behaves like the legacy `clawhip update --restart`
+    /// Without a subcommand, behaves like the legacy `op_pi update --restart`
     /// (pull + reinstall + optional restart). Use subcommands for daemon-aware
     /// operations: check, approve, dismiss, status.
     Update {
@@ -126,7 +126,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         restart: bool,
     },
-    /// Uninstall op-pi.
+    /// Uninstall op_pi.
     Uninstall {
         #[arg(long, default_value_t = false)]
         remove_systemd: bool,
@@ -190,14 +190,14 @@ pub struct EmitArgs {
     pub fields: Vec<String>,
 }
 
-/// Arguments for `op-pi explain`.
+/// Arguments for `op_pi explain`.
 ///
 /// Mirrors `EmitArgs` so operators can explain the exact same event shape
 /// they would normally emit — with `--channel`, `--format`, `--payload` JSON,
 /// and ad-hoc `--key value` fields.
 #[derive(Debug, Clone, Args)]
 pub struct ExplainArgs {
-    /// Event type (canonical or alias, same as `op-pi emit`).
+    /// Event type (canonical or alias, same as `op_pi emit`).
     pub event_type: String,
     /// Emit output as JSON instead of the human-readable text report.
     #[arg(long, default_value_t = false)]
@@ -433,7 +433,7 @@ pub enum PluginCommands {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum NativeCommands {
-    /// Forward a provider-native hook payload to op-pi.
+    /// Forward a provider-native hook payload to op_pi.
     Hook(NativeHookArgs),
 }
 
@@ -458,7 +458,7 @@ impl NativeHookArgs {
     pub fn read_payload(&self, stdin: &mut dyn Read) -> crate::Result<serde_json::Value> {
         match (&self.payload, &self.file) {
             (Some(_), Some(_)) => {
-                Err("provide either --payload or --file for op-pi native hook, not both".into())
+                Err("provide either --payload or --file for op_pi native hook, not both".into())
             }
             (Some(payload), None) => Ok(serde_json::from_str(payload)?),
             (None, Some(path)) => {
@@ -477,7 +477,7 @@ impl NativeHookArgs {
         let trimmed = buffer.trim();
         if trimmed.is_empty() {
             return Err(
-                "op-pi native hook expects a JSON payload via stdin, --payload, or --file".into(),
+                "op_pi native hook expects a JSON payload via stdin, --payload, or --file".into(),
             );
         }
         Ok(serde_json::from_str(trimmed)?)
@@ -492,7 +492,7 @@ pub enum GajaeCommands {
     Preflight,
     /// Diagnose GAJAE CLI/profile conformance without mutating local profiles.
     Doctor(GajaeDoctorArgs),
-    /// Manage gajae-installed op-pi profiles.
+    /// Manage gajae-installed op_pi profiles.
     Profile {
         #[command(subcommand)]
         command: GajaeProfileCommands,
@@ -516,11 +516,11 @@ pub enum GajaeCommands {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GajaeProfileCommands {
-    /// Install the op-pi profile through gajae.
+    /// Install the op_pi profile through gajae.
     Install,
-    /// Verify the installed GAJAE op-pi profile and handler commands without executing routes.
+    /// Verify the installed GAJAE op_pi profile and handler commands without executing routes.
     Verify(GajaeProfileVerifyArgs),
-    /// Inspect the installed GAJAE op-pi route profile without executing routes.
+    /// Inspect the installed GAJAE op_pi route profile without executing routes.
     Inspect(GajaeProfileFileArgs),
     /// Explain which GAJAE route would match an event without executing it.
     Explain(GajaeProfileExplainArgs),
@@ -563,7 +563,7 @@ pub struct GajaeProfileApplyArgs {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct GajaeDoctorArgs {
-    /// Optional owner/repo used to check whether GAJAE can produce a dry-run op-pi onboard plan.
+    /// Optional owner/repo used to check whether GAJAE can produce a dry-run op_pi onboard plan.
     #[arg(long)]
     pub repo: Option<String>,
     /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
@@ -580,7 +580,7 @@ pub struct GajaeProfileVerifyArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GajaeReceiptCommands {
-    /// Validate a receipt and emit a bounded public-safe op-pi event.
+    /// Validate a receipt and emit a bounded public-safe op_pi event.
     Ingest(GajaeReceiptIngestArgs),
 }
 
@@ -595,7 +595,7 @@ pub struct GajaeReceiptIngestArgs {
     /// Read receipt JSON from stdin before validation.
     #[arg(long, conflicts_with = "file")]
     pub stdin: bool,
-    /// Send the validated event to the local op-pi daemon.
+    /// Send the validated event to the local op_pi daemon.
     #[arg(long, default_value_t = false)]
     pub send: bool,
     /// Override the destination channel when sending to the daemon.
@@ -895,7 +895,7 @@ pub struct HooksInstallArgs {
     /// Project root for project-scoped Codex install. Ignored for global installs.
     #[arg(long)]
     pub root: Option<PathBuf>,
-    /// Overwrite op-pi-managed generated files when they already exist.
+    /// Overwrite op_pi-managed generated files when they already exist.
     #[arg(long, default_value_t = false)]
     pub force: bool,
 }
@@ -915,10 +915,10 @@ pub enum ConfigCommand {
     /// then queries the Discord API to confirm each channel exists and (optionally)
     /// matches the `channel_name` hint set alongside the ID.
     VerifyBindings(VerifyBindingsArgs),
-    /// Verify op-pi channel destinations are allowed by the local Clawdbot gateway config.
+    /// Verify op_pi channel destinations are allowed by the local Clawdbot gateway config.
     ///
     /// Reads only the public-safe gateway channel allowlist shape and reports
-    /// channel IDs plus op-pi source labels; never dumps gateway tokens,
+    /// channel IDs plus op_pi source labels; never dumps gateway tokens,
     /// webhooks, payloads, or unrelated config fields.
     VerifyGatewayAllowlist(VerifyGatewayAllowlistArgs),
 }
@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn parses_start_subcommand_with_worker_threads_override() {
-        let cli = Cli::parse_from(["clawhip", "start", "--worker-threads", "2"]);
+        let cli = Cli::parse_from(["op_pi", "start", "--worker-threads", "2"]);
 
         let Commands::Start {
             port,
@@ -962,7 +962,7 @@ mod tests {
     #[test]
     fn parses_emit_subcommand_with_top_level_fields() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "emit",
             "agent.started",
             "--channel",
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn parses_deliver_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "deliver",
             "--session",
             "issue-184",
@@ -1069,7 +1069,7 @@ mod tests {
                 "--session".into(),
                 "issue-65".into(),
                 "--project".into(),
-                "clawhip".into(),
+                "op_pi".into(),
             ],
         };
 
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn parses_agent_finished_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "agent",
             "finished",
             "--name",
@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn parses_agent_failed_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "agent",
             "failed",
             "--name",
@@ -1163,7 +1163,7 @@ mod tests {
     #[test]
     fn parses_tmux_watch_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "tmux",
             "watch",
             "-s",
@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn parses_tmux_list_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "tmux", "list"]);
+        let cli = Cli::parse_from(["op_pi", "tmux", "list"]);
 
         let Commands::Tmux { command } = cli.command.expect("tmux command") else {
             panic!("expected tmux command");
@@ -1211,28 +1211,28 @@ mod tests {
     #[test]
     fn parses_setup_bind_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "setup",
             "--bind",
-            "clawhip=1480171113253175356",
+            "op_pi=1480171113253175356",
             "--bind",
             "oh-my-codex=1480171106324189335",
             "--expect-name",
-            "clawhip=clawhip-dev",
+            "op_pi=op_pi-dev",
         ]);
         let Commands::Setup(args) = cli.command.expect("setup command") else {
             panic!("expected Setup");
         };
         assert_eq!(args.bind.len(), 2);
-        assert_eq!(args.bind[0], "clawhip=1480171113253175356");
+        assert_eq!(args.bind[0], "op_pi=1480171113253175356");
         assert_eq!(args.bind[1], "oh-my-codex=1480171106324189335");
         assert_eq!(args.expect_name.len(), 1);
-        assert_eq!(args.expect_name[0], "clawhip=clawhip-dev");
+        assert_eq!(args.expect_name[0], "op_pi=op_pi-dev");
     }
 
     #[test]
     fn parses_config_verify_bindings_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "config", "verify-bindings", "--json"]);
+        let cli = Cli::parse_from(["op_pi", "config", "verify-bindings", "--json"]);
         let Some(Commands::Config { command }) = cli.command else {
             panic!("expected Config");
         };
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn parses_config_verify_bindings_text_default() {
-        let cli = Cli::parse_from(["clawhip", "config", "verify-bindings"]);
+        let cli = Cli::parse_from(["op_pi", "config", "verify-bindings"]);
         let Some(Commands::Config {
             command: Some(ConfigCommand::VerifyBindings(args)),
         }) = cli.command
@@ -1257,7 +1257,7 @@ mod tests {
     #[test]
     fn parses_config_verify_gateway_allowlist_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "config",
             "verify-gateway-allowlist",
             "--gateway-config",
@@ -1280,7 +1280,7 @@ mod tests {
     #[test]
     fn parses_setup_webhook_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "setup",
             "--webhook",
             "https://discord.com/api/webhooks/123/abc",
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn parses_setup_mixed_flag_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "setup",
             "--webhook",
             "https://discord.com/api/webhooks/123/abc",
@@ -1333,14 +1333,14 @@ mod tests {
 
     #[test]
     fn setup_without_flags_fails_with_help() {
-        let error = Cli::try_parse_from(["op-pi", "setup"]).expect_err("setup should fail");
+        let error = Cli::try_parse_from(["op_pi", "setup"]).expect_err("setup should fail");
         assert_eq!(
             error.kind(),
             ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
 
         let rendered = error.to_string();
-        assert!(rendered.contains("Usage: op-pi setup [OPTIONS]"));
+        assert!(rendered.contains("Usage: op_pi setup [OPTIONS]"));
         assert!(rendered.contains("--webhook"));
         assert!(rendered.contains("--bot-token"));
     }
@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn parses_tmux_new_with_retry_enter_disabled() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "tmux",
             "new",
             "-s",
@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn parses_tmux_new_with_retry_enter_backoff_overrides() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "tmux",
             "new",
             "-s",
@@ -1423,9 +1423,9 @@ mod tests {
     fn tmux_new_defaults_to_non_follow_mode_for_194() {
         // Regression for #194: the default launcher path MUST return control
         // to the caller after the session is created. If `follow` defaulted
-        // back to true, `clawhip tmux new` would once again block for the
+        // back to true, `op_pi tmux new` would once again block for the
         // session lifetime and expose callers to false-negative SIGKILL.
-        let cli = Cli::parse_from(["clawhip", "tmux", "new", "-s", "issue-194", "--", "codex"]);
+        let cli = Cli::parse_from(["op_pi", "tmux", "new", "-s", "issue-194", "--", "codex"]);
 
         let Commands::Tmux { command } = cli.command.expect("tmux command") else {
             panic!("expected tmux command");
@@ -1440,7 +1440,7 @@ mod tests {
     #[test]
     fn parses_tmux_new_with_explicit_follow_flag() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "tmux",
             "new",
             "-s",
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn parses_gajae_status_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "gajae", "status"]);
+        let cli = Cli::parse_from(["op_pi", "gajae", "status"]);
 
         let Commands::Gajae { command } = cli.command.expect("gajae command") else {
             panic!("expected gajae command");
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn parses_gajae_preflight_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "gajae", "preflight"]);
+        let cli = Cli::parse_from(["op_pi", "gajae", "preflight"]);
 
         let Commands::Gajae { command } = cli.command.expect("gajae command") else {
             panic!("expected gajae command");
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn parses_gajae_profile_install_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "gajae", "profile", "install"]);
+        let cli = Cli::parse_from(["op_pi", "gajae", "profile", "install"]);
 
         let Commands::Gajae { command } = cli.command.expect("gajae command") else {
             panic!("expected gajae command");
@@ -1500,7 +1500,7 @@ mod tests {
     #[test]
     fn parses_gajae_profile_inspect_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "gajae",
             "profile",
             "inspect",
@@ -1524,14 +1524,14 @@ mod tests {
     #[test]
     fn parses_gajae_profile_explain_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "gajae",
             "profile",
             "explain",
             "--event",
             "github.pr-status-changed",
             "--repo",
-            "clawhip",
+            "op_pi",
         ]);
 
         let Commands::Gajae { command } = cli.command.expect("gajae command") else {
@@ -1545,12 +1545,12 @@ mod tests {
         };
 
         assert_eq!(args.event, "github.pr-status-changed");
-        assert_eq!(args.repo.as_deref(), Some("clawhip"));
+        assert_eq!(args.repo.as_deref(), Some("op_pi"));
     }
 
     #[test]
     fn parses_gajae_profile_apply_dry_run_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "gajae", "profile", "apply", "--dry-run"]);
+        let cli = Cli::parse_from(["op_pi", "gajae", "profile", "apply", "--dry-run"]);
 
         let Commands::Gajae { command } = cli.command.expect("gajae command") else {
             panic!("expected gajae command");
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn parses_plugin_list_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "plugin", "list"]);
+        let cli = Cli::parse_from(["op_pi", "plugin", "list"]);
 
         let Commands::Plugin { command } = cli.command.expect("plugin command") else {
             panic!("expected plugin command");
@@ -1580,7 +1580,7 @@ mod tests {
     #[test]
     fn parses_native_hook_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "native",
             "hook",
             "--provider",
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn parses_cron_run_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "cron", "run", "dev-followup"]);
+        let cli = Cli::parse_from(["op_pi", "cron", "run", "dev-followup"]);
 
         let Commands::Cron { command } = cli.command.expect("cron command") else {
             panic!("expected cron command");
@@ -1617,12 +1617,12 @@ mod tests {
     #[test]
     fn parses_gajae_zero_backlog_checkpoint_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "gajae",
             "checkpoint",
             "zero-backlog",
             "--repo",
-            "IYENTeam/op-pi",
+            "IYENTeam/op_pi",
             "--open-prs",
             "0",
             "--source",
@@ -1636,7 +1636,7 @@ mod tests {
             panic!("expected gajae checkpoint command");
         };
         let GajaeCheckpointCommands::ZeroBacklog(args) = command;
-        assert_eq!(args.repo, "IYENTeam/op-pi");
+        assert_eq!(args.repo, "IYENTeam/op_pi");
         assert_eq!(args.open_issues, 0);
         assert_eq!(args.open_prs, 0);
         assert_eq!(args.source, "github-api");
@@ -1675,20 +1675,20 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("op-pi native hook expects a JSON payload")
+                .contains("op_pi native hook expects a JSON payload")
         );
     }
 
     #[test]
     fn parses_memory_init_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "memory",
             "init",
             "--root",
             "/tmp/workspace",
             "--project",
-            "clawhip",
+            "op_pi",
             "--channel",
             "discord-alerts",
             "--agent",
@@ -1707,7 +1707,7 @@ mod tests {
         };
 
         assert_eq!(args.root, Some(PathBuf::from("/tmp/workspace")));
-        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert_eq!(args.project.as_deref(), Some("op_pi"));
         assert_eq!(args.channel.as_deref(), Some("discord-alerts"));
         assert_eq!(args.agent.as_deref(), Some("codex"));
         assert_eq!(args.date.as_deref(), Some("2026-03-10"));
@@ -1717,13 +1717,13 @@ mod tests {
     #[test]
     fn parses_memory_status_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "memory",
             "status",
             "--root",
             "/tmp/workspace",
             "--project",
-            "clawhip",
+            "op_pi",
             "--agent",
             "codex",
         ]);
@@ -1737,7 +1737,7 @@ mod tests {
         };
 
         assert_eq!(args.root, Some(PathBuf::from("/tmp/workspace")));
-        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert_eq!(args.project.as_deref(), Some("op_pi"));
         assert_eq!(args.channel, None);
         assert_eq!(args.agent.as_deref(), Some("codex"));
         assert_eq!(args.date, None);
@@ -1745,7 +1745,7 @@ mod tests {
 
     #[test]
     fn parses_install_subcommand_with_skip_star_prompt() {
-        let cli = Cli::parse_from(["clawhip", "install", "--systemd", "--skip-star-prompt"]);
+        let cli = Cli::parse_from(["op_pi", "install", "--systemd", "--skip-star-prompt"]);
 
         let Commands::Install {
             systemd,
@@ -1762,7 +1762,7 @@ mod tests {
     #[test]
     fn parses_hooks_install_subcommand() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "hooks",
             "install",
             "--provider",
@@ -1792,7 +1792,7 @@ mod tests {
 
     #[test]
     fn parses_hooks_install_all_flag() {
-        let cli = Cli::parse_from(["clawhip", "hooks", "install", "--all"]);
+        let cli = Cli::parse_from(["op_pi", "hooks", "install", "--all"]);
 
         let Commands::Hooks { command } = cli.command.expect("hooks command") else {
             panic!("expected hooks command");
@@ -1807,7 +1807,7 @@ mod tests {
     #[test]
     fn parses_hooks_install_with_global_scope_and_force() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "hooks",
             "install",
             "--provider",
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test]
     fn bare_update_preserves_legacy_restart_flag() {
-        let cli = Cli::parse_from(["clawhip", "update", "--restart"]);
+        let cli = Cli::parse_from(["op_pi", "update", "--restart"]);
 
         let Commands::Update { command, restart } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1842,7 +1842,7 @@ mod tests {
 
     #[test]
     fn bare_update_without_restart_defaults_to_false() {
-        let cli = Cli::parse_from(["clawhip", "update"]);
+        let cli = Cli::parse_from(["op_pi", "update"]);
 
         let Commands::Update { command, restart } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn parses_update_check_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "update", "check"]);
+        let cli = Cli::parse_from(["op_pi", "update", "check"]);
 
         let Commands::Update { command, .. } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn parses_update_approve_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "update", "approve"]);
+        let cli = Cli::parse_from(["op_pi", "update", "approve"]);
 
         let Commands::Update { command, .. } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1876,7 +1876,7 @@ mod tests {
 
     #[test]
     fn parses_update_dismiss_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "update", "dismiss"]);
+        let cli = Cli::parse_from(["op_pi", "update", "dismiss"]);
 
         let Commands::Update { command, .. } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1887,7 +1887,7 @@ mod tests {
 
     #[test]
     fn parses_update_status_subcommand() {
-        let cli = Cli::parse_from(["clawhip", "update", "status"]);
+        let cli = Cli::parse_from(["op_pi", "update", "status"]);
 
         let Commands::Update { command, .. } = cli.command.expect("update command") else {
             panic!("expected update command");
@@ -1899,7 +1899,7 @@ mod tests {
     #[test]
     fn parses_memory_scaffold_channels_default_dry_run() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "memory",
             "scaffold-channels",
             "--root",
@@ -1922,11 +1922,11 @@ mod tests {
     #[test]
     fn parses_memory_scaffold_channels_write_force() {
         let cli = Cli::parse_from([
-            "clawhip",
+            "op_pi",
             "memory",
             "scaffold-channels",
             "--project",
-            "clawhip",
+            "op_pi",
             "--write",
             "--force",
         ]);
@@ -1939,7 +1939,7 @@ mod tests {
             panic!("expected memory scaffold-channels command");
         };
 
-        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert_eq!(args.project.as_deref(), Some("op_pi"));
         assert!(args.write);
         assert!(args.force);
     }

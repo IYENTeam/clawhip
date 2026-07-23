@@ -94,10 +94,10 @@ jobs:
               exit 1
             fi
           done
-      - name: Build op-pi (release preflight needs the binary)
+      - name: Build op_pi (release preflight needs the binary)
         run: cargo build --release
       - name: Release consistency preflight
-        run: ./target/release/op-pi release preflight "${{ github.ref_name }}"
+        run: ./target/release/op_pi release preflight "${{ github.ref_name }}"
 
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
@@ -403,9 +403,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Verify crates publish payload
-        run: cargo publish --dry-run --locked --package op-pi --manifest-path Cargo.toml
+        run: cargo publish --dry-run --locked --package op_pi --manifest-path Cargo.toml
       - name: Publish to crates.io
-        run: cargo publish --locked --package op-pi --manifest-path Cargo.toml
+        run: cargo publish --locked --package op_pi --manifest-path Cargo.toml
 
   announce:
     needs:

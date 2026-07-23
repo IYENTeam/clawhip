@@ -1,21 +1,18 @@
 [package]
-name = "op-pi"
+name = "op_pi"
 version = "0.6.11"
 edition = "2024"
-default-run = "op-pi"
+autobins = false
+default-run = "op_pi"
 description = "Operation Pipeline Interface"
 license = "MIT"
-repository = "https://github.com/IYENTeam/op-pi"
+repository = "https://github.com/IYENTeam/op_pi"
 keywords = ["discord", "notifications", "tmux", "github", "devops"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "op-pi"
+name = "op_pi"
 path = "src/main.rs"
-
-[[bin]]
-name = "clawhip"
-path = "src/bin/clawhip.rs"
 
 [dependencies]
 anyhow = "1"

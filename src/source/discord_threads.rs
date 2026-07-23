@@ -35,7 +35,7 @@ impl Source for DiscordThreadSource {
         }
 
         let Some(token) = self.config.effective_token() else {
-            eprintln!("op-pi source discord-threads disabled: missing Discord bot token");
+            eprintln!("op_pi source discord-threads disabled: missing Discord bot token");
             return Ok(());
         };
 
@@ -49,7 +49,6 @@ impl Source for DiscordThreadSource {
             .default_headers(headers)
             .build()?;
         let api_base = std::env::var("OP_PI_DISCORD_API_BASE")
-            .or_else(|_| std::env::var("CLAWHIP_DISCORD_API_BASE"))
             .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
 
         let mut known = HashSet::new();
@@ -64,7 +63,7 @@ impl Source for DiscordThreadSource {
                     let error = error.to_string();
                     if error_logs.should_log(&monitor.parent_channel, &error) {
                         eprintln!(
-                            "op-pi source discord-threads failed scan for {}: {error}",
+                            "op_pi source discord-threads failed scan for {}: {error}",
                             monitor.parent_channel
                         );
                     }
@@ -88,7 +87,7 @@ impl Source for DiscordThreadSource {
                             let error = error.to_string();
                             if error_logs.should_log(&monitor.parent_channel, &error) {
                                 eprintln!(
-                                    "op-pi source discord-threads scan failed for {}: {error}",
+                                    "op_pi source discord-threads scan failed for {}: {error}",
                                     monitor.parent_channel
                                 );
                             }

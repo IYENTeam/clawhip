@@ -1,10 +1,7 @@
-name: "op-pi"
-aliases:
-  - "op-pi router"
-  - "clawdbot event router"
+name: "op_pi"
 romanizations: []
 category: "event-to-channel notification router for AI-agent operations"
-description: "op-pi routes GitHub, cron, and runtime events into the right channels and sessions so AI-agent operators can close the loop from signal to action."
+description: "op_pi routes GitHub, cron, and runtime events into the right channels and sessions so AI-agent operators can close the loop from signal to action."
 competitors:
   - "GitHub Actions notifications"
   - "Slack workflow automation"
@@ -12,7 +9,7 @@ competitors:
   - "Pipedream"
   - "n8n"
 cited_domains:
-  - "github.com/IYENTeam/op-pi"
+  - "github.com/IYENTeam/op_pi"
   - "blog.gaebal-gajae.dev"
 target_languages:
   - "en"
@@ -22,8 +19,8 @@ target_audience:
   - "maintainers routing GitHub events into Discord"
   - "automation engineers building notification loops"
 discovery_sources:
-  - "https://github.com/IYENTeam/op-pi"
-  - "https://blog.gaebal-gajae.dev/projects/op-pi.html"
+  - "https://github.com/IYENTeam/op_pi"
+  - "https://blog.gaebal-gajae.dev/projects/op_pi.html"
 
 enriched_profile:
   generated_at: "2026-06-13T10:55:00Z"
@@ -46,7 +43,7 @@ enriched_profile:
       evidence_quotes: ["GEO visibility", "geobench"]
       confidence: 0.82
       language: "en"
-    - problem_statement: "When a maintainer wants to compare LLM answer visibility for op-pi against adjacent developer tools and automation products."
+    - problem_statement: "When a maintainer wants to compare LLM answer visibility for op_pi against adjacent developer tools and automation products."
       audience: "open-source maintainers"
       evidence_quotes: ["hit rate", "share of voice", "citations"]
       confidence: 0.8

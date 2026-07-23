@@ -235,7 +235,7 @@ async fn register_and_start_monitor(
 
 /// Register the freshly-launched tmux session so the daemon's own poll loop
 /// takes over monitoring, then return without blocking. This is the default
-/// path for `op-pi tmux new`: callers see the wrapper exit with success as
+/// path for `op_pi tmux new`: callers see the wrapper exit with success as
 /// soon as the session exists and is registered, instead of the wrapper
 /// staying alive for the entire session lifetime and exposing the caller to
 /// false-negative SIGKILL surfaces when the launcher/supervisor later kills
@@ -394,7 +394,7 @@ fn build_child_command(args: &TmuxNewArgs) -> Option<String> {
 
 fn retain_after_child_exit(command: &str) -> String {
     format!(
-        "( {} ); op_pi_status=$?; printf '\\n[op-pi] command exited with status %s\\n' \"$op_pi_status\"; printf '[op-pi] retaining tmux pane for inspection. Type exit to close.\\n'; exec \"${{SHELL:-/bin/sh}}\"",
+        "( {} ); op_pi_status=$?; printf '\\n[op_pi] command exited with status %s\\n' \"$op_pi_status\"; printf '[op_pi] retaining tmux pane for inspection. Type exit to close.\\n'; exec \"${{SHELL:-/bin/sh}}\"",
         command
     )
 }
@@ -480,7 +480,7 @@ fn format_watch_audit_log(registration: &RegisteredTmuxSession) -> String {
         .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
 
     format!(
-        "op-pi tmux {} start session={} channel={} keywords={} mention={} stale_minutes={} format={} registered_at={} parent_pid={} parent_name={}",
+        "op_pi tmux {} start session={} channel={} keywords={} mention={} stale_minutes={} format={} registered_at={} parent_pid={} parent_name={}",
         registration.registration_source.as_str(),
         registration.session,
         channel,
@@ -618,9 +618,9 @@ mod tests {
         let command = build_command_to_send(&args).expect("wrapped command");
 
         assert!(command.starts_with("( false ); op_pi_status=$?;"));
-        assert!(command.contains("[op-pi] command exited with status %s"));
+        assert!(command.contains("[op_pi] command exited with status %s"));
         assert!(
-            command.contains("[op-pi] retaining tmux pane for inspection. Type exit to close.")
+            command.contains("[op_pi] retaining tmux pane for inspection. Type exit to close.")
         );
         assert!(command.ends_with("exec \"${SHELL:-/bin/sh}\""));
     }
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn into_registration_false_lets_daemon_take_over_monitoring() {
-        // Regression for #194: when --follow is not set, op-pi tmux new
+        // Regression for #194: when --follow is not set, op_pi tmux new
         // exits right after launch and hands off monitoring to the daemon.
         // The registration MUST report active_wrapper_monitor=false so the
         // daemon's poll_tmux loop picks it up instead of skipping it as a
@@ -803,7 +803,7 @@ mod tests {
         let repo = init_git_repo();
         let repo_path = repo.path().canonicalize().expect("canonical repo path");
         let args = TmuxNewArgs {
-            session: "op-pi-issue-152".into(),
+            session: "op_pi-issue-152".into(),
             window_name: None,
             cwd: Some(repo_path.to_string_lossy().into_owned()),
             channel: None,
@@ -834,7 +834,7 @@ mod tests {
             routes: vec![
                 RouteRule {
                     event: "tmux.*".into(),
-                    filter: BTreeMap::from([("session".into(), "op-pi-*".into())]),
+                    filter: BTreeMap::from([("session".into(), "op_pi-*".into())]),
                     sink: "discord".into(),
                     channel: Some("heuristic-route".into()),
                     ..RouteRule::default()

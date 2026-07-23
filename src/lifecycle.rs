@@ -8,26 +8,22 @@ use anyhow::{Context, anyhow};
 
 use crate::{Result, plugins};
 
-const GITHUB_REPO: &str = "IYENTeam/op-pi";
-const BINARY_NAME: &str = "op-pi";
-const LEGACY_BINARY_NAME: &str = "clawhip";
-const SERVICE_NAME: &str = "op-pi";
-const LEGACY_SERVICE_NAME: &str = "clawhip";
+const GITHUB_REPO: &str = "IYENTeam/op_pi";
+const BINARY_NAME: &str = "op_pi";
+const SERVICE_NAME: &str = "op_pi";
 const SKIP_STAR_PROMPT_ENV: &str = "OP_PI_SKIP_STAR_PROMPT";
-const LEGACY_SKIP_STAR_PROMPT_ENV: &str = "CLAWHIP_SKIP_STAR_PROMPT";
 
 pub fn install(systemd: bool, skip_star_prompt: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let mut command = cargo_install_command(&repo_root);
     run(&mut command)?;
     ensure_config_dir()?;
-    ensure_legacy_binary_link()?;
     plugins::install_bundled_plugins(&config_dir().join("plugins"))?;
     if systemd {
         install_systemd(&repo_root)?;
     }
     maybe_prompt_to_star_repo(skip_star_prompt)?;
-    println!("op-pi install complete");
+    println!("op_pi install complete");
     Ok(())
 }
 
@@ -55,7 +51,7 @@ pub fn update_from_repo(explicit_root: Option<&str>, restart: bool) -> Result<()
             let root = PathBuf::from(path);
             if !root.join("Cargo.toml").exists() || !root.join("src").exists() {
                 return Err(anyhow!(
-                    "configured repo_root '{}' does not contain an op-pi checkout",
+                    "configured repo_root '{}' does not contain an op_pi checkout",
                     root.display()
                 )
                 .into());
@@ -79,13 +75,12 @@ fn update_repo(repo_root: &Path, restart: bool) -> Result<()> {
         .arg(repo_root)
         .arg("--force"))?;
     ensure_config_dir()?;
-    ensure_legacy_binary_link()?;
     plugins::install_bundled_plugins(&config_dir().join("plugins"))?;
     refresh_systemd_binary_if_present()?;
     if restart {
         restart_systemd_if_present()?;
     }
-    println!("op-pi update complete");
+    println!("op_pi update complete");
     Ok(())
 }
 
@@ -112,32 +107,30 @@ fn find_repo_root() -> Result<PathBuf> {
         }
     }
     Err(anyhow!(
-        "could not locate op-pi repo root; run from the git clone or ensure cargo is available"
+        "could not locate op_pi repo root; run from the git clone or ensure cargo is available"
     )
     .into())
 }
 
 pub fn uninstall(remove_systemd: bool, remove_config: bool) -> Result<()> {
     stop_systemd_if_present()?;
-    for binary_name in [BINARY_NAME, LEGACY_BINARY_NAME] {
-        let binary_path = cargo_bin_dir().join(binary_name);
-        if binary_path.exists() || binary_path.is_symlink() {
-            fs::remove_file(&binary_path)?;
-            println!("Removed {}", binary_path.display());
-        }
+    let binary_path = cargo_bin_dir().join(BINARY_NAME);
+    if binary_path.exists() || binary_path.is_symlink() {
+        fs::remove_file(&binary_path)?;
+        println!("Removed {}", binary_path.display());
     }
     if remove_systemd {
         uninstall_systemd_if_present()?;
     }
     if remove_config {
-        for config_dir in [config_dir(), legacy_config_dir()] {
+        for config_dir in [config_dir()] {
             if config_dir.exists() || config_dir.is_symlink() {
                 fs::remove_dir_all(&config_dir)?;
                 println!("Removed {}", config_dir.display());
             }
         }
     }
-    println!("op-pi uninstall complete");
+    println!("op_pi uninstall complete");
     Ok(())
 }
 
@@ -146,58 +139,23 @@ fn current_repo_root() -> Result<PathBuf> {
     if dir.join("Cargo.toml").exists() && dir.join("src").exists() {
         Ok(dir)
     } else {
-        Err(anyhow!("run this command from the op-pi git clone root").into())
+        Err(anyhow!("run this command from the op_pi git clone root").into())
     }
 }
 
 fn ensure_config_dir() -> Result<()> {
     let dir = config_dir();
-    migrate_legacy_config_dir(&dir)?;
     fs::create_dir_all(&dir)?;
     println!("Ensured config dir {}", dir.display());
     Ok(())
 }
 
 fn config_dir() -> PathBuf {
-    home_dir().join(".op-pi")
-}
-
-fn legacy_config_dir() -> PathBuf {
-    home_dir().join(".clawhip")
+    home_dir().join(".op_pi")
 }
 
 fn home_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-}
-
-fn migrate_legacy_config_dir(destination: &Path) -> Result<()> {
-    let legacy = legacy_config_dir();
-    if !legacy.is_dir() {
-        return Ok(());
-    }
-
-    copy_missing_dir_contents(&legacy, destination)?;
-    println!(
-        "Migrated missing config and state from {} to {}",
-        legacy.display(),
-        destination.display()
-    );
-    Ok(())
-}
-
-fn copy_missing_dir_contents(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_missing_dir_contents(&source_path, &destination_path)?;
-        } else if !destination_path.exists() {
-            fs::copy(source_path, destination_path)?;
-        }
-    }
-    Ok(())
 }
 
 fn cargo_bin_dir() -> PathBuf {
@@ -209,37 +167,13 @@ fn cargo_bin_dir() -> PathBuf {
         .join("bin")
 }
 
-#[cfg(unix)]
-fn ensure_legacy_binary_link() -> Result<()> {
-    let binary_dir = cargo_bin_dir();
-    let primary = binary_dir.join(BINARY_NAME);
-    if !primary.exists() {
-        return Ok(());
-    }
-
-    let legacy = binary_dir.join(LEGACY_BINARY_NAME);
-    if legacy.exists() || legacy.is_symlink() {
-        fs::remove_file(&legacy)?;
-    }
-    std::os::unix::fs::symlink(BINARY_NAME, &legacy)?;
-    println!("Linked {} to {}", legacy.display(), primary.display());
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_legacy_binary_link() -> Result<()> {
-    Ok(())
-}
-
 fn maybe_prompt_to_star_repo(skip_star_prompt: bool) -> Result<()> {
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    let env_skip_star_prompt = env::var(SKIP_STAR_PROMPT_ENV)
-        .or_else(|_| env::var(LEGACY_SKIP_STAR_PROMPT_ENV))
-        .ok();
+    let env_skip_star_prompt = env::var(SKIP_STAR_PROMPT_ENV).ok();
 
     maybe_prompt_to_star_repo_with(
         skip_star_prompt,
@@ -267,7 +201,7 @@ where
     if star_prompt_disabled(skip_star_prompt, env_skip_star_prompt) {
         writeln!(
             output,
-            "[op-pi] skipping GitHub star prompt (--skip-star-prompt or {SKIP_STAR_PROMPT_ENV})"
+            "[op_pi] skipping GitHub star prompt (--skip-star-prompt or {SKIP_STAR_PROMPT_ENV})"
         )?;
         return Ok(());
     }
@@ -278,11 +212,11 @@ where
 
     writeln!(
         output,
-        "[op-pi] optional: star {GITHUB_REPO} on GitHub to support the project"
+        "[op_pi] optional: star {GITHUB_REPO} on GitHub to support the project"
     )?;
     write!(
         output,
-        "[op-pi] Would you like to star {GITHUB_REPO} on GitHub with gh? [y/N]: "
+        "[op_pi] Would you like to star {GITHUB_REPO} on GitHub with gh? [y/N]: "
     )?;
     output.flush()?;
 
@@ -294,16 +228,16 @@ where
     match response.trim() {
         "y" | "Y" | "yes" | "Yes" | "YES" => {
             if gh_star_repo_succeeds_with(&mut gh_command_succeeds) {
-                writeln!(output, "[op-pi] thanks for starring {GITHUB_REPO}")?;
+                writeln!(output, "[op_pi] thanks for starring {GITHUB_REPO}")?;
             } else {
                 writeln!(
                     output,
-                    "[op-pi] unable to star {GITHUB_REPO} with gh; continuing without it"
+                    "[op_pi] unable to star {GITHUB_REPO} with gh; continuing without it"
                 )?;
             }
         }
         _ => {
-            writeln!(output, "[op-pi] skipping GitHub star step")?;
+            writeln!(output, "[op_pi] skipping GitHub star step")?;
         }
     }
 
@@ -336,18 +270,11 @@ fn gh_command_succeeds(args: &[&str]) -> bool {
 }
 
 fn install_systemd(repo_root: &Path) -> Result<()> {
-    let unit_src = repo_root.join("deploy").join("op-pi.service");
+    let unit_src = repo_root
+        .join("deploy")
+        .join(format!("{SERVICE_NAME}.service"));
     let unit_dest = systemd_unit_path(SERVICE_NAME);
     install_systemd_binary()?;
-    let legacy_unit = systemd_unit_path(LEGACY_SERVICE_NAME);
-    if legacy_unit.exists() {
-        let _ = run(Command::new("sudo")
-            .arg("systemctl")
-            .arg("disable")
-            .arg("--now")
-            .arg(LEGACY_SERVICE_NAME));
-        let _ = run(Command::new("sudo").arg("rm").arg("-f").arg(&legacy_unit));
-    }
     run(Command::new("sudo")
         .arg("cp")
         .arg(&unit_src)
@@ -362,20 +289,14 @@ fn install_systemd(repo_root: &Path) -> Result<()> {
 }
 
 fn uninstall_systemd_if_present() -> Result<()> {
-    let mut removed_unit = false;
-    for service_name in [SERVICE_NAME, LEGACY_SERVICE_NAME] {
-        let unit_dest = systemd_unit_path(service_name);
-        if unit_dest.exists() {
-            let _ = run(Command::new("sudo")
-                .arg("systemctl")
-                .arg("disable")
-                .arg("--now")
-                .arg(service_name));
-            let _ = run(Command::new("sudo").arg("rm").arg("-f").arg(&unit_dest));
-            removed_unit = true;
-        }
-    }
-    if removed_unit {
+    let unit_dest = systemd_unit_path(SERVICE_NAME);
+    if unit_dest.exists() {
+        let _ = run(Command::new("sudo")
+            .arg("systemctl")
+            .arg("disable")
+            .arg("--now")
+            .arg(SERVICE_NAME));
+        let _ = run(Command::new("sudo").arg("rm").arg("-f").arg(&unit_dest));
         let _ = run(Command::new("sudo").arg("systemctl").arg("daemon-reload"));
     }
     Ok(())
@@ -392,13 +313,11 @@ fn restart_systemd_if_present() -> Result<()> {
 }
 
 fn stop_systemd_if_present() -> Result<()> {
-    for service_name in [SERVICE_NAME, LEGACY_SERVICE_NAME] {
-        if systemd_unit_path(service_name).exists() {
-            let _ = run(Command::new("sudo")
-                .arg("systemctl")
-                .arg("stop")
-                .arg(service_name));
-        }
+    if systemd_unit_path(SERVICE_NAME).exists() {
+        let _ = run(Command::new("sudo")
+            .arg("systemctl")
+            .arg("stop")
+            .arg(SERVICE_NAME));
     }
     Ok(())
 }
@@ -408,7 +327,7 @@ fn systemd_unit_path(service_name: &str) -> PathBuf {
 }
 
 fn installed_systemd_service_name() -> Option<&'static str> {
-    [SERVICE_NAME, LEGACY_SERVICE_NAME]
+    [SERVICE_NAME]
         .into_iter()
         .find(|service_name| systemd_unit_path(service_name).exists())
 }
@@ -416,7 +335,7 @@ fn installed_systemd_service_name() -> Option<&'static str> {
 fn install_systemd_binary() -> Result<()> {
     let primary = cargo_bin_dir().join(BINARY_NAME);
     if !primary.exists() {
-        return Err(anyhow!("installed op-pi binary not found at {}", primary.display()).into());
+        return Err(anyhow!("installed op_pi binary not found at {}", primary.display()).into());
     }
 
     run(Command::new("sudo")
@@ -425,15 +344,6 @@ fn install_systemd_binary() -> Result<()> {
         .arg("755")
         .arg(&primary)
         .arg(format!("/usr/local/bin/{BINARY_NAME}")))?;
-    run(Command::new("sudo")
-        .arg("rm")
-        .arg("-f")
-        .arg(format!("/usr/local/bin/{LEGACY_BINARY_NAME}")))?;
-    run(Command::new("sudo")
-        .arg("ln")
-        .arg("-s")
-        .arg(BINARY_NAME)
-        .arg(format!("/usr/local/bin/{LEGACY_BINARY_NAME}")))?;
     Ok(())
 }
 
@@ -577,52 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn copies_only_missing_legacy_config_and_state() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join(".clawhip");
-        let destination = dir.path().join(".op-pi");
-        std::fs::create_dir_all(source.join("state")).expect("create legacy state");
-        std::fs::write(source.join("config.toml"), "legacy = true").expect("write legacy config");
-        std::fs::write(source.join("state/event.json"), "legacy event")
-            .expect("write legacy state");
-        std::fs::create_dir_all(&destination).expect("create destination");
-        std::fs::write(destination.join("config.toml"), "current = true")
-            .expect("write current config");
-
-        copy_missing_dir_contents(&source, &destination).expect("migrate legacy data");
-
-        assert_eq!(
-            std::fs::read_to_string(destination.join("config.toml")).expect("read config"),
-            "current = true"
-        );
-        assert_eq!(
-            std::fs::read_to_string(destination.join("state/event.json")).expect("read state"),
-            "legacy event"
-        );
-    }
-
-    #[test]
-    fn config_directory_names_use_the_current_and_legacy_brands() {
-        assert_eq!(config_dir().file_name().unwrap(), ".op-pi");
-        assert_eq!(legacy_config_dir().file_name().unwrap(), ".clawhip");
-    }
-
-    #[test]
-    fn install_replaces_binaries_owned_by_the_legacy_package() {
-        let command = cargo_install_command(Path::new("/tmp/op-pi"));
+    fn install_uses_the_canonical_binary_path() {
+        let command = cargo_install_command(Path::new("/tmp/op_pi"));
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(args, ["install", "--path", "/tmp/op-pi", "--force"]);
-    }
-
-    #[test]
-    fn systemd_unit_keeps_the_legacy_service_alias() {
-        let unit = include_str!("../deploy/op-pi.service");
-
-        assert!(unit.lines().any(|line| line == "Alias=clawhip.service"));
+        assert_eq!(args, ["install", "--path", "/tmp/op_pi", "--force"]);
     }
 
     #[test]
@@ -637,7 +509,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not contain an op-pi checkout")
+                .contains("does not contain an op_pi checkout")
         );
     }
 
@@ -646,7 +518,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         // Create only Cargo.toml but not src/
-        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"op-pi\"")
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"op_pi\"")
             .expect("write Cargo.toml");
 
         let error = update_from_repo(Some(root.to_str().unwrap()), false)
@@ -655,7 +527,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not contain an op-pi checkout")
+                .contains("does not contain an op_pi checkout")
         );
     }
 

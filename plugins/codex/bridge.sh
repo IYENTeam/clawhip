@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[op-pi:codex] hook=$*"
+echo "[op_pi:codex] hook=$*"

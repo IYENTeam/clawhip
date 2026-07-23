@@ -48,9 +48,7 @@ impl SlackClient {
         Ok(Self {
             webhook_client: reqwest::Client::new(),
             bot_client,
-            api_base: std::env::var("OP_PI_SLACK_API_BASE")
-                .or_else(|_| std::env::var("CLAWHIP_SLACK_API_BASE"))
-                .unwrap_or_else(|_| default_api_base()),
+            api_base: std::env::var("OP_PI_SLACK_API_BASE").unwrap_or_else(|_| default_api_base()),
         })
     }
 

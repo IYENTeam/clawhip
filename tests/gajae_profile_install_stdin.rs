@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 fn op_pi_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_op-pi")
+    env!("CARGO_BIN_EXE_op_pi")
 }
 
 fn write_executable(path: &Path, contents: &str) {
@@ -26,7 +26,7 @@ fn gajae_stub(temp: &TempDir, contents: &str) -> std::path::PathBuf {
 #[test]
 fn gajae_preflight_prints_public_safe_ready_summary() {
     let temp = TempDir::new().expect("tempdir");
-    let profile = temp.path().join(".op-pi/gajae.routes.yml");
+    let profile = temp.path().join(".op_pi/gajae.routes.yml");
     fs::create_dir_all(profile.parent().expect("profile parent")).expect("profile dir");
     fs::write(
         &profile,
@@ -105,7 +105,7 @@ exit 64
     let summary: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json summary");
     assert_eq!(summary["ready"], false);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("op-pi gajae profile install"));
+    assert!(stdout.contains("op_pi gajae profile install"));
     assert!(!stdout.contains("secret"));
 }
 
@@ -124,7 +124,7 @@ routes:
   github.issue-opened:
     command: gajae handle github.issue-opened
   session.started:
-    command: gajae runtime handle --router op-pi --event session.started
+    command: gajae runtime handle --router op_pi --event session.started
 "#,
     )
     .expect("write profile");
@@ -150,10 +150,10 @@ fi
 if [[ "$1" == "handle" && "${3:-}" == "--help" ]]; then
   exit 0
 fi
-if [[ "$1" == "runtime" && "${2:-}" == "handle" && "${3:-}" == "--router" && "${4:-}" == "op-pi" && "${5:-}" == "--event" && "${7:-}" == "--help" ]]; then
+if [[ "$1" == "runtime" && "${2:-}" == "handle" && "${3:-}" == "--router" && "${4:-}" == "op_pi" && "${5:-}" == "--event" && "${7:-}" == "--help" ]]; then
   exit 0
 fi
-if [[ "$1" == "operator" && "${2:-}" == "onboard" && "${3:-}" == "plan" && "${4:-}" == "--repo" && "${6:-}" == "--router" && "${7:-}" == "op-pi" && "${8:-}" == "--dry-run" ]]; then
+if [[ "$1" == "operator" && "${2:-}" == "onboard" && "${3:-}" == "plan" && "${4:-}" == "--repo" && "${6:-}" == "--router" && "${7:-}" == "op_pi" && "${8:-}" == "--dry-run" ]]; then
   exit 0
 fi
 exit 64
@@ -191,7 +191,7 @@ exit 64
     let args = fs::read_to_string(temp.path().join("gajae.args")).expect("arg log");
     assert!(args.contains("--help\n"));
     assert!(args.contains("schema list --capabilities\n"));
-    assert!(args.contains("operator onboard plan --repo owner/repo --router op-pi --dry-run\n"));
+    assert!(args.contains("operator onboard plan --repo owner/repo --router op_pi --dry-run\n"));
     assert!(
         !args.contains("profile install"),
         "doctor must not mutate profile: {args}"
@@ -295,7 +295,7 @@ exit 64
         "stdout={stdout}"
     );
     assert!(
-        stdout.contains("op-pi gajae profile install"),
+        stdout.contains("op_pi gajae profile install"),
         "stdout={stdout}"
     );
     assert!(!stdout.contains("/home/operator"), "stdout={stdout}");
@@ -453,7 +453,7 @@ printf 'install diagnostics\n' >&2
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn op-pi");
+        .expect("spawn op_pi");
 
     child
         .stdin
@@ -462,7 +462,7 @@ printf 'install diagnostics\n' >&2
         .write_all(b"sensitive operator input\n")
         .expect("write stdin");
 
-    let output = child.wait_with_output().expect("wait for op-pi");
+    let output = child.wait_with_output().expect("wait for op_pi");
 
     assert!(
         output.status.success(),
@@ -473,7 +473,7 @@ printf 'install diagnostics\n' >&2
     );
     assert_eq!(
         fs::read_to_string(temp.path().join("gajae.args")).expect("arg log"),
-        "op-pi profile install\n"
+        "op_pi profile install\n"
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -500,7 +500,7 @@ exit 23
         .args(["gajae", "profile", "install"])
         .env("GAJAE_BIN", &stub)
         .output()
-        .expect("run op-pi");
+        .expect("run op_pi");
 
     assert_eq!(
         output.status.code(),
@@ -543,7 +543,7 @@ printf '{"receipt_id":"public-1","verdict":"hold","summary":"needs reviewer evid
         .env("GAJAE_BIN", &stub)
         .env("GAJAE_ARG_LOG", temp.path().join("gajae.args"))
         .output()
-        .expect("run op-pi");
+        .expect("run op_pi");
 
     assert!(
         output.status.success(),
@@ -614,7 +614,7 @@ printf '{"receipt_id":"stdin-1","summary":"stdin receipt ok"}\n'
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn op-pi");
+        .expect("spawn op_pi");
     child
         .stdin
         .as_mut()
@@ -622,7 +622,7 @@ printf '{"receipt_id":"stdin-1","summary":"stdin receipt ok"}\n'
         .write_all(b"{\"secret\":\"do not route\"}\n")
         .expect("write stdin");
 
-    let output = child.wait_with_output().expect("wait for op-pi");
+    let output = child.wait_with_output().expect("wait for op_pi");
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",
@@ -678,7 +678,7 @@ exit 42
         ])
         .env("GAJAE_BIN", &stub)
         .output()
-        .expect("run op-pi");
+        .expect("run op_pi");
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);

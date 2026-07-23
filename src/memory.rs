@@ -301,11 +301,11 @@ fn scaffold_files(layout: &MemoryLayout) -> Vec<(PathBuf, String)> {
         (layout.lessons_file(), render_lessons_file()),
         (
             layout.handoffs_dir().join(".gitkeep"),
-            String::from("# tracked by op-pi memory init\n"),
+            String::from("# tracked by op_pi memory init\n"),
         ),
         (
             layout.archive_dir().join(".gitkeep"),
-            String::from("# tracked by op-pi memory init\n"),
+            String::from("# tracked by op_pi memory init\n"),
         ),
     ];
 
@@ -480,7 +480,7 @@ fn render_daily_file(layout: &MemoryLayout) -> String {
         String::new(),
         "## Log".into(),
         String::new(),
-        "- Scaffold created with `op-pi memory init`.".into(),
+        "- Scaffold created with `op_pi memory init`.".into(),
     ]);
     lines.join("\n") + "\n"
 }
@@ -598,7 +598,8 @@ fn slugify(input: &str) -> Result<String> {
         let normalized = match ch {
             'a'..='z' | '0'..='9' => Some(ch),
             'A'..='Z' => Some(ch.to_ascii_lowercase()),
-            ' ' | '_' | '-' | '/' | '.' => Some('-'),
+            ' ' | '-' | '/' | '.' => Some('-'),
+            '_' => Some('_'),
             _ => None,
         };
 
@@ -1053,7 +1054,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = MemoryLayout {
             root: tempdir.path().to_path_buf(),
-            project_slug: "op-pi".into(),
+            project_slug: "op_pi".into(),
             channel_slug: Some("alerts".into()),
             agent_slug: Some("codex".into()),
             today_slug: "2026-03-10".into(),
@@ -1074,7 +1075,7 @@ mod tests {
         assert!(layout.archive_dir().join(".gitkeep").is_file());
 
         let memory_md = fs::read_to_string(layout.memory_file()).expect("read MEMORY.md");
-        assert!(memory_md.contains("memory/projects/op-pi.md"));
+        assert!(memory_md.contains("memory/projects/op_pi.md"));
         assert!(memory_md.contains("memory/channels/alerts.md"));
         assert!(memory_md.contains("memory/agents/codex.md"));
     }
@@ -1084,7 +1085,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = MemoryLayout {
             root: tempdir.path().to_path_buf(),
-            project_slug: "op-pi".into(),
+            project_slug: "op_pi".into(),
             channel_slug: None,
             agent_slug: None,
             today_slug: "2026-03-10".into(),
@@ -1107,7 +1108,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = MemoryLayout {
             root: tempdir.path().to_path_buf(),
-            project_slug: "op-pi".into(),
+            project_slug: "op_pi".into(),
             channel_slug: Some("alerts".into()),
             agent_slug: None,
             today_slug: "2026-03-10".into(),
@@ -1130,10 +1131,10 @@ mod tests {
 
     #[test]
     fn slugify_normalizes_common_inputs() {
-        assert_eq!(slugify("op-pi Workspace").expect("slug"), "op-pi-workspace");
+        assert_eq!(slugify("op_pi Workspace").expect("slug"), "op_pi-workspace");
         assert_eq!(
             slugify("issue_73/runtime").expect("slug"),
-            "issue-73-runtime"
+            "issue_73-runtime"
         );
     }
 
@@ -1160,7 +1161,7 @@ mod tests {
     fn test_layout(root: &Path) -> MemoryLayout {
         MemoryLayout {
             root: root.to_path_buf(),
-            project_slug: "op-pi".into(),
+            project_slug: "op_pi".into(),
             channel_slug: None,
             agent_slug: None,
             today_slug: "2026-03-10".into(),
@@ -1202,7 +1203,7 @@ mod tests {
     fn scaffold_args(root: &Path, write: bool, force: bool) -> MemoryScaffoldChannelsArgs {
         MemoryScaffoldChannelsArgs {
             root: Some(root.to_path_buf()),
-            project: Some("op-pi".into()),
+            project: Some("op_pi".into()),
             date: Some("2026-03-10".into()),
             write,
             force,
@@ -1214,7 +1215,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(tempdir.path());
         let config = config_with_routes(vec![route_with_repo(
-            "gajae/op-pi",
+            "gajae/op_pi",
             "123",
             Some("dev-followup"),
         )]);
@@ -1224,7 +1225,7 @@ mod tests {
         assert_eq!(missing.len(), 1);
         assert!(missing[0].path.ends_with("memory/channels/dev-followup.md"));
         assert!(!missing[0].exists);
-        assert!(missing[0].contents.contains("gajae/op-pi"));
+        assert!(missing[0].contents.contains("gajae/op_pi"));
     }
 
     #[test]
@@ -1236,24 +1237,24 @@ mod tests {
             .monitors
             .git
             .repos
-            .push(git_monitor("gajae/op-pi", Some("ops"), Some("Ops Alerts")));
+            .push(git_monitor("gajae/op_pi", Some("ops"), Some("Ops Alerts")));
 
         let missing = missing_routed_channel_profiles(&layout, &config).expect("missing");
 
         assert_eq!(missing.len(), 1);
         assert!(missing[0].path.ends_with("memory/channels/ops-alerts.md"));
-        assert!(missing[0].contents.contains("gajae/op-pi"));
+        assert!(missing[0].contents.contains("gajae/op_pi"));
     }
 
     #[test]
     fn deduplicates_route_and_monitor_for_same_channel_repo() {
         let mut config =
-            config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+            config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
         config
             .monitors
             .git
             .repos
-            .push(git_monitor("gajae/op-pi", Some("123"), Some("dev")));
+            .push(git_monitor("gajae/op_pi", Some("123"), Some("dev")));
 
         let plan = build_channel_profile_plan(&config);
 
@@ -1264,7 +1265,7 @@ mod tests {
     #[test]
     fn aggregates_multiple_repos_for_same_channel() {
         let config = config_with_routes(vec![
-            route_with_repo("gajae/op-pi", "123", Some("dev")),
+            route_with_repo("gajae/op_pi", "123", Some("dev")),
             route_with_repo("gajae/other", "123", Some("dev")),
         ]);
 
@@ -1274,7 +1275,7 @@ mod tests {
         assert_eq!(plan.profiles[0].repos.len(), 2);
         let layout = test_layout(Path::new("/tmp"));
         let content = render_repo_channel_profile(&plan.profiles[0], &layout);
-        assert!(content.contains("gajae/op-pi"));
+        assert!(content.contains("gajae/op_pi"));
         assert!(content.contains("gajae/other"));
     }
 
@@ -1293,25 +1294,25 @@ mod tests {
 
     #[test]
     fn route_repo_without_owner_enriches_from_unique_git_monitor() {
-        let mut config = config_with_routes(vec![route_with_repo("op-pi", "123", Some("dev"))]);
+        let mut config = config_with_routes(vec![route_with_repo("op_pi", "123", Some("dev"))]);
         config
             .monitors
             .git
             .repos
-            .push(git_monitor("gajae/op-pi", None, None));
+            .push(git_monitor("gajae/op_pi", None, None));
 
         let plan = build_channel_profile_plan(&config);
 
         assert_eq!(plan.profiles.len(), 1);
         assert!(plan.profiles[0].repos.contains(&RepoIdentity {
             owner: "gajae".into(),
-            name: "op-pi".into(),
+            name: "op_pi".into(),
         }));
     }
 
     #[test]
     fn route_repo_without_owner_reports_unscaffoldable_without_unique_monitor() {
-        let config = config_with_routes(vec![route_with_repo("op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("op_pi", "123", Some("dev"))]);
 
         let plan = build_channel_profile_plan(&config);
 
@@ -1323,12 +1324,12 @@ mod tests {
     fn rendered_profile_contains_required_public_fields() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(tempdir.path());
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
 
         let missing = missing_routed_channel_profiles(&layout, &config).expect("missing");
         let content = &missing[0].contents;
 
-        assert!(content.contains("gajae/op-pi"));
+        assert!(content.contains("gajae/op_pi"));
         assert!(content.contains("Default branch policy"));
         assert!(content.contains("Notification purpose"));
         assert!(content.contains("Follow-up behavior"));
@@ -1339,7 +1340,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(tempdir.path());
         let mut filter = BTreeMap::new();
-        filter.insert("repo".to_string(), "gajae/op-pi".to_string());
+        filter.insert("repo".to_string(), "gajae/op_pi".to_string());
         let mut config = AppConfig::default();
         config.providers.discord.bot_token = Some("SECRET-DISCORD-TOKEN".into());
         config.monitors.github_token = Some("SECRET-GH-TOKEN".into());
@@ -1370,24 +1371,24 @@ mod tests {
         ] {
             assert!(!content.contains(needle), "profile leaked '{needle}'");
         }
-        assert!(content.contains("gajae/op-pi"));
+        assert!(content.contains("gajae/op_pi"));
     }
 
     #[test]
     fn skipped_binding_diagnostics_are_sanitized() {
-        let config = config_with_routes(vec![route_with_repo("op-pi", "987654321", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("op_pi", "987654321", Some("dev"))]);
 
         let plan = build_channel_profile_plan(&config);
 
         assert_eq!(plan.unscaffoldable.len(), 1);
         assert!(!plan.unscaffoldable[0].contains("987654321"));
-        assert!(plan.unscaffoldable[0].contains("op-pi"));
+        assert!(plan.unscaffoldable[0].contains("op_pi"));
     }
 
     #[test]
     fn dry_run_does_not_write_files() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
 
         scaffold_channels(scaffold_args(tempdir.path(), false, false), &config).expect("dry run");
 
@@ -1397,20 +1398,20 @@ mod tests {
     #[test]
     fn write_creates_missing_profile() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
 
         scaffold_channels(scaffold_args(tempdir.path(), true, false), &config).expect("write");
 
         let path = tempdir.path().join("memory/channels/dev.md");
         assert!(path.is_file());
         let content = fs::read_to_string(&path).expect("read profile");
-        assert!(content.contains("gajae/op-pi"));
+        assert!(content.contains("gajae/op_pi"));
     }
 
     #[test]
     fn write_is_idempotent_without_force() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
         let path = tempdir.path().join("memory/channels/dev.md");
         fs::create_dir_all(path.parent().unwrap()).expect("create channels dir");
         fs::write(&path, "custom profile").expect("seed profile");
@@ -1423,7 +1424,7 @@ mod tests {
     #[test]
     fn force_overwrites_existing_profile() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
         let path = tempdir.path().join("memory/channels/dev.md");
         fs::create_dir_all(path.parent().unwrap()).expect("create channels dir");
         fs::write(&path, "custom profile").expect("seed profile");
@@ -1432,14 +1433,14 @@ mod tests {
 
         let content = fs::read_to_string(&path).expect("read");
         assert_ne!(content, "custom profile");
-        assert!(content.contains("gajae/op-pi"));
+        assert!(content.contains("gajae/op_pi"));
     }
 
     #[test]
     fn missing_routed_channel_profiles_short_circuits_existing_file() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(tempdir.path());
-        let config = config_with_routes(vec![route_with_repo("gajae/op-pi", "123", Some("dev"))]);
+        let config = config_with_routes(vec![route_with_repo("gajae/op_pi", "123", Some("dev"))]);
         let path = layout.channels_dir().join("dev.md");
         fs::create_dir_all(path.parent().unwrap()).expect("create channels dir");
         fs::write(&path, "custom profile").expect("seed profile");
@@ -1454,7 +1455,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(tempdir.path());
         let mut filter = BTreeMap::new();
-        filter.insert("repo".to_string(), "gajae/op-pi".to_string());
+        filter.insert("repo".to_string(), "gajae/op_pi".to_string());
         let mut config = AppConfig::default();
         config.routes.push(RouteRule {
             event: "*".into(),

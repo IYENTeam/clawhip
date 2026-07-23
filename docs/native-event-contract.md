@@ -3,14 +3,14 @@
 > Frozen shared-event reference: see [docs/event-contract-v1.md](event-contract-v1.md).
 > This document is the higher-level routing, metadata, and augmentation guide.
 
-op-pi now treats Codex and Claude as the source of truth for hook registration and scope.
-op-pi's job is to ingest provider-native hook payloads, normalize them into a stable routing
+op_pi now treats Codex and Claude as the source of truth for hook registration and scope.
+op_pi's job is to ingest provider-native hook payloads, normalize them into a stable routing
 contract, and handle delivery.
 
 ## Goal
 
-op-pi should remain the single routing and formatting layer for provider-native operational
-events. Providers should fire hooks; op-pi should normalize, route, and render them.
+op_pi should remain the single routing and formatting layer for provider-native operational
+events. Providers should fire hooks; op_pi should normalize, route, and render them.
 
 ## Shared v1 hook surface
 
@@ -22,7 +22,7 @@ v1 intentionally supports only the five events shared by Codex and Claude:
 - `UserPromptSubmit`
 - `Stop`
 
-Provider-specific extra events stay out of the shared route surface until op-pi adopts them
+Provider-specific extra events stay out of the shared route surface until op_pi adopts them
 explicitly.
 
 ### Question-request bridge
@@ -41,7 +41,7 @@ message prose:
 This covers Codex/OMX-compatible hooks, Pi/GJC ask tools, and Claude Code's
 `askuserquestion` tool without treating arbitrary question marks as alerts.
 
-Question alerts are public-safe by default. op-pi exposes only bounded `summary`,
+Question alerts are public-safe by default. op_pi exposes only bounded `summary`,
 `question`, and `question_summary` fields derived from common tool-input keys such as
 `question`, `prompt`, or `message`; control characters and newlines are collapsed and the
 summary is truncated. The original ask tool input/response is not retained in the normalized
@@ -52,9 +52,9 @@ summary is truncated. The original ask tool input/response is not retained in th
 Use the generic provider-native thin client:
 
 ```bash
-op-pi native hook --provider codex --file payload.json
-op-pi native hook --provider claude --file payload.json
-cat payload.json | op-pi native hook --provider codex
+op_pi native hook --provider codex --file payload.json
+op_pi native hook --provider claude --file payload.json
+cat payload.json | op_pi native hook --provider codex
 ```
 
 This keeps local verification, fixture testing, and provider-side forwarding on one public
@@ -62,7 +62,7 @@ surface.
 
 ## Stable base routing fields
 
-When the provider payload and git repo/worktree context make them available, op-pi preserves these base
+When the provider payload and git repo/worktree context make them available, op_pi preserves these base
 fields for routing:
 
 - `provider`
@@ -90,7 +90,7 @@ fields for routing:
 
 ## Augmentation model
 
-`.op-pi/hooks/` can enrich the base payload, but only additively.
+`.op_pi/hooks/` can enrich the base payload, but only additively.
 
 Allowed augmentation patterns:
 
@@ -102,7 +102,7 @@ Disallowed augmentation patterns:
 
 - removing `provider`, `event`, `directory`, `worktree_path`, `repo_name`, or `project`
 - replacing the base payload with a custom schema
-- turning provider-specific extra events into shared-route keys without an explicit op-pi
+- turning provider-specific extra events into shared-route keys without an explicit op_pi
   contract update
 
 ## Routing guidance
@@ -126,14 +126,14 @@ Recommended route shape:
 ```toml
 [[routes]]
 event = "native.*"
-filter = { provider = "codex", repo_path = "*/op-pi" }
+filter = { provider = "codex", repo_path = "*/op_pi" }
 channel = "PROJECT_CHANNEL_ID"
 format = "compact"
 ```
 
 ## Formatting guidance
 
-Default op-pi formatting should stay low-noise:
+Default op_pi formatting should stay low-noise:
 
 - compact: one-line lifecycle/status summary plus key metadata
 - inline: dense room-safe summary
@@ -145,9 +145,9 @@ Default op-pi formatting should stay low-noise:
 Provider-native global configuration is now the supported setup path.
 
 1. Codex or Claude owns hook registration through the canonical global shared-surface install
-2. op-pi ingests the provider payload through `op-pi native hook`
-3. op-pi derives routing identity from git repo/worktree context and loads only additive augmenters
-4. op-pi owns channel routing, mentions, formatting, and delivery
+2. op_pi ingests the provider payload through `op_pi native hook`
+3. op_pi derives routing identity from git repo/worktree context and loads only additive augmenters
+4. op_pi owns channel routing, mentions, formatting, and delivery
 
-Legacy repo-local generated hook config/state is no longer supported; `op-pi hooks install --scope project`
+Legacy repo-local generated hook config/state is no longer supported; `op_pi hooks install --scope project`
 now warns and directs users to rerun the global install path without generating repo-local state.

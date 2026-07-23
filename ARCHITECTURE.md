@@ -1,6 +1,6 @@
-# op-pi Architecture — v0.4.0
+# op_pi Architecture — v0.4.0
 
-op-pi v0.4.0 ships a daemon-first event pipeline for Discord delivery, plus the clone-local install/memory surfaces that wrap it. This document describes the architecture that is present on the `release/0.4.0` branch.
+op_pi v0.4.0 ships a daemon-first event pipeline for Discord delivery, plus the clone-local install/memory surfaces that wrap it. This document describes the architecture that is present on the `release/0.4.0` branch.
 
 ## Release themes
 
@@ -90,14 +90,12 @@ token = "..."
 default_channel = "1234567890"
 ```
 
-Legacy `[discord]` configuration is still accepted and normalized on load for backward compatibility.
-
 Routes continue to use the familiar event/filter model, with a `sink` field that defaults to `"discord"`:
 
 ```toml
 [[routes]]
 event = "github.*"
-filter = { repo = "op-pi" }
+filter = { repo = "op_pi" }
 sink = "discord"
 channel = "1480171113253175356"
 mention = "<@1465264645320474637>"

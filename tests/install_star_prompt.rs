@@ -62,31 +62,8 @@ fn run_shell(temp: &TempDir, script_body: &str, extra_env: &[(&str, &str)]) -> O
 }
 
 #[test]
-fn migration_preserves_current_files_and_copies_missing_legacy_state() {
-    let temp = TempDir::new().expect("tempdir");
-    let home = temp.path().join("home");
-    fs::create_dir_all(home.join(".clawhip/state")).expect("create legacy state");
-    fs::create_dir_all(home.join(".op-pi")).expect("create current state");
-    fs::write(home.join(".clawhip/config.toml"), "legacy = true").expect("write legacy config");
-    fs::write(home.join(".clawhip/state/event.json"), "legacy event").expect("write legacy event");
-    fs::write(home.join(".op-pi/config.toml"), "current = true").expect("write current config");
-
-    let output = run_shell(&temp, "migrate_legacy_data", &[]);
-
-    assert!(output.status.success(), "script failed: {output:?}");
-    assert_eq!(
-        fs::read_to_string(home.join(".op-pi/config.toml")).expect("read current config"),
-        "current = true"
-    );
-    assert_eq!(
-        fs::read_to_string(home.join(".op-pi/state/event.json")).expect("read migrated event"),
-        "legacy event"
-    );
-}
-
-#[test]
 fn format_gate_script_is_directly_executable() {
-    let mode = fs::metadata(repo_root().join("scripts/internal-pr-format-gate.sh"))
+    let mode = fs::metadata(repo_root().join("scripts/internal_pr_format_gate.sh"))
         .expect("format gate metadata")
         .permissions()
         .mode();
@@ -196,7 +173,7 @@ EOF_INPUT
     let gh_log = fs::read_to_string(temp.path().join("gh.log")).expect("gh log");
     assert_eq!(
         gh_log.trim(),
-        "api --method PUT /user/starred/IYENTeam/op-pi --silent"
+        "api --method PUT /user/starred/IYENTeam/op_pi --silent"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

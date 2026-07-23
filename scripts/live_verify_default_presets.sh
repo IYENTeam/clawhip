@@ -4,17 +4,17 @@ set -euo pipefail
 usage() {
   cat <<USAGE
 Usage:
-  scripts/live-verify-default-presets.sh issue-opened
-  scripts/live-verify-default-presets.sh issue-comment
-  scripts/live-verify-default-presets.sh issue-closed
-  scripts/live-verify-default-presets.sh pr-opened
-  scripts/live-verify-default-presets.sh pr-merged
-  scripts/live-verify-default-presets.sh tmux-keyword
-  scripts/live-verify-default-presets.sh tmux-stale
-  scripts/live-verify-default-presets.sh tmux-wrapper
+  scripts/live_verify_default_presets.sh issue-opened
+  scripts/live_verify_default_presets.sh issue-comment
+  scripts/live_verify_default_presets.sh issue-closed
+  scripts/live_verify_default_presets.sh pr-opened
+  scripts/live_verify_default_presets.sh pr-merged
+  scripts/live_verify_default_presets.sh tmux-keyword
+  scripts/live_verify_default_presets.sh tmux-stale
+  scripts/live_verify_default_presets.sh tmux-wrapper
 
 Required env vars for GitHub/Discord verification:
-  OP_PI_REPO           e.g. IYENTeam/op-pi
+  OP_PI_REPO           e.g. IYENTeam/op_pi
   OP_PI_CHANNEL        Discord test channel id
   OP_PI_BOT_TOKEN      Discord bot token
   OP_PI_DAEMON_URL     e.g. http://127.0.0.1:25294
@@ -61,7 +61,7 @@ case "$mode" in
   issue-opened)
     require_common
     echo "Create a real issue in $OP_PI_REPO, then confirm Discord delivery."
-    echo "Example: gh issue create --repo $OP_PI_REPO --title 'op-pi live issue-opened <ts>' --body 'verification'"
+    echo "Example: gh issue create --repo $OP_PI_REPO --title 'op_pi live issue-opened <ts>' --body 'verification'"
     ;;
   issue-comment)
     require_common
@@ -89,7 +89,7 @@ case "$mode" in
     ;;
   tmux-wrapper)
     require_common
-    echo "Run op-pi tmux new ... with keywords/mention/channel and verify wrapper-generated delivery in Discord."
+    echo "Run op_pi tmux new ... with keywords/mention/channel and verify wrapper-generated delivery in Discord."
     ;;
   *)
     usage
