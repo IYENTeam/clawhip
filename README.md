@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/IYENTeam/clawhip/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/IYENTeam/clawhip/ci.yml?branch=main&style=flat-square&label=build&labelColor=111827&color=55e6c1" alt="Build status" /></a>
-  <a href="https://github.com/IYENTeam/clawhip/releases"><img src="https://img.shields.io/github/v/release/IYENTeam/clawhip?style=flat-square&label=release&labelColor=111827&color=8b7cff" alt="Latest release" /></a>
+  <a href="https://github.com/IYENTeam/op-pi/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/IYENTeam/op-pi/ci.yml?branch=main&style=flat-square&label=build&labelColor=111827&color=55e6c1" alt="Build status" /></a>
+  <a href="https://github.com/IYENTeam/op-pi/releases"><img src="https://img.shields.io/github/v/release/IYENTeam/op-pi?style=flat-square&label=release&labelColor=111827&color=8b7cff" alt="Latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4aa8ff?style=flat-square&labelColor=111827" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Rust-2024-f97316?style=flat-square&labelColor=111827&logo=rust&logoColor=white" alt="Rust 2024" />
 </p>
@@ -76,7 +76,7 @@ intake  ->  normalize  ->  validate  ->  route  ->  render  ->  deliver
 ### Install from the current repository
 
 ```bash
-git clone https://github.com/IYENTeam/clawhip.git op-pi
+git clone https://github.com/IYENTeam/op-pi.git
 cd op-pi
 ./install.sh --skip-star-prompt
 ```
