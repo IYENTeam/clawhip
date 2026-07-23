@@ -1,146 +1,89 @@
-# op-pi
+<p align="center">
+  <img src="assets/op-pi-hero.svg" width="100%" alt="op-pi routes operational signals through one typed pipeline to Discord, Slack, and local interfaces" />
+</p>
 
-**Operation Pipeline Interface**
+<h1 align="center">op-pi</h1>
 
-> Signals in. Decisions routed. Actions out.
+<p align="center">
+  <strong>Operation Pipeline Interface</strong>
+  <br />
+  One operational path from every signal to the right human, agent, or system.
+</p>
 
-`op-pi` is a local-first operations interface for turning events from development
-tools, cloud platforms, and agent runtimes into deliberate deliveries and
-operator-visible actions.
+<p align="center">
+  <a href="https://github.com/IYENTeam/op-pi/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/IYENTeam/op-pi/ci.yml?branch=main&style=flat-square&label=build&labelColor=111827&color=55e6c1" alt="Build status" /></a>
+  <img src="https://img.shields.io/badge/pipeline-local--first-8b7cff?style=flat-square&labelColor=111827" alt="Local-first pipeline" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4aa8ff?style=flat-square&labelColor=111827" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/Rust-2024-f97316?style=flat-square&labelColor=111827&logo=rust&logoColor=white" alt="Rust 2024" />
+</p>
 
-It gives operational signals one typed path:
+<p align="center">
+  <a href="#quick-start">Quick start</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#one-pipeline-not-another-webhook-script">Why op-pi</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#what-it-connects">Interfaces</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#cloud-intake-security">Security</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#operations">Operations</a>
+</p>
 
-```text
-sources and webhooks
-        |
-        v
-normalize -> validate -> route -> render -> deliver
-        |                          |
-        +---- health + audit ------+
-```
+---
 
-Use it when several tools can produce events, several channels can receive
-them, and the routing decision should live in one explicit configuration
-instead of being scattered across webhook scripts.
+> [!IMPORTANT]
+> **The product is now op-pi.** During the compatibility-first rename, the
+> executable, Cargo package, config path, and environment prefix remain
+> `clawhip`. Every command in this README works with the currently shipped
+> runtime.
 
-## Why op-pi
+## Events happen everywhere. Operations should not.
 
-Operational automation usually starts as a collection of point integrations:
+CI failures, cloud alerts, GitHub activity, agent hooks, and live tmux sessions
+all speak different protocols. Teams usually connect them with one-off webhook
+scripts until nobody can explain why an alert reached one channel, missed
+another, or triggered an action.
 
-- CI posts directly to one chat channel
-- cloud alerts use a different webhook
-- local agent sessions have their own hooks
-- Git and GitHub monitors run separate scripts
-- escalation and approval rules are encoded in message text
-
-`op-pi` replaces those disconnected paths with one interface:
-
-1. **Intake** accepts provider-native events.
-2. **Normalization** converts them into typed event envelopes.
-3. **Routing** matches event families and payload metadata.
-4. **Rendering** turns an event into a destination-specific message.
-5. **Delivery** sends to Discord, Slack, local files, or an intentional drop.
-6. **Operations** expose health, diagnostics, bounded logs, and dry-run
-   explanations.
-
-The result is a pipeline you can inspect and reason about before an event
-reaches a person or agent.
-
-## Current compatibility names
-
-The product is now **op-pi**, but this repository is in a compatibility-first
-rename phase. The shipped runtime identifiers are still:
-
-| Surface | Current identifier |
-| --- | --- |
-| Binary | `clawhip` |
-| Config file | `~/.clawhip/config.toml` |
-| Runtime directory | `~/.clawhip/` |
-| Environment prefix | `CLAWHIP_` |
-| Cargo package | `clawhip` |
-
-Keeping these identifiers temporarily avoids breaking existing installations,
-launch agents, hooks, and persisted state. New documentation uses the op-pi
-product name while command examples remain executable against the current
-binary.
-
-## Pipeline model
+**op-pi gives those signals one typed, inspectable path.**
 
 ```text
-                           +----------------------+
- Git / GitHub ------------>|                      |
- tmux / agent hooks ------>|                      |
- Discord threads --------->|      op-pi intake    |
- AWS / Cloudflare -------->|                      |
- custom HTTP / CLI ------->|                      |
-                           +----------+-----------+
-                                      |
-                                      v
-                           +----------------------+
-                           | typed event envelope |
-                           +----------+-----------+
-                                      |
-                                      v
-                           +----------------------+
-                           | filters and policies |
-                           +----------+-----------+
-                                      |
-                     +----------------+----------------+
-                     |                |                |
-                     v                v                v
-                  Discord          Slack          localfile
-                                                       |
-                                                       v
-                                                 audit / replay
+intake  ->  normalize  ->  validate  ->  route  ->  render  ->  deliver
 ```
 
-One event may resolve to zero, one, or many deliveries. Routes are declarative,
-ordered, and testable with `clawhip explain`.
-
-## What it connects
-
-### Sources and intake
-
-| Source | Interface | Typical events |
-| --- | --- | --- |
-| Git | local poller and CLI | commits, branch changes |
-| GitHub | API poller, webhook, and CLI | issues, PR state, CI |
-| Native agent hooks | Codex and Claude hook bridge | session and tool lifecycle |
-| tmux | monitored sessions | keywords, stale sessions, recovery |
-| Discord threads | Discord API monitor | thread creation and activity |
-| AWS SNS | `POST /aws/sns` | CloudWatch alarms, SNS notifications |
-| AWS EventBridge | `POST /aws/eventbridge` | GuardDuty, Health, EC2, custom events |
-| Cloudflare Notifications | `POST /cloudflare` | alert policies and health checks |
-| Cloudflare Logpush | `POST /cloudflare/logpush` | firewall and audit batches |
-| Custom events | CLI and `POST /api/event` | internal operational signals |
-
-### Delivery targets
-
-- Discord channels
-- Discord threads
-- Discord webhooks
-- Slack channels through `chat.postMessage`
-- Slack incoming webhooks
-- JSONL local files
-- explicit `drop` routes
-
-Rendering and transport are separate. The same normalized event can be
-formatted differently for an alert channel, a routine channel, and an audit
-file.
+<table>
+  <tr>
+    <td width="25%" valign="top">
+      <strong>Provider-native intake</strong><br />
+      GitHub, Git, AWS, Cloudflare, Discord, tmux, Codex, Claude, and custom events.
+    </td>
+    <td width="25%" valign="top">
+      <strong>Typed routing</strong><br />
+      Match event families and payload metadata instead of parsing message text.
+    </td>
+    <td width="25%" valign="top">
+      <strong>Interface-aware delivery</strong><br />
+      Render once, then deliver to Discord, Slack, local files, or an intentional drop.
+    </td>
+    <td width="25%" valign="top">
+      <strong>Operational control</strong><br />
+      Explain decisions, inspect source health, bound logs, and keep cloud ingress closed by default.
+    </td>
+  </tr>
+</table>
 
 ## Quick start
 
-### Build from the current repository
+### Install from the current repository
 
 ```bash
-git clone https://github.com/IYENTeam/clawhip.git op-pi
+git clone https://github.com/IYENTeam/op-pi.git
 cd op-pi
 ./install.sh --skip-star-prompt
 ```
 
 The installed command is currently `clawhip`.
 
-### Create a minimal Discord configuration
+### Route your first event
 
 ```toml
 # ~/.clawhip/config.toml
@@ -155,23 +98,98 @@ channel = "DISCORD_CHANNEL_ID"
 format = "compact"
 ```
 
-Start and inspect the daemon:
-
 ```bash
 clawhip start
 clawhip status
+clawhip explain github.pr-status-changed repo=my-app number=42
+```
+
+The daemon listens locally at `http://127.0.0.1:25294`.
+
+```bash
 curl -fsS http://127.0.0.1:25294/health
 ```
 
-The default local endpoint is:
+## One pipeline, not another webhook script
 
-```text
-http://127.0.0.1:25294
+| Point integration | op-pi |
+| --- | --- |
+| Each provider owns its own delivery logic | Providers only produce normalized events |
+| Message text becomes accidental routing state | Typed fields and explicit filters decide routes |
+| One input maps to one hard-coded destination | One event resolves to zero, one, or many deliveries |
+| Authentication varies by copied script | Intake security is centralized and testable |
+| Failures repeat forever in unbounded logs | Health, backoff, deduplication, and rotation are built in |
+| Nobody can preview a routing decision | `clawhip explain` shows the route without dispatching |
+
+## The operation pipeline
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        GH[GitHub + Git]
+        AG[Agent hooks]
+        CL[Cloud events]
+        TM[tmux + Discord]
+    end
+
+    subgraph op-pi
+        IN[Intake]
+        EN[Typed envelope]
+        RT[Routes + policy]
+        RD[Renderer]
+        IN --> EN --> RT --> RD
+    end
+
+    subgraph Interfaces
+        DC[Discord]
+        SL[Slack]
+        LF[Local JSONL]
+        DR[Drop]
+    end
+
+    GH --> IN
+    AG --> IN
+    CL --> IN
+    TM --> IN
+    RD --> DC
+    RD --> SL
+    RD --> LF
+    RD --> DR
 ```
 
-## Routing examples
+One event can fan out across interfaces. Rendering and transport stay separate,
+so the same operational fact can be compact in a routine channel, prominent in
+an escalation channel, and complete in an audit file.
 
-### Send CloudWatch alarms to Slack
+## What it connects
+
+### Intake surfaces
+
+| Source | Interface | Typical events |
+| --- | --- | --- |
+| Git | local poller and CLI | commits, branch changes |
+| GitHub | API poller, webhook, and CLI | issues, pull requests, CI |
+| Codex and Claude | provider-native hook bridge | session and tool lifecycle |
+| tmux | monitored sessions | keywords, stale sessions, recovery |
+| Discord threads | Discord API monitor | thread creation and activity |
+| AWS SNS | `POST /aws/sns` | CloudWatch alarms, SNS notifications |
+| AWS EventBridge | `POST /aws/eventbridge` | GuardDuty, Health, EC2, custom events |
+| Cloudflare Notifications | `POST /cloudflare` | alert policies and health checks |
+| Cloudflare Logpush | `POST /cloudflare/logpush` | firewall and audit batches |
+| Custom systems | CLI and `POST /api/event` | internal operational signals |
+
+### Delivery interfaces
+
+| Interface | Targets | Behavior |
+| --- | --- | --- |
+| Discord | channels, threads, webhooks | explicit targets, rate-limit handling |
+| Slack | channels and incoming webhooks | Block Kit rendering, 429 and 5xx retry |
+| Local files | JSONL paths | durable audit, replay, and high-volume capture |
+| Drop | explicit route | acknowledge noise without accidental delivery |
+
+## Route by intent
+
+### CloudWatch alarm to Slack
 
 ```toml
 [providers.slack]
@@ -190,7 +208,7 @@ channel = "C_OPERATIONS"
 format = "alert"
 ```
 
-### Split Cloudflare and AWS events between interfaces
+### Security events to Discord, audit events to disk
 
 ```toml
 [aws]
@@ -218,7 +236,7 @@ sink = "localfile"
 local_path = "/var/log/op-pi/cloudflare-audit.jsonl"
 ```
 
-### Require an operator-visible approval route
+### Approval requests stay requests
 
 ```toml
 [[routes]]
@@ -229,13 +247,13 @@ channel = "APPROVAL_CHANNEL_ID"
 format = "alert"
 ```
 
-op-pi routes and records the request. It does not interpret message text as
-permission to mutate infrastructure.
+op-pi routes and records the request. It does not treat message text as
+authorization to mutate infrastructure.
 
 ## Provider-native agent hooks
 
-Codex and Claude own session launch and hook registration. op-pi is the shared
-normalization and routing layer.
+Codex and Claude own session launch and hook registration. op-pi owns the
+shared event contract, normalization, and routing layer.
 
 ```bash
 clawhip hooks install --provider codex --scope global
@@ -246,45 +264,53 @@ clawhip native hook --provider claude --file payload.json
 cat payload.json | clawhip native hook --provider codex
 ```
 
-Shared hook events include:
+Shared hook events include `SessionStart`, `PreToolUse`, `PostToolUse`,
+`UserPromptSubmit`, and `Stop`.
 
-- `SessionStart`
-- `PreToolUse`
-- `PostToolUse`
-- `UserPromptSubmit`
-- `Stop`
-
-Routing should use stable metadata such as `provider`, `event`, `session_id`,
+Route with stable metadata such as `provider`, `event`, `session_id`,
 `repo_name`, `project`, `branch`, and `tool_name` rather than rendered text.
 
-See:
-
-- [`docs/native-event-contract.md`](docs/native-event-contract.md)
-- [`docs/event-contract-v1.md`](docs/event-contract-v1.md)
+- [Native event routing guide](docs/native-event-contract.md)
+- [Frozen v1 event contract](docs/event-contract-v1.md)
 
 ## Cloud intake security
 
-Cloud-facing endpoints are closed by default.
+> [!NOTE]
+> Cloud-facing endpoints are closed until their authentication settings are
+> explicitly configured.
 
-### AWS SNS
+<details>
+<summary><strong>AWS SNS signature verification</strong></summary>
+
+<br />
 
 - validates `TopicArn` against an optional allowlist
-- validates `SigningCertURL` as an HTTPS AWS SNS certificate URL
+- restricts `SigningCertURL` to HTTPS AWS SNS certificate endpoints
 - disables certificate-fetch redirects
 - checks X.509 validity
-- caches keys only until the shorter of cache TTL or certificate expiry
-- verifies RSA/SHA-1 or RSA/SHA-256 SNS signatures
+- caps key caching at the shorter of cache TTL or certificate expiry
+- verifies RSA/SHA-1 and RSA/SHA-256 SNS signatures
 
 An allowlist is an additional filter, not a substitute for signature
 verification.
 
-### EventBridge and Cloudflare
+</details>
 
-- return `503` until their shared secret is configured
-- use constant-time secret comparison
+<details>
+<summary><strong>EventBridge and Cloudflare authentication</strong></summary>
+
+<br />
+
+- return `503` until a shared secret is configured
+- compare secrets in constant time
 - reject missing or incorrect authentication
 
-### Cloudflare Logpush
+</details>
+
+<details>
+<summary><strong>Cloudflare Logpush bounds</strong></summary>
+
+<br />
 
 - limits raw request bodies to 10 MiB
 - limits decompressed payloads to 5 MiB
@@ -292,18 +318,23 @@ verification.
 - caps retained records per batch
 - rejects malformed records and decompression bombs
 
-See [`docs/aws-cloudflare-intake.md`](docs/aws-cloudflare-intake.md).
+</details>
+
+Read the complete [AWS and Cloudflare intake guide](docs/aws-cloudflare-intake.md).
 
 ## Explain before dispatch
 
-Use the routing explainer to inspect a decision without sending anything:
+Inspect a routing decision without sending anything:
 
 ```bash
 clawhip explain github.pr-status-changed repo=my-app number=42
 clawhip explain --json github.pr-status-changed repo=my-app number=42
 ```
 
-Other useful operational commands:
+The explainer reports which routes match, which filters pass, and where each
+delivery would go.
+
+## Operations
 
 ```bash
 clawhip status
@@ -315,47 +346,54 @@ clawhip tmux list
 clawhip gajae status
 ```
 
-## Reliability and observability
+Operational behavior includes:
 
-- bounded internal queue
-- typed event normalization
-- route validation at startup
+- bounded internal queues
+- startup route validation
 - source health in `/health`
-- retry handling for Slack rate limits and server failures
+- Slack rate-limit and server-failure retries
 - degraded-source backoff
 - repeated-error log deduplication
-- bounded log rotation utility
-
-The bundled rotation utility keeps operational logs bounded:
+- bounded log rotation
 
 ```bash
 scripts/rotate-clawhip-logs.sh
 ```
 
-Defaults:
-
-- rotate above 25 MiB
-- retain four gzip generations
-- restart the launchd service after rotating open log files
-
-The macOS deployment can schedule it through a user LaunchAgent. Other service
-managers may use their native rotation facilities.
+The bundled utility rotates above 25 MiB, retains four gzip generations, and
+can restart the launchd service after rotating open log files.
 
 ## Configuration principles
 
 1. Keep secrets in provider configuration or environment variables.
-2. Match routes on typed event fields, not message text.
-3. Use explicit Discord channel/thread targets.
+2. Match typed event fields, never rendered message text.
+3. Use explicit Discord channel or thread targets.
 4. Keep dynamic tokens disabled unless a route requires them.
 5. Route high-volume datasets to local files before chat.
-6. Use `drop` intentionally for acknowledged noise.
+6. Use `drop` only for intentionally acknowledged noise.
 7. Treat approval events as requests, not authorization.
+
+## Compatibility during the rename
+
+| Surface | Current identifier |
+| --- | --- |
+| Product | `op-pi` |
+| Binary | `clawhip` |
+| Config file | `~/.clawhip/config.toml` |
+| Runtime directory | `~/.clawhip/` |
+| Environment prefix | `CLAWHIP_` |
+| Cargo package | `clawhip` |
+
+These runtime identifiers remain stable for existing installations, launch
+agents, hooks, and persisted state. They will stay documented until the binary,
+package, service, and filesystem migration can happen as one deliberate
+compatibility change.
 
 ## Repository map
 
 ```text
 src/source/       event producers and monitors
-src/intake.rs     AWS and Cloudflare normalization and authentication
+src/intake.rs     AWS and Cloudflare intake and authentication
 src/router.rs     route resolution
 src/render/       destination-independent rendering
 src/sink/         Discord, Slack, and local-file delivery
@@ -365,28 +403,29 @@ scripts/          verification and operations utilities
 plugins/          tool-specific hook bridges
 ```
 
-Architecture details:
+### Read next
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md)
-- [`docs/live-verification.md`](docs/live-verification.md)
-- [`docs/agent-runbook.md`](docs/agent-runbook.md)
+- [Architecture](ARCHITECTURE.md)
+- [Live verification runbook](docs/live-verification.md)
+- [Agent operations runbook](docs/agent-runbook.md)
+- [Memory offload architecture](docs/memory-offload-architecture.md)
 
-## Project direction
+## Design center
 
-op-pi is an independent operations pipeline, not an extension of an upstream
-product. Its design center is:
+op-pi is an independent operations pipeline built around:
 
 - explicit operational interfaces
 - provider-native event intake
-- deterministic routing
+- deterministic, inspectable routing
 - human-visible policy boundaries
 - local-first operation
 - secure cloud ingress
-- inspectable delivery behavior
+- bounded delivery behavior
 
-The current compatibility identifiers will remain documented until the runtime,
-package, config path, and service names are migrated together.
+---
 
-## License
-
-MIT. See [`LICENSE`](LICENSE).
+<p align="center">
+  <strong>Signals in. Decisions routed. Actions out.</strong>
+  <br />
+  <sub>op-pi is licensed under the <a href="LICENSE">MIT License</a>.</sub>
+</p>
