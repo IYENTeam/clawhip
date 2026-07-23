@@ -404,7 +404,7 @@ pub(crate) fn repo_display_name(repo: &GitRepoMonitor) -> String {
 }
 
 pub(crate) fn git_bin() -> String {
-    std::env::var("CLAWHIP_GIT_BIN").unwrap_or_else(|_| "git".to_string())
+    std::env::var("OP_PI_GIT_BIN").unwrap_or_else(|_| "git".to_string())
 }
 
 fn discovery_state_key(repo: &GitRepoMonitor) -> String {
@@ -458,7 +458,7 @@ fn clear_monitor_failure(state: &mut GitMonitorState, path: &str, context: &str)
         suppressed_polls: Some(previous.suppressed_polls),
     }));
     eprintln!(
-        "clawhip source git {context} recovered for {path} after {} failure(s) and {} suppressed poll(s)",
+        "op_pi source git {context} recovered for {path} after {} failure(s) and {} suppressed poll(s)",
         previous.attempts, previous.suppressed_polls
     );
 }
@@ -496,7 +496,7 @@ fn record_monitor_failure(
             suppressed_polls: Some(suppressed_polls),
         }));
         eprintln!(
-            "clawhip source git {context} degraded for {path}: class={}, attempts={}, suppressed={}, next_retry_secs={}, error={message}",
+            "op_pi source git {context} degraded for {path}: class={}, attempts={}, suppressed={}, next_retry_secs={}, error={message}",
             classification.as_str(),
             attempts,
             suppressed_polls,
@@ -648,12 +648,12 @@ mod tests {
     #[test]
     fn parses_github_repo_urls() {
         assert_eq!(
-            parse_github_repo("git@github.com:bellman/clawhip.git"),
-            Some("bellman/clawhip".to_string())
+            parse_github_repo("git@github.com:bellman/op_pi.git"),
+            Some("bellman/op_pi".to_string())
         );
         assert_eq!(
-            parse_github_repo("https://github.com/bellman/clawhip.git"),
-            Some("bellman/clawhip".to_string())
+            parse_github_repo("https://github.com/bellman/op_pi.git"),
+            Some("bellman/op_pi".to_string())
         );
     }
 
@@ -687,9 +687,11 @@ mod tests {
         )
         .await;
 
+        let root = root.canonicalize().expect("canonical repo root");
+        let worktree = worktree.canonicalize().expect("canonical worktree");
         let repo = GitRepoMonitor {
             path: path_str(&root).to_string(),
-            name: Some("clawhip".into()),
+            name: Some("op_pi".into()),
             ..GitRepoMonitor::default()
         };
         let config = AppConfig {
@@ -710,7 +712,7 @@ mod tests {
         poll_git(&config, &tx, &mut state).await.unwrap();
         let branch_event = rx.try_recv().unwrap();
         assert_eq!(branch_event.kind, "git.branch-changed");
-        assert_eq!(branch_event.payload["repo"], "clawhip");
+        assert_eq!(branch_event.payload["repo"], "op_pi");
         assert_eq!(branch_event.payload["repo_path"], path_str(&root));
         assert_eq!(branch_event.payload["worktree_path"], path_str(&worktree));
         assert_eq!(branch_event.payload["old_branch"], "feat/issue-115");
@@ -724,7 +726,7 @@ mod tests {
         poll_git(&config, &tx, &mut state).await.unwrap();
         let commit_event = rx.try_recv().unwrap();
         assert_eq!(commit_event.kind, "git.commit");
-        assert_eq!(commit_event.payload["repo"], "clawhip");
+        assert_eq!(commit_event.payload["repo"], "op_pi");
         assert_eq!(commit_event.payload["repo_path"], path_str(&root));
         assert_eq!(commit_event.payload["worktree_path"], path_str(&worktree));
         assert_eq!(commit_event.payload["branch"], "feat/issue-115-v2");

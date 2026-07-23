@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/internal-pr-format-gate.sh
-  scripts/internal-pr-format-gate.sh --fix
+  scripts/internal_pr_format_gate.sh
+  scripts/internal_pr_format_gate.sh --fix
 
 Purpose:
   Cheap local guard for internal Rust PR flows. Refuses to continue when
@@ -41,20 +41,20 @@ if [ ! -f Cargo.toml ]; then
 fi
 
 if [ "$fix" -eq 1 ]; then
-  echo "[clawhip] auto-fixing format with cargo fmt --all"
+  echo "[op_pi] auto-fixing format with cargo fmt --all"
   cargo fmt --all
 fi
 
 if cargo fmt --all -- --check; then
-  echo "[clawhip] format gate passed"
+  echo "[op_pi] format gate passed"
   exit 0
 fi
 
 cat >&2 <<'MSG'
-[clawhip] format gate failed
+[op_pi] format gate failed
 - Run: cargo fmt --all
-- Re-run: scripts/internal-pr-format-gate.sh
-- Or auto-fix: scripts/internal-pr-format-gate.sh --fix
+- Re-run: scripts/internal_pr_format_gate.sh
+- Or auto-fix: scripts/internal_pr_format_gate.sh --fix
 Refusing to continue internal PR flow with a known format-only red CI path.
 MSG
 exit 1

@@ -26,7 +26,7 @@ pub fn install(args: HooksInstallArgs) -> Result<()> {
         println!("  {}", path.display());
     }
     println!("Supported shared events: {}", SHARED_HOOK_EVENTS.join(", "));
-    println!("Ingress: clawhip native hook --provider <codex|claude-code>");
+    println!("Ingress: op_pi native hook --provider <codex|claude-code>");
 
     Ok(())
 }
@@ -68,7 +68,7 @@ fn ensure_supported_install_scope(args: &HooksInstallArgs) -> Result<()> {
     }
 
     Err(anyhow!(
-        "Claude Code provider-native hook forwarding is global-only; Codex may use either ~/.codex/hooks.json or <repo>/.codex/hooks.json with the clawhip bridge in ~/.clawhip"
+        "Claude Code provider-native hook forwarding is global-only; Codex may use either ~/.codex/hooks.json or <repo>/.codex/hooks.json with the op_pi bridge in ~/.op_pi"
     )
     .into())
 }

@@ -90,7 +90,7 @@ impl Router {
             };
             if let Err(error) = sink.send(&delivery.target, &message).await {
                 eprintln!(
-                    "clawhip router delivery failed to {:?}: {error}",
+                    "op_pi router delivery failed to {:?}: {error}",
                     delivery.target
                 );
             }
@@ -360,7 +360,7 @@ impl Router {
                     return Ok(SinkTarget::DiscordWebhook(webhook.to_string()));
                 }
 
-                // For custom events (e.g. `clawhip send --channel X`), the
+                // For custom events (e.g. `op_pi send --channel X`), the
                 // event-level channel represents explicit user intent and must
                 // take highest priority — above both route and default channels.
                 if event.canonical_kind() == "custom"
@@ -793,7 +793,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
                 sink: "localfile".into(),
-                local_path: Some("/tmp/clawhip/events.jsonl".into()),
+                local_path: Some("/tmp/op_pi/events.jsonl".into()),
                 ..RouteRule::default()
             }],
             ..AppConfig::default()
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(delivery.sink, "localfile");
         assert_eq!(
             delivery.target,
-            SinkTarget::LocalFile("/tmp/clawhip/events.jsonl".into())
+            SinkTarget::LocalFile("/tmp/op_pi/events.jsonl".into())
         );
         assert_eq!(delivery.trace.result, RouteTraceResult::Matched);
     }
@@ -1093,14 +1093,14 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op_pi".into(),
             "feat/issue-115".into(),
             "1234567890abcdef".into(),
             "ship it".into(),
             None,
         )
         .with_repo_context(
-            Some("/repo/clawhip".into()),
+            Some("/repo/op_pi".into()),
             Some("/repo/.worktrees/issue-115".into()),
         );
 
@@ -1109,7 +1109,7 @@ mod tests {
         assert_eq!(format, MessageFormat::Compact);
         assert_eq!(
             content,
-            "git:clawhip[wt:issue-115]@feat/issue-115 1234567 ship it"
+            "git:op_pi[wt:issue-115]@feat/issue-115 1234567 ship it"
         );
     }
 
@@ -1158,7 +1158,7 @@ mod tests {
                 RouteRule {
                     event: "github.*".into(),
                     sink: "discord".into(),
-                    filter: [("repo".to_string(), "clawhip".to_string())]
+                    filter: [("repo".to_string(), "op_pi".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("gh-route".into()),
@@ -1197,7 +1197,7 @@ mod tests {
         let router = Router::new(Arc::new(config));
 
         let github_event =
-            IncomingEvent::github_issue_opened("clawhip".into(), 5, "boom".into(), None);
+            IncomingEvent::github_issue_opened("op_pi".into(), 5, "boom".into(), None);
         let (_, _, github_content) = router.preview(&github_event).await.unwrap();
         assert!(github_content.starts_with("<@botid> "));
         assert!(github_content.contains("boom"));
@@ -1423,7 +1423,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "github.*".into(),
                 sink: "discord".into(),
-                filter: [("repo".to_string(), "clawhip".to_string())]
+                filter: [("repo".to_string(), "op_pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("route-channel".into()),
@@ -1442,7 +1442,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op_pi".into(),
             "main".into(),
             "1234567890abcdef".into(),
             "ship it".into(),
@@ -1465,7 +1465,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "github.*".into(),
                 sink: "discord".into(),
-                filter: [("repo".to_string(), "clawhip".to_string())]
+                filter: [("repo".to_string(), "op_pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("route-channel".into()),
@@ -1484,7 +1484,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit_events(
-            "clawhip".into(),
+            "op_pi".into(),
             "main".into(),
             vec![
                 ("1234567890abcdef".into(), "ship it".into()),
@@ -1515,7 +1515,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "agent.*".into(),
                 sink: "discord".into(),
-                filter: [("project".to_string(), "clawhip".to_string())]
+                filter: [("project".to_string(), "op_pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("agent-route".into()),
@@ -1537,7 +1537,7 @@ mod tests {
         let started = IncomingEvent::agent_started(
             "worker-1".into(),
             Some("sess-123".into()),
-            Some("clawhip".into()),
+            Some("op_pi".into()),
             None,
             Some("booted".into()),
             None,
@@ -1546,7 +1546,7 @@ mod tests {
         let finished = IncomingEvent::agent_finished(
             "worker-1".into(),
             Some("sess-123".into()),
-            Some("clawhip".into()),
+            Some("op_pi".into()),
             Some(300),
             Some("PR created".into()),
             None,
@@ -1581,7 +1581,7 @@ mod tests {
                 sink: "discord".into(),
                 filter: [
                     ("tool".to_string(), "omx".to_string()),
-                    ("project".to_string(), "clawhip".to_string()),
+                    ("project".to_string(), "op_pi".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -1603,7 +1603,7 @@ mod tests {
         let event = normalize_event(IncomingEvent::agent_finished(
             "omx".into(),
             Some("issue-65".into()),
-            Some("clawhip".into()),
+            Some("op_pi".into()),
             Some(42),
             Some("PR created".into()),
             None,
@@ -1631,7 +1631,7 @@ mod tests {
                 sink: "discord".into(),
                 filter: [
                     ("tool".to_string(), "omc".to_string()),
-                    ("repo_name".to_string(), "clawhip".to_string()),
+                    ("repo_name".to_string(), "op_pi".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -1661,12 +1661,12 @@ mod tests {
                 "signal": {
                     "routeKey": "pull-request.created",
                     "phase": "finished",
-                    "summary": "https://github.com/Yeachan-Heo/clawhip/pull/67"
+                    "summary": "https://github.com/IYENTeam/op_pi/pull/67"
                 },
                 "context": {
                     "sessionId": "issue-65",
-                    "projectPath": "/repo/clawhip-worktrees/issue-65",
-                    "projectName": "clawhip"
+                    "projectPath": "/repo/op_pi-worktrees/issue-65",
+                    "projectName": "op_pi"
                 }
             }),
         });
@@ -1676,7 +1676,7 @@ mod tests {
         assert_eq!(channel, "session-route");
         assert_eq!(format, MessageFormat::Compact);
         assert!(content.contains("omc issue-65 pr-created"));
-        assert!(content.contains("repo=clawhip"));
+        assert!(content.contains("repo=op_pi"));
         assert!(content.contains("pr=#67"));
     }
 
@@ -1693,7 +1693,7 @@ mod tests {
                 sink: "discord".into(),
                 filter: [
                     ("tool".to_string(), "omx".to_string()),
-                    ("repo_name".to_string(), "clawhip".to_string()),
+                    ("repo_name".to_string(), "op_pi".to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -1722,7 +1722,7 @@ mod tests {
                 "context": {
                     "normalized_event": "finished",
                     "session_name": "issue-65",
-                    "repo_name": "clawhip"
+                    "repo_name": "op_pi"
                 }
             }),
         });
@@ -1764,7 +1764,7 @@ mod tests {
                 RouteRule {
                     event: "github.*".into(),
                     sink: "discord".into(),
-                    filter: [("repo".to_string(), "clawhip".to_string())]
+                    filter: [("repo".to_string(), "op_pi".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("repo-b".into()),
@@ -1783,7 +1783,7 @@ mod tests {
             ..AppConfig::default()
         };
         let router = Router::new(Arc::new(config));
-        let event = IncomingEvent::github_issue_opened("clawhip".into(), 7, "bug".into(), None);
+        let event = IncomingEvent::github_issue_opened("op_pi".into(), 7, "bug".into(), None);
         let (channel, _, _) = router.preview(&event).await.unwrap();
         assert_eq!(channel, "repo-b");
     }
@@ -1799,7 +1799,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "git.commit".into(),
                 sink: "discord".into(),
-                filter: [("repo_name".to_string(), "clawhip".to_string())]
+                filter: [("repo_name".to_string(), "op_pi".to_string())]
                     .into_iter()
                     .collect(),
                 channel: Some("repo-name-route".into()),
@@ -1818,7 +1818,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op_pi".into(),
             "main".into(),
             "1234567890abcdef".into(),
             "ship it".into(),
@@ -1918,7 +1918,7 @@ mod tests {
                 RouteRule {
                     event: "tmux.*".into(),
                     sink: "discord".into(),
-                    filter: [("session_name".to_string(), "clawhip-*".to_string())]
+                    filter: [("session_name".to_string(), "op_pi-*".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("heuristic-route".into()),
@@ -1927,7 +1927,7 @@ mod tests {
                 RouteRule {
                     event: "tmux.*".into(),
                     sink: "discord".into(),
-                    filter: [("repo_name".to_string(), "clawhip".to_string())]
+                    filter: [("repo_name".to_string(), "op_pi".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("metadata-route".into()),
@@ -1938,15 +1938,15 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::tmux_keyword(
-            "clawhip-issue-152".into(),
+            "op_pi-issue-152".into(),
             "error".into(),
             "boom".into(),
             None,
         )
         .with_routing_metadata(&RoutingMetadata {
-            repo_name: Some("clawhip".into()),
-            project: Some("clawhip".into()),
-            worktree_path: Some("/repo/clawhip.worktrees/issue-152".into()),
+            repo_name: Some("op_pi".into()),
+            project: Some("op_pi".into()),
+            worktree_path: Some("/repo/op_pi.worktrees/issue-152".into()),
             ..RoutingMetadata::default()
         });
 
@@ -1969,7 +1969,7 @@ mod tests {
                 RouteRule {
                     event: "session.*".into(),
                     sink: "discord".into(),
-                    filter: [("session_name".to_string(), "clawhip-*".to_string())]
+                    filter: [("session_name".to_string(), "op_pi-*".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("heuristic-route".into()),
@@ -1978,7 +1978,7 @@ mod tests {
                 RouteRule {
                     event: "session.*".into(),
                     sink: "discord".into(),
-                    filter: [("repo_name".to_string(), "clawhip".to_string())]
+                    filter: [("repo_name".to_string(), "op_pi".to_string())]
                         .into_iter()
                         .collect(),
                     channel: Some("metadata-route".into()),
@@ -1995,9 +1995,9 @@ mod tests {
             format: None,
             template: None,
             payload: json!({
-                "session_name": "clawhip-issue-152",
-                "repo_name": "clawhip",
-                "worktree_path": "/repo/clawhip.worktrees/issue-152",
+                "session_name": "op_pi-issue-152",
+                "repo_name": "op_pi",
+                "worktree_path": "/repo/op_pi.worktrees/issue-152",
             }),
         });
 
@@ -2203,7 +2203,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
 
-        // clawhip send --channel user-target --message "hello"
+        // op_pi send --channel user-target --message "hello"
         let event = IncomingEvent::custom(Some("user-target".into()), "hello".into());
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
@@ -2241,7 +2241,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
 
-        // clawhip send --message "hello" (no --channel)
+        // op_pi send --message "hello" (no --channel)
         let event = IncomingEvent::custom(None, "hello".into());
         let delivery = router.preview_delivery(&event).await.unwrap();
         assert_eq!(
@@ -2417,14 +2417,14 @@ mod tests {
             routes: vec![
                 RouteRule {
                     event: "tmux.*".into(),
-                    filter: BTreeMap::from([("session".into(), "clawhip-*".into())]),
+                    filter: BTreeMap::from([("session".into(), "op_pi-*".into())]),
                     sink: "discord".into(),
                     channel: Some("heuristic-route".into()),
                     ..RouteRule::default()
                 },
                 RouteRule {
                     event: "tmux.*".into(),
-                    filter: BTreeMap::from([("repo_name".into(), "clawhip".into())]),
+                    filter: BTreeMap::from([("repo_name".into(), "op_pi".into())]),
                     sink: "discord".into(),
                     channel: Some("metadata-route".into()),
                     ..RouteRule::default()
@@ -2436,11 +2436,11 @@ mod tests {
         assert_eq!(
             resolve_tmux_session_channel_with_metadata(
                 &config,
-                "clawhip-issue-152",
+                "op_pi-issue-152",
                 &RoutingMetadata {
-                    repo_name: Some("clawhip".into()),
-                    project: Some("clawhip".into()),
-                    worktree_path: Some("/repo/clawhip.worktrees/issue-152".into()),
+                    repo_name: Some("op_pi".into()),
+                    project: Some("op_pi".into()),
+                    worktree_path: Some("/repo/op_pi.worktrees/issue-152".into()),
                     ..RoutingMetadata::default()
                 }
             )
@@ -2459,7 +2459,7 @@ mod tests {
             },
             routes: vec![RouteRule {
                 event: "tmux.*".into(),
-                filter: BTreeMap::from([("session".into(), "clawhip-*".into())]),
+                filter: BTreeMap::from([("session".into(), "op_pi-*".into())]),
                 sink: "discord".into(),
                 channel: Some("heuristic-route".into()),
                 ..RouteRule::default()
@@ -2470,11 +2470,11 @@ mod tests {
         assert_eq!(
             resolve_tmux_session_channel_with_metadata(
                 &config,
-                "clawhip-issue-152",
+                "op_pi-issue-152",
                 &RoutingMetadata {
-                    repo_name: Some("clawhip".into()),
-                    project: Some("clawhip".into()),
-                    worktree_path: Some("/repo/clawhip.worktrees/issue-152".into()),
+                    repo_name: Some("op_pi".into()),
+                    project: Some("op_pi".into()),
+                    worktree_path: Some("/repo/op_pi.worktrees/issue-152".into()),
                     ..RoutingMetadata::default()
                 }
             )
@@ -2546,7 +2546,7 @@ mod tests {
 
         router
             .dispatch(
-                &IncomingEvent::custom(None, "hello from clawhip".into()),
+                &IncomingEvent::custom(None, "hello from op_pi".into()),
                 &slack,
             )
             .await
@@ -2556,7 +2556,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(request.contains("\"text\":\"hello from clawhip\""));
+        assert!(request.contains("\"text\":\"hello from op_pi\""));
         assert!(request.contains("\"blocks\""));
     }
 
@@ -2573,7 +2573,7 @@ mod tests {
             routes: vec![RouteRule {
                 event: "git.commit".into(),
                 sink: "discord".into(),
-                filter: BTreeMap::from([("repo_name".into(), "clawhip".into())]),
+                filter: BTreeMap::from([("repo_name".into(), "op_pi".into())]),
                 channel: Some("commits".into()),
                 mention: Some("@devs".into()),
                 ..RouteRule::default()
@@ -2582,7 +2582,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op_pi".into(),
             "main".into(),
             "abc123".into(),
             "ship it".into(),
@@ -2605,7 +2605,7 @@ mod tests {
         assert_eq!(provenance.routes[0].filter_results[0].key, "repo_name");
         assert_eq!(
             provenance.routes[0].filter_results[0].actual.as_deref(),
-            Some("clawhip")
+            Some("op_pi")
         );
         assert_eq!(provenance.deliveries.len(), 1);
         assert_eq!(provenance.deliveries[0].matched_route_index, Some(0));
@@ -2632,7 +2632,7 @@ mod tests {
         };
         let router = Router::new(Arc::new(config));
         let event = IncomingEvent::git_commit(
-            "clawhip".into(),
+            "op_pi".into(),
             "feature".into(),
             "abc123".into(),
             "wip".into(),

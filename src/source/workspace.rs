@@ -41,7 +41,7 @@ impl Source for WorkspaceSource {
             match run_with_inotify(self.config.as_ref(), &tx).await {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    eprintln!("clawhip source workspace falling back to polling: {error}");
+                    eprintln!("op_pi source workspace falling back to polling: {error}");
                 }
             }
         }

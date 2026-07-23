@@ -74,7 +74,7 @@ impl DiscordClient {
         } else {
             None
         };
-        let api_base = std::env::var("CLAWHIP_DISCORD_API_BASE")
+        let api_base = std::env::var("OP_PI_DISCORD_API_BASE")
             .unwrap_or_else(|_| "https://discord.com/api/v10".to_string());
         let webhook_client = reqwest::Client::new();
 
@@ -282,7 +282,7 @@ impl DiscordClient {
             channel_id
         );
         let client = self.bot_client.as_ref().ok_or_else(|| DiscordSendError {
-            message: "missing Discord bot token for channel delivery; configure [providers.discord].token (or legacy [discord].token) or use a route webhook".to_string(),
+            message: "missing Discord bot token for channel delivery; configure [providers.discord].bot_token or use a route webhook".to_string(),
             retry_after: None,
             status: None,
         })?;
@@ -305,7 +305,7 @@ impl DiscordClient {
             thread_id
         );
         let client = self.bot_client.as_ref().ok_or_else(|| DiscordSendError {
-            message: "missing Discord bot token for thread delivery; configure [providers.discord].token (or legacy [discord].token) or use a channel/webhook route".to_string(),
+            message: "missing Discord bot token for thread delivery; configure [providers.discord].bot_token or use a channel/webhook route".to_string(),
             retry_after: None,
             status: None,
         })?;
@@ -460,7 +460,7 @@ impl DiscordClient {
         }));
 
         eprintln!(
-            "clawhip dlq bury: {}",
+            "op_pi dlq bury: {}",
             serde_json::to_string(&entry)
                 .unwrap_or_else(|_| "{\"error\":\"dlq serialize failed\"}".to_string())
         );
@@ -786,7 +786,7 @@ mod tests {
         let server = tokio::spawn(serve_once(
             listener,
             "HTTP/1.1 200 OK",
-            r#"{"id":"1480171113253175356","name":"clawhip-dev","type":0}"#,
+            r#"{"id":"1480171113253175356","name":"op_pi-dev","type":0}"#,
         ));
 
         let client =
@@ -797,7 +797,7 @@ mod tests {
         match lookup {
             ChannelLookup::Found { id, name } => {
                 assert_eq!(id, "1480171113253175356");
-                assert_eq!(name.as_deref(), Some("clawhip-dev"));
+                assert_eq!(name.as_deref(), Some("op_pi-dev"));
             }
             other => panic!("expected Found, got {other:?}"),
         }
@@ -862,11 +862,11 @@ mod tests {
         // Build a DiscordClient with no bot token (no env, no config).
         // Use a bogus env override so we never hit the real API.
         unsafe {
-            std::env::set_var("CLAWHIP_DISCORD_API_BASE", "http://127.0.0.1:1");
+            std::env::set_var("OP_PI_DISCORD_API_BASE", "http://127.0.0.1:1");
         }
         let client = DiscordClient::from_config(Arc::new(AppConfig::default())).unwrap();
         unsafe {
-            std::env::remove_var("CLAWHIP_DISCORD_API_BASE");
+            std::env::remove_var("OP_PI_DISCORD_API_BASE");
         }
         // Config has no bot token and no webhook route; lookup should skip.
         let lookup = client.lookup_channel("1111").await;
@@ -916,7 +916,7 @@ mod tests {
             event_kind: "github.ci-failed".into(),
             format: MessageFormat::Alert,
             content: "boom".into(),
-            payload: json!({"repo":"clawhip", "correlation_id":"corr-214"}),
+            payload: json!({"repo":"op_pi", "correlation_id":"corr-214"}),
             telemetry: None,
         };
         let error = client
@@ -930,7 +930,7 @@ mod tests {
         server.await.unwrap();
         let dlq = client.dlq_entries();
         assert_eq!(dlq.len(), 1);
-        assert_eq!(dlq[0].payload["repo"], "clawhip");
+        assert_eq!(dlq[0].payload["repo"], "op_pi");
         assert_eq!(dlq[0].retry_count, 3);
         assert!(dlq[0].target.starts_with("discord:webhook:"));
         assert!(!dlq[0].target.contains(&format!("http://{addr}/webhook")));
@@ -946,7 +946,7 @@ mod tests {
             event_kind: "github.ci-failed".into(),
             format: MessageFormat::Alert,
             content: "boom".into(),
-            payload: json!({"repo":"clawhip", "correlation_id":"corr-214"}),
+            payload: json!({"repo":"op_pi", "correlation_id":"corr-214"}),
             telemetry: None,
         };
         let target = SinkTarget::DiscordWebhook(

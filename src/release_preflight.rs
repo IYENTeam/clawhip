@@ -7,7 +7,7 @@
 //! before a tag is pushed:
 //!
 //! 1. `Cargo.toml` `[package].version` matches the intended release version.
-//! 2. `Cargo.lock` already records that version for the `clawhip` package
+//! 2. `Cargo.lock` already records that version for the `op_pi` package
 //!    (i.e. the lockfile is fresh for the bump).
 //! 3. `CHANGELOG.md` has a concrete release entry for that version — not
 //!    still `Unreleased`.
@@ -75,7 +75,7 @@ impl PreflightReport {
 
 /// Normalize a user-supplied version/tag string into a bare semver.
 ///
-/// Accepts `1.2.3`, `v1.2.3`, `clawhip-v1.2.3`, and `refs/tags/v1.2.3` —
+/// Accepts `1.2.3`, `v1.2.3`, `op_pi-v1.2.3`, and `refs/tags/v1.2.3` —
 /// matching the tag shapes the release workflow and cargo-dist recognize.
 pub fn normalize_version(input: &str) -> String {
     let trimmed = input.trim();
@@ -307,7 +307,7 @@ mod tests {
 
     const CARGO_TOML_SAMPLE: &str = r#"
 [package]
-name = "clawhip"
+name = "op_pi"
 version = "0.6.5"
 edition = "2024"
 
@@ -325,7 +325,7 @@ version = "1.0.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "clawhip"
+name = "op_pi"
 version = "0.6.5"
 dependencies = [
  "anyhow",
@@ -354,14 +354,14 @@ version = "1.0.219"
         assert_eq!(normalize_version("v0.6.5"), "0.6.5");
         assert_eq!(normalize_version("  v0.6.5  "), "0.6.5");
         assert_eq!(normalize_version("refs/tags/v0.6.5"), "0.6.5");
-        assert_eq!(normalize_version("clawhip-v0.6.5"), "0.6.5");
-        assert_eq!(normalize_version("clawhip/v0.6.5"), "0.6.5");
+        assert_eq!(normalize_version("op_pi-v0.6.5"), "0.6.5");
+        assert_eq!(normalize_version("op_pi/v0.6.5"), "0.6.5");
     }
 
     #[test]
     fn parse_cargo_toml_extracts_name_and_version() {
         let (name, version) = parse_cargo_toml(CARGO_TOML_SAMPLE).unwrap();
-        assert_eq!(name, "clawhip");
+        assert_eq!(name, "op_pi");
         assert_eq!(version, "0.6.5");
     }
 
@@ -381,14 +381,14 @@ version = "1.0.219"
 
     #[test]
     fn check_cargo_lock_passes_when_package_version_matches() {
-        let result = check_cargo_lock(CARGO_LOCK_SAMPLE, "clawhip", "0.6.5");
+        let result = check_cargo_lock(CARGO_LOCK_SAMPLE, "op_pi", "0.6.5");
         assert!(result.passed, "detail = {}", result.detail);
     }
 
     #[test]
     fn check_cargo_lock_fails_when_lock_is_stale() {
         let stale_lock = CARGO_LOCK_SAMPLE.replace("version = \"0.6.5\"", "version = \"0.6.4\"");
-        let result = check_cargo_lock(&stale_lock, "clawhip", "0.6.5");
+        let result = check_cargo_lock(&stale_lock, "op_pi", "0.6.5");
         assert!(!result.passed);
         assert!(result.detail.contains("0.6.4"));
         assert!(result.detail.contains("cargo update"));
@@ -396,7 +396,7 @@ version = "1.0.219"
 
     #[test]
     fn check_cargo_lock_fails_when_package_missing() {
-        let result = check_cargo_lock("# empty", "clawhip", "0.6.5");
+        let result = check_cargo_lock("# empty", "op_pi", "0.6.5");
         assert!(!result.passed);
         assert!(result.detail.contains("no [[package]] entry"));
     }
@@ -409,10 +409,10 @@ name = "serde"
 version = "0.6.5"
 
 [[package]]
-name = "clawhip"
+name = "op_pi"
 version = "0.6.4"
 "#;
-        let result = check_cargo_lock(lock, "clawhip", "0.6.5");
+        let result = check_cargo_lock(lock, "op_pi", "0.6.5");
         assert!(!result.passed, "should not match on serde's version");
         assert!(result.detail.contains("0.6.4"));
     }

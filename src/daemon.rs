@@ -80,7 +80,7 @@ pub async fn run(
 ) -> Result<()> {
     config.validate()?;
     let token_source = config.discord_token_source();
-    println!("clawhip v{VERSION} starting (token_source: {token_source})");
+    println!("op_pi v{VERSION} starting (token_source: {token_source})");
     telemetry::emit(daemon_record(
         telemetry::reason::DAEMON_STARTUP,
         json!({"version": VERSION, "token_source": token_source}),
@@ -125,7 +125,7 @@ pub async fn run(
             dispatcher_native_observability,
         );
         if let Err(error) = dispatcher.run().await {
-            eprintln!("clawhip dispatcher stopped: {error}");
+            eprintln!("op_pi dispatcher stopped: {error}");
         }
     });
     spawn_source(
@@ -210,7 +210,7 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
     println!(
-        "clawhip daemon v{VERSION} listening on http://{} (token_source: {token_source})",
+        "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
         local_addr
     );
     telemetry::emit(daemon_record(
@@ -227,7 +227,7 @@ where
 {
     let source_name = source.name().to_string();
     tokio::spawn(async move {
-        println!("clawhip source '{}' starting", source_name);
+        println!("op_pi source '{}' starting", source_name);
         mark_source_started(&source_health, &source_name).await;
         telemetry::emit(source_lifecycle_record(
             telemetry::reason::SOURCE_START,
@@ -245,13 +245,13 @@ where
                     &source_name,
                     Some(error.to_string()),
                 ));
-                eprintln!("clawhip source '{}' stopped: {error}", source_name);
+                eprintln!("op_pi source '{}' stopped: {error}", source_name);
                 if let Err(alert_error) = tx
                     .send(source_failure_alert_event(&source_name, &error.to_string()))
                     .await
                 {
                     eprintln!(
-                        "clawhip source '{}' could not enqueue degraded alert: {alert_error}",
+                        "op_pi source '{}' could not enqueue degraded alert: {alert_error}",
                         source_name
                     );
                 }
@@ -263,7 +263,7 @@ where
 fn source_failure_alert_event(source_name: &str, error_message: &str) -> IncomingEvent {
     let mut event = IncomingEvent::custom(
         None,
-        format!("clawhip degraded: source '{source_name}' stopped: {error_message}"),
+        format!("op_pi degraded: source '{source_name}' stopped: {error_message}"),
     )
     .with_format(Some(MessageFormat::Alert));
 
@@ -431,7 +431,7 @@ async fn post_native_hook(
         observability.observe_received_raw(&payload);
     });
     eprintln!(
-        "clawhip native hook received: provider={} event={} repo={} session={}",
+        "op_pi native hook received: provider={} event={} repo={} session={}",
         raw_native_field(
             &payload,
             &["/provider", "/source/provider", "/context/provider"],
@@ -472,7 +472,7 @@ async fn post_native_hook(
                 observability.observe_dropped_raw(&payload, "normalization_failed");
             });
             eprintln!(
-                "clawhip native hook dropped: provider={} event={} reason=normalization_failed error={}",
+                "op_pi native hook dropped: provider={} event={} reason=normalization_failed error={}",
                 raw_native_field(
                     &payload,
                     &["/provider", "/source/provider", "/context/provider"],
@@ -511,7 +511,7 @@ async fn post_native_hook(
             observability.observe_dropped(&event, NATIVE_NON_GIT_OUTCOME);
         });
         eprintln!(
-            "clawhip native hook dropped: {} reason={}",
+            "op_pi native hook dropped: {} reason={}",
             native_event_telemetry_fields(&event),
             NATIVE_NON_GIT_OUTCOME
         );
@@ -532,7 +532,7 @@ async fn post_native_hook(
             observability.observe_deferred(&event, defer.reason);
         });
         eprintln!(
-            "clawhip native hook deferred: {} reason={} age_secs={}",
+            "op_pi native hook deferred: {} reason={} age_secs={}",
             native_event_telemetry_fields(&event),
             defer.reason,
             defer.age.as_secs()
@@ -643,7 +643,7 @@ fn replay_timestamp(raw_payload: &Value, pointers: &[&str]) -> Option<String> {
 
 fn stale_replay_defer_response(kind: &str, defer: &NativeReplayDefer) -> axum::response::Response {
     eprintln!(
-        "clawhip deferred stale replay: type={} reason={} timestamp={} age_secs={}",
+        "op_pi deferred stale replay: type={} reason={} timestamp={} age_secs={}",
         kind,
         defer.reason,
         defer.timestamp,
@@ -1528,7 +1528,7 @@ mod tests {
                 event: "gajae.*".into(),
                 filter: std::collections::BTreeMap::from([(
                     "repo".into(),
-                    "Yeachan-Heo/clawhip".into(),
+                    "IYENTeam/op_pi".into(),
                 )]),
                 channel: Some("owner-maintainer".into()),
                 ..RouteRule::default()
@@ -1564,7 +1564,7 @@ mod tests {
             mention: None,
             format: None,
             template: None,
-            payload: json!({"repo": "clawhip", "number": 250}),
+            payload: json!({"repo": "op_pi", "number": 250}),
         }
     }
 
@@ -1701,12 +1701,12 @@ mod tests {
         headers.insert("x-github-event", "release".parse().unwrap());
         let payload = json!({
             "action": "edited",
-            "repository": {"full_name": "Yeachan-Heo/clawhip"},
+            "repository": {"full_name": "IYENTeam/op_pi"},
             "release": {
                 "tag_name": "v0.6.9",
-                "name": "clawhip 0.6.9",
+                "name": "op_pi 0.6.9",
                 "prerelease": false,
-                "html_url": "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.9"
+                "html_url": "https://github.com/IYENTeam/op_pi/releases/tag/v0.6.9"
             },
             "sender": {"login": "maintainer"}
         });
@@ -1720,13 +1720,13 @@ mod tests {
         assert_eq!(queued.kind, "gajae.release.hold");
         assert_eq!(queued.channel.as_deref(), Some("owner-maintainer"));
         assert_ne!(queued.channel.as_deref(), Some("general-zero-backlog"));
-        assert_eq!(queued.payload["repo"], json!("Yeachan-Heo/clawhip"));
+        assert_eq!(queued.payload["repo"], json!("IYENTeam/op_pi"));
         assert_eq!(queued.payload["target"], json!("owner-maintainer"));
         assert_eq!(queued.payload["action"], json!("edited"));
         assert_eq!(queued.payload["version"], json!("v0.6.9"));
         assert_eq!(
             queued.payload["dedupe_key"],
-            json!("Yeachan-Heo/clawhip:owner-maintainer:edited:v0.6.9")
+            json!("IYENTeam/op_pi:owner-maintainer:edited:v0.6.9")
         );
         assert_eq!(queued.payload["autonomous_execution_allowed"], json!(false));
         assert_eq!(queued.payload["held_action_executed"], json!(false));
@@ -1752,12 +1752,12 @@ mod tests {
         headers.insert("x-github-event", "pull_request".parse().unwrap());
         let payload = json!({
             "action": "closed",
-            "repository": {"full_name": "Yeachan-Heo/clawhip"},
+            "repository": {"full_name": "IYENTeam/op_pi"},
             "number": 252,
             "pull_request": {
                 "number": 252,
                 "title": "approval hold events",
-                "html_url": "https://github.com/Yeachan-Heo/clawhip/pull/252",
+                "html_url": "https://github.com/IYENTeam/op_pi/pull/252",
                 "merged": true,
                 "merge_commit_sha": "0123456789abcdef0123456789abcdef01234567",
                 "base": {"ref": "main"},
@@ -1774,7 +1774,7 @@ mod tests {
 
         assert_eq!(queued.kind, "gajae.merge.hold");
         assert_eq!(queued.channel.as_deref(), Some("owner-maintainer"));
-        assert_eq!(queued.payload["repo"], json!("Yeachan-Heo/clawhip"));
+        assert_eq!(queued.payload["repo"], json!("IYENTeam/op_pi"));
         assert_eq!(queued.payload["target"], json!("owner-maintainer"));
         assert_eq!(queued.payload["action"], json!("merge-to-main"));
         assert_eq!(
@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(
             queued.payload["dedupe_key"],
             json!(
-                "Yeachan-Heo/clawhip:owner-maintainer:merge-to-main:0123456789abcdef0123456789abcdef01234567"
+                "IYENTeam/op_pi:owner-maintainer:merge-to-main:0123456789abcdef0123456789abcdef01234567"
             )
         );
         assert_eq!(queued.payload["autonomous_execution_allowed"], json!(false));
@@ -2012,9 +2012,9 @@ mod tests {
 
     #[test]
     fn discord_token_shadow_warning_names_env_var_without_leaking_value() {
-        let warning = discord_token_shadow_warning("CLAWHIP_DISCORD_BOT_TOKEN");
+        let warning = discord_token_shadow_warning("OP_PI_DISCORD_BOT_TOKEN");
 
-        assert!(warning.contains("CLAWHIP_DISCORD_BOT_TOKEN"));
+        assert!(warning.contains("OP_PI_DISCORD_BOT_TOKEN"));
         assert!(warning.contains("token_source: env"));
         // The diagnostic must describe precedence only, never the secret value.
         assert!(!warning.to_lowercase().contains("config-token"));
@@ -2592,7 +2592,7 @@ mod tests {
     #[tokio::test]
     async fn post_native_hook_accepts_codex_payload_and_queues_normalized_event() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("clawhip");
+        let repo = temp.path().join("op_pi");
         std::fs::create_dir_all(&repo).expect("create repo");
         let git = std::process::Command::new("git")
             .args(["init"])
@@ -2691,7 +2691,7 @@ mod tests {
         let payload = json!({
             "provider": "claude-code",
             "event_name": "Notification",
-            "directory": "/repo/clawhip",
+            "directory": "/repo/op_pi",
             "event_payload": {}
         });
 
@@ -2970,7 +2970,7 @@ mod tests {
         *pending.write().await = Some(update::PendingUpdate {
             current_version: "0.5.4".into(),
             latest_version: "0.6.0".into(),
-            release_url: "https://github.com/Yeachan-Heo/clawhip/releases/tag/v0.6.0".into(),
+            release_url: "https://github.com/IYENTeam/op_pi/releases/tag/v0.6.0".into(),
             detected_at: "2026-04-07T00:00:00Z".into(),
         });
 
@@ -3088,8 +3088,7 @@ mod tests {
     #[tokio::test]
     async fn aws_sns_rejects_non_allowlisted_topic() {
         let mut config = AppConfig::default();
-        config.aws.topic_allowlist =
-            vec!["arn:aws:sns:us-east-1:123456789012:clawhip-alarms".into()];
+        config.aws.topic_allowlist = vec!["arn:aws:sns:us-east-1:123456789012:op_pi-alarms".into()];
         let (state, _rx) = app_state_with_config(config);
 
         let response = post_aws_sns(
@@ -3107,7 +3106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aws_sns_enqueues_cloudwatch_alarm_event() {
+    async fn aws_sns_enqueues_legacy_signed_cloudwatch_alarm_event() {
         const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sns");
         const CERT_URL: &str =
             "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem";
@@ -3121,7 +3120,7 @@ mod tests {
             Json(json!({
                 "Type": "Notification",
                 "MessageId": "22b80b92",
-                "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+                "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
                 "Subject": "ALARM: ServerCpuTooHigh",
                 "Message": "{\"AlarmName\":\"ServerCpuTooHigh\",\"NewStateValue\":\"ALARM\"}",
                 "Timestamp": "2026-07-22T12:00:01.000Z",
@@ -3146,7 +3145,7 @@ mod tests {
             Json(json!({
                 "Type": "Notification",
                 "MessageId": "forged",
-                "TopicArn": "arn:aws:sns:us-east-1:123456789012:clawhip-alarms",
+                "TopicArn": "arn:aws:sns:us-east-1:123456789012:op_pi-alarms",
                 "Message": "{\"AlarmName\":\"Forged\",\"NewStateValue\":\"ALARM\"}",
                 "Timestamp": "2026-07-22T12:00:01.000Z"
             })),

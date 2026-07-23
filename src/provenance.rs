@@ -1,7 +1,7 @@
 //! Structured provenance for event routing decisions.
 //!
 //! A [`Provenance`] record explains *why* an event was (or was not) delivered
-//! to a given sink. Operators can ask for provenance via `clawhip explain` to
+//! to a given sink. Operators can ask for provenance via `op_pi explain` to
 //! answer questions like "what emitted this message?" and "why did this route
 //! fire?" without having to read the config by hand.
 
@@ -174,8 +174,8 @@ mod tests {
                     pattern_matched: true,
                     filter_results: vec![FilterResult {
                         key: "repo_name".into(),
-                        pattern: "clawhip".into(),
-                        actual: Some("clawhip".into()),
+                        pattern: "op_pi".into(),
+                        actual: Some("op_pi".into()),
                         matched: true,
                     }],
                 },

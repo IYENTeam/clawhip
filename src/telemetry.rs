@@ -153,9 +153,9 @@ pub fn record(
 pub fn render_line(mut object: Map<String, Value>) -> String {
     object
         .entry("schema".to_string())
-        .or_insert_with(|| json!("clawhip.telemetry.v1"));
+        .or_insert_with(|| json!("op_pi.telemetry.v1"));
     serde_json::to_string(&Value::Object(object)).unwrap_or_else(|_| {
-        r#"{"schema":"clawhip.telemetry.v1","telemetry_event":"serialize_failed"}"#.to_string()
+        r#"{"schema":"op_pi.telemetry.v1","telemetry_event":"serialize_failed"}"#.to_string()
     })
 }
 
@@ -214,10 +214,10 @@ mod tests {
 
     #[test]
     fn local_file_target_id_does_not_expose_path() {
-        let safe = safe_target_id(&SinkTarget::LocalFile("/tmp/clawhip/events.jsonl".into()));
+        let safe = safe_target_id(&SinkTarget::LocalFile("/tmp/op_pi/events.jsonl".into()));
 
         assert!(safe.starts_with("localfile:"));
-        assert!(!safe.contains("/tmp/clawhip/events.jsonl"));
+        assert!(!safe.contains("/tmp/op_pi/events.jsonl"));
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod tests {
             "corr-1",
         ));
         let parsed: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(parsed["schema"], json!("clawhip.telemetry.v1"));
+        assert_eq!(parsed["schema"], json!("op_pi.telemetry.v1"));
         assert_eq!(parsed["telemetry_event"], json!("event_dropped"));
         assert_eq!(parsed["reason_code"], json!("drop_non_git_native_hook"));
         assert_eq!(parsed["correlation_id"], json!("corr-1"));

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GITHUB_REPO="Yeachan-Heo/clawhip"
-INSTALLER_URL="${CLAWHIP_INSTALLER_URL:-https://github.com/${GITHUB_REPO}/releases/latest/download/clawhip-installer.sh}"
+GITHUB_REPO="IYENTeam/op_pi"
+INSTALLER_URL="${OP_PI_INSTALLER_URL:-https://github.com/${GITHUB_REPO}/releases/latest/download/op_pi-installer.sh}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_HOME
 SYSTEMD=0
@@ -19,8 +19,13 @@ Options:
   -h, --help           Show this help text.
 
 Environment:
-  CLAWHIP_SKIP_STAR_PROMPT=1
+  OP_PI_INSTALLER_URL=<url>
+      Override the prebuilt installer URL.
+  OP_PI_SKIP_STAR_PROMPT=1
       Disable the optional post-install GitHub star prompt.
+  OP_PI_WEBHOOK_URL=<url>
+      Provide the Discord webhook URL for quick-start setup.
+
 EOF
 }
 
@@ -43,7 +48,7 @@ parse_args() {
 }
 
 log() {
-  echo "[clawhip] $*"
+  echo "[op_pi] $*"
 }
 
 is_truthy() {
@@ -54,7 +59,7 @@ is_truthy() {
 }
 
 star_prompt_disabled() {
-  is_truthy "${CLAWHIP_SKIP_STAR_PROMPT:-}" || is_truthy "${SKIP_STAR_PROMPT:-}"
+  [[ "$SKIP_STAR_PROMPT" == "1" ]] || is_truthy "${OP_PI_SKIP_STAR_PROMPT:-}"
 }
 
 is_interactive_install() {
@@ -71,7 +76,7 @@ star_repo_with_gh() {
 
 prompt_to_star_repo() {
   local response
-  printf '[clawhip] Would you like to star %s on GitHub with gh? [y/N]: ' "$GITHUB_REPO"
+  printf '[op_pi] Would you like to star %s on GitHub with gh? [y/N]: ' "$GITHUB_REPO"
   read -r response || return 0
 
   case "$response" in
@@ -90,7 +95,7 @@ prompt_to_star_repo() {
 
 maybe_prompt_to_star_repo() {
   if star_prompt_disabled; then
-    log "skipping GitHub star prompt (--skip-star-prompt or CLAWHIP_SKIP_STAR_PROMPT)"
+    log "skipping GitHub star prompt (--skip-star-prompt or OP_PI_SKIP_STAR_PROMPT)"
     return 0
   fi
 
@@ -139,10 +144,10 @@ install_prebuilt_binary() {
 install_from_source() {
   if ! command -v cargo >/dev/null 2>&1; then
     cat >&2 <<'MSG'
-[clawhip] A prebuilt binary was not available and Cargo is not installed.
-[clawhip] Install Rust with rustup, then rerun this installer:
-[clawhip]   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-[clawhip]   source "$HOME/.cargo/env"
+[op_pi] A prebuilt binary was not available and Cargo is not installed.
+[op_pi] Install Rust with rustup, then rerun this installer:
+[op_pi]   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+[op_pi]   source "$HOME/.cargo/env"
 MSG
     exit 1
   fi
@@ -154,26 +159,25 @@ MSG
 
 sync_plugins() {
   local source_dir="$REPO_ROOT/plugins"
-  local target_dir="$HOME/.clawhip/plugins"
+  local target_dir="$HOME/.op_pi/plugins"
 
   if [[ ! -d "$source_dir" ]]; then
     return 0
   fi
 
-  rm -rf "$target_dir"
-  mkdir -p "$(dirname "$target_dir")"
-  cp -R "$source_dir" "$target_dir"
+  mkdir -p "$target_dir"
+  cp -R "$source_dir"/. "$target_dir"/
   log "synced plugins to $target_dir"
 }
 
 installed_binary_path() {
-  if [[ -x "$CARGO_HOME/bin/clawhip" ]]; then
-    printf '%s\n' "$CARGO_HOME/bin/clawhip"
+  if [[ -x "$CARGO_HOME/bin/op_pi" ]]; then
+    printf '%s\n' "$CARGO_HOME/bin/op_pi"
     return 0
   fi
 
-  if command -v clawhip >/dev/null 2>&1; then
-    command -v clawhip
+  if command -v op_pi >/dev/null 2>&1; then
+    command -v op_pi
     return 0
   fi
 
@@ -184,15 +188,15 @@ setup_quick_start() {
   local binary_path
   binary_path="$(installed_binary_path)" || return 0
 
-  local config_path="$HOME/.clawhip/config.toml"
+  local config_path="$HOME/.op_pi/config.toml"
   if [[ -f "$config_path" ]]; then
     log "existing config found at $config_path; skipping quick-start scaffold"
     return 0
   fi
 
-  local webhook_url="${CLAWHIP_WEBHOOK_URL:-}"
+  local webhook_url="${OP_PI_WEBHOOK_URL:-}"
   if [[ -z "${webhook_url// }" && -t 0 ]]; then
-    printf '[clawhip] Discord webhook URL (recommended quick start; press Enter to skip): '
+    printf '[op_pi] Discord webhook URL (recommended quick start; press Enter to skip): '
     read -r webhook_url || true
   fi
 
@@ -201,20 +205,20 @@ setup_quick_start() {
     "$binary_path" setup --webhook "$webhook_url"
     log "webhook config scaffolded at $config_path"
   else
-    log "recommended quick start: clawhip setup --webhook 'https://discord.com/api/webhooks/...'"
-    log "bot-token mode is still supported via ~/.clawhip/config.toml"
+    log "recommended quick start: op_pi setup --webhook 'https://discord.com/api/webhooks/...'"
+    log "bot-token mode is still supported via ~/.op_pi/config.toml"
   fi
 }
 
 install_systemd_binary() {
   local binary_path
   binary_path="$(installed_binary_path)" || {
-    log "unable to find installed clawhip binary for systemd setup"
+    log "unable to find installed op_pi binary for systemd setup"
     exit 1
   }
 
-  log "installing $binary_path to /usr/local/bin/clawhip for systemd"
-  sudo install -m 755 "$binary_path" /usr/local/bin/clawhip
+  log "installing $binary_path to /usr/local/bin/op_pi for systemd"
+  sudo install -m 755 "$binary_path" /usr/local/bin/op_pi
 }
 
 main() {
@@ -229,23 +233,23 @@ main() {
     install_from_source
   fi
 
-  mkdir -p "$HOME/.clawhip"
-  log "ensured config dir $HOME/.clawhip"
+  mkdir -p "$HOME/.op_pi"
+  log "ensured config dir $HOME/.op_pi"
   sync_plugins
   log "next: read SKILL.md and attach the skill surface"
   setup_quick_start
 
   if [[ "$SYSTEMD" == "1" ]]; then
     install_systemd_binary
-    sudo cp deploy/clawhip.service /etc/systemd/system/clawhip.service
+    sudo cp deploy/op_pi.service /etc/systemd/system/op_pi.service
     sudo systemctl daemon-reload
-    sudo systemctl enable --now clawhip
+    sudo systemctl enable --now op_pi
     log "systemd unit installed and started"
   fi
 
   maybe_prompt_to_star_repo
 
-  log "recommended verification: scripts/live-verify-default-presets.sh <mode>"
+  log "recommended verification: scripts/live_verify_default_presets.sh <mode>"
   log "install complete"
 }
 

@@ -1,6 +1,6 @@
 <svg width="1200" height="520" viewBox="0 0 1200 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
-  <title id="title">op-pi operation pipeline interface</title>
-  <desc id="description">Operational signals from GitHub, agents, AWS, Cloudflare, and tmux converge into the op-pi pipeline and route to Discord, Slack, and local interfaces.</desc>
+  <title id="title">op_pi operation pipeline interface</title>
+  <desc id="description">Operational signals from GitHub, agents, AWS, Cloudflare, and tmux converge into the op_pi pipeline and route to Discord, Slack, and local interfaces.</desc>
 
   <defs>
     <linearGradient id="background" x1="72" y1="28" x2="1120" y2="500" gradientUnits="userSpaceOnUse">
@@ -55,7 +55,7 @@
   <rect x="1" y="1" width="1198" height="518" rx="28" stroke="#94A3B8" stroke-opacity="0.18" stroke-width="2"/>
 
   <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
-    <text x="64" y="77" fill="#F8FAFC" font-size="28" font-weight="700" letter-spacing="5">OP-PI</text>
+    <text x="64" y="77" fill="#F8FAFC" font-size="28" font-weight="700" letter-spacing="5">OP_PI</text>
     <text x="64" y="106" fill="#94A3B8" font-size="13" font-weight="600" letter-spacing="2.4">OPERATION PIPELINE INTERFACE</text>
 
     <g transform="translate(999 60)">
@@ -109,7 +109,7 @@
       <circle cx="554" cy="279" r="7" fill="#55E6C1"/>
       <circle cx="600" cy="279" r="9" fill="#4AA8FF"/>
       <circle cx="646" cy="279" r="7" fill="#8B7CFF"/>
-      <text x="600" y="247" fill="#F8FAFC" font-size="12" font-weight="700" letter-spacing="2.4" text-anchor="middle">OP-PI</text>
+      <text x="600" y="247" fill="#F8FAFC" font-size="12" font-weight="700" letter-spacing="2.4" text-anchor="middle">OP_PI</text>
       <text x="600" y="319" fill="#94A3B8" font-size="10" font-weight="600" letter-spacing="1.5" text-anchor="middle">ROUTE WITH INTENT</text>
     </g>
 

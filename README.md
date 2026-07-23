@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/op-pi-hero.svg" width="100%" alt="op-pi routes operational signals through one typed pipeline to Discord, Slack, and local interfaces" />
+  <img src="assets/op_pi-hero.svg" width="100%" alt="op_pi routes operational signals through one typed pipeline to Discord, Slack, and local interfaces" />
 </p>
 
-<h1 align="center">op-pi</h1>
+<h1 align="center">op_pi</h1>
 
 <p align="center">
   <strong>Operation Pipeline Interface</strong>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/IYENTeam/op-pi/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/IYENTeam/op-pi/ci.yml?branch=main&style=flat-square&label=build&labelColor=111827&color=55e6c1" alt="Build status" /></a>
+  <a href="https://github.com/IYENTeam/op_pi/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/IYENTeam/op_pi/ci.yml?branch=main&style=flat-square&label=build&labelColor=111827&color=55e6c1" alt="Build status" /></a>
   <img src="https://img.shields.io/badge/pipeline-local--first-8b7cff?style=flat-square&labelColor=111827" alt="Local-first pipeline" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4aa8ff?style=flat-square&labelColor=111827" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Rust-2024-f97316?style=flat-square&labelColor=111827&logo=rust&logoColor=white" alt="Rust 2024" />
@@ -20,7 +20,7 @@
 <p align="center">
   <a href="#quick-start">Quick start</a>
   &nbsp;&middot;&nbsp;
-  <a href="#one-pipeline-not-another-webhook-script">Why op-pi</a>
+  <a href="#one-pipeline-not-another-webhook-script">Why op_pi</a>
   &nbsp;&middot;&nbsp;
   <a href="#what-it-connects">Interfaces</a>
   &nbsp;&middot;&nbsp;
@@ -31,12 +31,6 @@
 
 ---
 
-> [!IMPORTANT]
-> **The product is now op-pi.** During the compatibility-first rename, the
-> executable, Cargo package, config path, and environment prefix remain
-> `clawhip`. Every command in this README works with the currently shipped
-> runtime.
-
 ## Events happen everywhere. Operations should not.
 
 CI failures, cloud alerts, GitHub activity, agent hooks, and live tmux sessions
@@ -44,7 +38,7 @@ all speak different protocols. Teams usually connect them with one-off webhook
 scripts until nobody can explain why an alert reached one channel, missed
 another, or triggered an action.
 
-**op-pi gives those signals one typed, inspectable path.**
+**op_pi gives those signals one typed, inspectable path.**
 
 ```text
 intake  ->  normalize  ->  validate  ->  route  ->  render  ->  deliver
@@ -76,17 +70,17 @@ intake  ->  normalize  ->  validate  ->  route  ->  render  ->  deliver
 ### Install from the current repository
 
 ```bash
-git clone https://github.com/IYENTeam/op-pi.git
-cd op-pi
+git clone https://github.com/IYENTeam/op_pi.git
+cd op_pi
 ./install.sh --skip-star-prompt
 ```
 
-The installed command is currently `clawhip`.
+The installed command is `op_pi`.
 
 ### Route your first event
 
 ```toml
-# ~/.clawhip/config.toml
+# ~/.op_pi/config.toml
 [providers.discord]
 token = "DISCORD_BOT_TOKEN"
 default_channel = "DISCORD_CHANNEL_ID"
@@ -99,9 +93,9 @@ format = "compact"
 ```
 
 ```bash
-clawhip start
-clawhip status
-clawhip explain github.pr-status-changed repo=my-app number=42
+op_pi start
+op_pi status
+op_pi explain github.pr-status-changed repo=my-app number=42
 ```
 
 The daemon listens locally at `http://127.0.0.1:25294`.
@@ -112,14 +106,14 @@ curl -fsS http://127.0.0.1:25294/health
 
 ## One pipeline, not another webhook script
 
-| Point integration | op-pi |
+| Point integration | op_pi |
 | --- | --- |
 | Each provider owns its own delivery logic | Providers only produce normalized events |
 | Message text becomes accidental routing state | Typed fields and explicit filters decide routes |
 | One input maps to one hard-coded destination | One event resolves to zero, one, or many deliveries |
 | Authentication varies by copied script | Intake security is centralized and testable |
 | Failures repeat forever in unbounded logs | Health, backoff, deduplication, and rotation are built in |
-| Nobody can preview a routing decision | `clawhip explain` shows the route without dispatching |
+| Nobody can preview a routing decision | `op_pi explain` shows the route without dispatching |
 
 ## The operation pipeline
 
@@ -132,7 +126,7 @@ flowchart LR
         TM[tmux + Discord]
     end
 
-    subgraph op-pi
+    subgraph op_pi
         IN[Intake]
         EN[Typed envelope]
         RT[Routes + policy]
@@ -233,7 +227,7 @@ format = "alert"
 [[routes]]
 event = "cloudflare.logpush.audit_logs_v2"
 sink = "localfile"
-local_path = "/var/log/op-pi/cloudflare-audit.jsonl"
+local_path = "/var/log/op_pi/cloudflare-audit.jsonl"
 ```
 
 ### Approval requests stay requests
@@ -247,21 +241,21 @@ channel = "APPROVAL_CHANNEL_ID"
 format = "alert"
 ```
 
-op-pi routes and records the request. It does not treat message text as
+op_pi routes and records the request. It does not treat message text as
 authorization to mutate infrastructure.
 
 ## Provider-native agent hooks
 
-Codex and Claude own session launch and hook registration. op-pi owns the
+Codex and Claude own session launch and hook registration. op_pi owns the
 shared event contract, normalization, and routing layer.
 
 ```bash
-clawhip hooks install --provider codex --scope global
-clawhip hooks install --provider claude-code --scope global
+op_pi hooks install --provider codex --scope global
+op_pi hooks install --provider claude-code --scope global
 
-clawhip native hook --provider codex --file payload.json
-clawhip native hook --provider claude --file payload.json
-cat payload.json | clawhip native hook --provider codex
+op_pi native hook --provider codex --file payload.json
+op_pi native hook --provider claude --file payload.json
+cat payload.json | op_pi native hook --provider codex
 ```
 
 Shared hook events include `SessionStart`, `PreToolUse`, `PostToolUse`,
@@ -327,8 +321,8 @@ Read the complete [AWS and Cloudflare intake guide](docs/aws-cloudflare-intake.m
 Inspect a routing decision without sending anything:
 
 ```bash
-clawhip explain github.pr-status-changed repo=my-app number=42
-clawhip explain --json github.pr-status-changed repo=my-app number=42
+op_pi explain github.pr-status-changed repo=my-app number=42
+op_pi explain --json github.pr-status-changed repo=my-app number=42
 ```
 
 The explainer reports which routes match, which filters pass, and where each
@@ -337,13 +331,13 @@ delivery would go.
 ## Operations
 
 ```bash
-clawhip status
-clawhip config
-clawhip config verify-gateway-allowlist
-clawhip send --channel <id> --message "test"
-clawhip plugin list
-clawhip tmux list
-clawhip gajae status
+op_pi status
+op_pi config
+op_pi config verify-gateway-allowlist
+op_pi send --channel <id> --message "test"
+op_pi plugin list
+op_pi tmux list
+op_pi gajae status
 ```
 
 Operational behavior includes:
@@ -357,7 +351,7 @@ Operational behavior includes:
 - bounded log rotation
 
 ```bash
-scripts/rotate-clawhip-logs.sh
+scripts/rotate_op_pi_logs.sh
 ```
 
 The bundled utility rotates above 25 MiB, retains four gzip generations, and
@@ -373,21 +367,11 @@ can restart the launchd service after rotating open log files.
 6. Use `drop` only for intentionally acknowledged noise.
 7. Treat approval events as requests, not authorization.
 
-## Compatibility during the rename
+## Identity
 
-| Surface | Current identifier |
-| --- | --- |
-| Product | `op-pi` |
-| Binary | `clawhip` |
-| Config file | `~/.clawhip/config.toml` |
-| Runtime directory | `~/.clawhip/` |
-| Environment prefix | `CLAWHIP_` |
-| Cargo package | `clawhip` |
-
-These runtime identifiers remain stable for existing installations, launch
-agents, hooks, and persisted state. They will stay documented until the binary,
-package, service, and filesystem migration can happen as one deliberate
-compatibility change.
+op_pi is the sole identifier for commands, configuration, automation,
+deployments, and telemetry. The versioned telemetry schema is
+`op_pi.telemetry.v1`.
 
 ## Repository map
 
@@ -412,7 +396,7 @@ plugins/          tool-specific hook bridges
 
 ## Design center
 
-op-pi is an independent operations pipeline built around:
+op_pi is an independent operations pipeline built around:
 
 - explicit operational interfaces
 - provider-native event intake
@@ -427,5 +411,5 @@ op-pi is an independent operations pipeline built around:
 <p align="center">
   <strong>Signals in. Decisions routed. Actions out.</strong>
   <br />
-  <sub>op-pi is licensed under the <a href="LICENSE">MIT License</a>.</sub>
+  <sub>op_pi is licensed under the <a href="LICENSE">MIT License</a>.</sub>
 </p>

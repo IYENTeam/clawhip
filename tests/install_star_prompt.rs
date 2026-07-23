@@ -62,6 +62,26 @@ fn run_shell(temp: &TempDir, script_body: &str, extra_env: &[(&str, &str)]) -> O
 }
 
 #[test]
+fn format_gate_script_is_directly_executable() {
+    let mode = fs::metadata(repo_root().join("scripts/internal_pr_format_gate.sh"))
+        .expect("format gate metadata")
+        .permissions()
+        .mode();
+
+    assert_ne!(mode & 0o111, 0, "format gate must be executable");
+}
+
+#[test]
+fn installer_script_is_directly_executable() {
+    let mode = fs::metadata(repo_root().join("install.sh"))
+        .expect("installer metadata")
+        .permissions()
+        .mode();
+
+    assert_ne!(mode & 0o111, 0, "installer must be executable");
+}
+
+#[test]
 fn skips_star_prompt_when_not_interactive() {
     let temp = TempDir::new().expect("tempdir");
     let output = run_shell(
@@ -153,7 +173,7 @@ EOF_INPUT
     let gh_log = fs::read_to_string(temp.path().join("gh.log")).expect("gh log");
     assert_eq!(
         gh_log.trim(),
-        "api --method PUT /user/starred/Yeachan-Heo/clawhip --silent"
+        "api --method PUT /user/starred/IYENTeam/op_pi --silent"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

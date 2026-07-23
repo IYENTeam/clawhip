@@ -2,13 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: stale-check.sh --session <session> --stale-minutes <n> [--channel <id>]" >&2
+  echo "usage: stale_check.sh --session <session> --stale-minutes <n> [--channel <id>]" >&2
   exit 1
 }
 
 session=""
 stale_minutes=""
-channel="${CLAWHIP_CHANNEL:-}"
+channel="${OP_PI_CHANNEL:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --session) session="$2"; shift 2 ;;
@@ -20,7 +20,8 @@ done
 
 [[ -n "$session" && -n "$stale_minutes" ]] || usage
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/clawhip/tmux-stale"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+state_dir="$state_root/op_pi/tmux_stale"
 mkdir -p "$state_dir"
 now=$(date +%s)
 threshold=$((stale_minutes * 60))
@@ -43,7 +44,7 @@ while IFS='|' read -r pane_id pane_name; do
     changed_at=$now
     notified_at=0
   elif (( now - changed_at >= threshold )) && (( notified_at == 0 || now - notified_at >= threshold )); then
-    args=(clawhip tmux stale --session "$session" --pane "$pane_name" --minutes "$stale_minutes" --last-line "${last_line:-<no output>}")
+    args=(op_pi tmux stale --session "$session" --pane "$pane_name" --minutes "$stale_minutes" --last-line "${last_line:-<no output>}")
     if [[ -n "$channel" ]]; then args+=(--channel "$channel"); fi
     "${args[@]}"
     notified_at=$now

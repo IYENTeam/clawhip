@@ -16,12 +16,12 @@ use crate::events::IncomingEvent;
 
 const GAJAE_ENV: &str = "GAJAE_BIN";
 const GAJAE_PATH_NAME: &str = "gajae";
-const PROFILE_INSTALL_ARGS: &[&str] = &["clawhip", "profile", "install"];
+const PROFILE_INSTALL_ARGS: &[&str] = &["op_pi", "profile", "install"];
 const SUMMARY_LIMIT: usize = 240;
 const RECEIPT_STDIN_LIMIT: usize = 1_048_576;
-const DEFAULT_ROUTES_PATH: &str = ".clawhip/gajae.routes.yml";
+const DEFAULT_ROUTES_PATH: &str = ".op_pi/gajae.routes.yml";
 const DEFAULT_RUNTIME_DIR: &str = ".gajae/runtime";
-const PROFILE_FILE_NAME: &str = "clawhip-profile.yml";
+const PROFILE_FILE_NAME: &str = "op_pi-profile.yml";
 const MAX_PROFILE_BYTES: usize = 256 * 1024;
 /// Family name for the lightweight zero-backlog follow-up checkpoint receipt.
 ///
@@ -68,7 +68,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "tmux.keyword",
     "tmux.stale",
 ];
-const HANDLER_ARGS_PREFIX: &[&str] = &["clawhip", "handler"];
+const HANDLER_ARGS_PREFIX: &[&str] = &["op_pi", "handler"];
 const ALLOWED_HANDLER_SUBCOMMANDS: &[&str] = &["handle-event", "route-action", "summarize-event"];
 const DIAGNOSTIC_BYTES: usize = 512;
 
@@ -424,7 +424,7 @@ pub fn run_profile_inspect(options: ProfileInspectOptions) -> Result<()> {
     let profile = load_profile(options.file.as_deref())?;
     let validation = validate_profile(&profile);
     println!(
-        "GAJAE clawhip profile: {}",
+        "GAJAE op_pi profile: {}",
         profile.name.as_deref().unwrap_or("unknown")
     );
     println!("source: {}", profile.source.display());
@@ -587,27 +587,34 @@ fn discover_profile_path() -> Result<PathBuf> {
         return Ok(routes);
     }
 
-    let runtime_dir = Path::new(DEFAULT_RUNTIME_DIR);
+    if let Some(candidate) = discover_runtime_profile_path(Path::new(DEFAULT_RUNTIME_DIR))? {
+        return Ok(candidate);
+    }
+
+    bail!(
+        "GAJAE op_pi profile not found; expected {DEFAULT_ROUTES_PATH} or {DEFAULT_RUNTIME_DIR}/*/{PROFILE_FILE_NAME}"
+    )
+}
+
+fn discover_runtime_profile_path(runtime_dir: &Path) -> Result<Option<PathBuf>> {
     if runtime_dir.is_dir() {
         let mut candidates = Vec::new();
         for entry in
             fs::read_dir(runtime_dir).context("failed to inspect GAJAE runtime directory")?
         {
             let entry = entry.context("failed to inspect GAJAE runtime entry")?;
-            let candidate = entry.path().join(PROFILE_FILE_NAME);
-            if candidate.is_file() {
-                candidates.push(candidate);
+            let profile = entry.path().join(PROFILE_FILE_NAME);
+            if profile.is_file() {
+                candidates.push(profile);
             }
         }
         candidates.sort();
         if let Some(candidate) = candidates.into_iter().next() {
-            return Ok(candidate);
+            return Ok(Some(candidate));
         }
     }
 
-    bail!(
-        "GAJAE clawhip profile not found; expected {DEFAULT_ROUTES_PATH} or {DEFAULT_RUNTIME_DIR}/*/{PROFILE_FILE_NAME}"
-    )
+    Ok(None)
 }
 
 fn parse_profile(contents: &str, source: PathBuf) -> Result<GajaeRouteProfile> {
@@ -681,9 +688,9 @@ fn parse_profile(contents: &str, source: PathBuf) -> Result<GajaeRouteProfile> {
             continue;
         }
 
-        if matches!(top_level.as_deref(), Some("clawhipProfile")) && indent == 2 {
+        if matches!(top_level.as_deref(), Some("op_pi_profile")) && indent == 2 {
             ensure_route_has_command(&route_missing_command)?;
-            validate_clawhip_profile_key(key, line_number)?;
+            validate_op_pi_profile_key(key, line_number)?;
             in_routes = key == "routes";
             route_event = None;
             route_missing_command = None;
@@ -786,7 +793,7 @@ fn parse_bool_flag(value: Option<&str>, key: &str, line_number: usize) -> Result
 }
 
 fn routes_indent(top_level: Option<&str>) -> usize {
-    if matches!(top_level, Some("clawhipProfile")) {
+    if matches!(top_level, Some("op_pi_profile")) {
         4
     } else {
         2
@@ -794,7 +801,10 @@ fn routes_indent(top_level: Option<&str>) -> usize {
 }
 
 fn validate_top_level_key(key: &str, source: &Path, line_number: usize) -> Result<()> {
-    let profile_file = source.file_name().and_then(|name| name.to_str()) == Some(PROFILE_FILE_NAME);
+    let profile_file = matches!(
+        source.file_name().and_then(|name| name.to_str()),
+        Some(PROFILE_FILE_NAME)
+    );
     let allowed = if profile_file {
         matches!(
             key,
@@ -802,7 +812,7 @@ fn validate_top_level_key(key: &str, source: &Path, line_number: usize) -> Resul
                 | "category"
                 | "displayName"
                 | "gajae"
-                | "clawhipProfile"
+                | "op_pi_profile"
                 | "safety"
                 | "operatorConnectionsRequiredLater"
                 | "name"
@@ -822,14 +832,14 @@ fn validate_top_level_key(key: &str, source: &Path, line_number: usize) -> Resul
     }
 }
 
-fn validate_clawhip_profile_key(key: &str, line_number: usize) -> Result<()> {
+fn validate_op_pi_profile_key(key: &str, line_number: usize) -> Result<()> {
     if matches!(
         key,
         "name" | "description" | "routesFile" | "safety" | "followUp" | "routes"
     ) {
         Ok(())
     } else {
-        bail!("unsupported GAJAE clawhipProfile key `{key}` at line {line_number}")
+        bail!("unsupported GAJAE op_pi_profile key `{key}` at line {line_number}")
     }
 }
 
@@ -852,7 +862,7 @@ fn validate_profile(profile: &GajaeRouteProfile) -> RouteValidation {
 
 fn command_matches_event(command: &str, event: &str) -> bool {
     command == format!("gajae handle {event}")
-        || command == format!("gajae runtime handle --router clawhip --event {event}")
+        || command == format!("gajae runtime handle --router op_pi --event {event}")
 }
 
 fn summarize_route_command(command: &str, event: &str) -> &'static str {
@@ -1183,7 +1193,7 @@ fn check_profile_and_handlers(
                 checks.push(PreflightCheck::fail(
                     "profile_routes",
                     format!(
-                        "{}; rerun `clawhip gajae profile install` for current handler names",
+                        "{}; rerun `op_pi gajae profile install` for current handler names",
                         profile_validation_summary(&validation)
                     ),
                 ));
@@ -1191,7 +1201,7 @@ fn check_profile_and_handlers(
         }
         Err(_) => checks.push(PreflightCheck::fail(
             "profile",
-            "profile could not be loaded or parsed; run `clawhip gajae profile install` or pass a readable --file profile",
+            "profile could not be loaded or parsed; run `op_pi gajae profile install` or pass a readable --file profile",
         )),
     }
 }
@@ -1226,7 +1236,7 @@ fn check_handler_commands(
             Ok(_) => checks.push(PreflightCheck::fail(
                 "handler_command",
                 format!(
-                    "{} missing or renamed; rerun `clawhip gajae profile install` with current GAJAE",
+                    "{} missing or renamed; rerun `op_pi gajae profile install` with current GAJAE",
                     handler_probe_summary(&args)
                 ),
             )),
@@ -1247,7 +1257,7 @@ fn check_profile_safety(profile: &GajaeRouteProfile, checks: &mut Vec<PreflightC
     } else {
         checks.push(PreflightCheck::fail(
             "public_safe_output",
-            "run `clawhip gajae profile install` to enable public-safe output mode",
+            "run `op_pi gajae profile install` to enable public-safe output mode",
         ));
     }
     if profile.raw_payload_export == Some(false) {
@@ -1258,7 +1268,7 @@ fn check_profile_safety(profile: &GajaeRouteProfile, checks: &mut Vec<PreflightC
     } else {
         checks.push(PreflightCheck::fail(
             "raw_payload_export",
-            "run `clawhip gajae profile install` with no raw-payload export required",
+            "run `op_pi gajae profile install` with no raw-payload export required",
         ));
     }
 }
@@ -1283,21 +1293,21 @@ fn check_onboard_plan(
         "--repo",
         repo,
         "--router",
-        "clawhip",
+        "op_pi",
         "--dry-run",
     ];
     match runner.output_with_stdin(bin, &args, None) {
         Ok(output) if output.success => checks.push(PreflightCheck::pass(
             "onboard_plan",
-            "dry-run clawhip onboard plan available",
+            "dry-run op_pi onboard plan available",
         )),
         Ok(_) => checks.push(PreflightCheck::fail(
             "onboard_plan",
-            "dry-run clawhip onboard plan unavailable; update GAJAE operator onboard support",
+            "dry-run op_pi onboard plan unavailable; update GAJAE operator onboard support",
         )),
         Err(error) => checks.push(PreflightCheck::fail(
             "onboard_plan",
-            format!("dry-run clawhip onboard plan unavailable: {error}"),
+            format!("dry-run op_pi onboard plan unavailable: {error}"),
         )),
     }
 }
@@ -1314,12 +1324,12 @@ fn missing_receipt_families(stdout: &[u8]) -> Vec<&'static str> {
 fn handler_probe_args(command: &str, event: &str) -> Option<Vec<String>> {
     if command == format!("gajae handle {event}") {
         Some(vec!["handle".into(), event.into(), "--help".into()])
-    } else if command == format!("gajae runtime handle --router clawhip --event {event}") {
+    } else if command == format!("gajae runtime handle --router op_pi --event {event}") {
         Some(vec![
             "runtime".into(),
             "handle".into(),
             "--router".into(),
-            "clawhip".into(),
+            "op_pi".into(),
             "--event".into(),
             event.into(),
             "--help".into(),
@@ -1331,7 +1341,7 @@ fn handler_probe_args(command: &str, event: &str) -> Option<Vec<String>> {
 
 fn handler_probe_summary(args: &[String]) -> String {
     if args.first().map(String::as_str) == Some("runtime") {
-        "runtime handle --router clawhip".to_string()
+        "runtime handle --router op_pi".to_string()
     } else {
         "handle <event>".to_string()
     }
@@ -1370,7 +1380,7 @@ fn finish_conformance(kind: &'static str, checks: Vec<PreflightCheck>) -> Result
             "conformant": conformant,
             "checks": checks_json,
             "failures": failures,
-            "next_step": if conformant { Value::Null } else { json!("fix failed checks; reinstall the clawhip GAJAE profile with `clawhip gajae profile install` when handler names drift") },
+            "next_step": if conformant { Value::Null } else { json!("fix failed checks; reinstall the op_pi GAJAE profile with `op_pi gajae profile install` when handler names drift") },
         }))?
     );
     if conformant {
@@ -1463,7 +1473,7 @@ fn run_preflight_with(
             } else {
                 checks.push(PreflightCheck::fail(
                     "public_safe_output",
-                    "run `clawhip gajae profile install` to enable public-safe output mode",
+                    "run `op_pi gajae profile install` to enable public-safe output mode",
                 ));
             }
             if profile.raw_payload_export == Some(false) {
@@ -1474,13 +1484,13 @@ fn run_preflight_with(
             } else {
                 checks.push(PreflightCheck::fail(
                     "raw_payload_export",
-                    "run `clawhip gajae profile install` with no raw-payload export required",
+                    "run `op_pi gajae profile install` with no raw-payload export required",
                 ));
             }
         }
         Err(error) => checks.push(PreflightCheck::fail(
             "profile",
-            format!("run `clawhip gajae profile install`: {error}"),
+            format!("run `op_pi gajae profile install`: {error}"),
         )),
     }
 
@@ -1504,7 +1514,7 @@ fn finish_preflight(checks: Vec<PreflightCheck>) -> Result<()> {
             "ready": ready,
             "checks": checks_json,
             "failures": failures,
-            "next_step": if ready { Value::Null } else { json!("fix failed checks; profile step is `clawhip gajae profile install`") },
+            "next_step": if ready { Value::Null } else { json!("fix failed checks; profile step is `op_pi gajae profile install`") },
         }))?
     );
     if ready {
@@ -1539,7 +1549,7 @@ fn run_profile_install_with(
 
 pub fn profile_install_failure_message(status: CommandExit) -> String {
     format!(
-        "gajae clawhip profile install failed{}",
+        "gajae op_pi profile install failed{}",
         status
             .code
             .map(|code| format!(" with exit code {code}"))
@@ -1753,10 +1763,8 @@ fn ingest_receipt_with(
 }
 
 fn write_receipt_tempfile(input: &[u8]) -> Result<TempReceiptFile> {
-    let path = std::env::temp_dir().join(format!(
-        "clawhip-gajae-receipt-{}.json",
-        uuid::Uuid::new_v4()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("op_pi-gajae-receipt-{}.json", uuid::Uuid::new_v4()));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2034,7 +2042,7 @@ mod mutation_plan_tests {
     #[test]
     fn github_mutation_plan_is_plan_only_and_uses_body_digest() {
         let plan = github_mutation_plan(GithubMutationPlanRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             kind: "comment".into(),
             target: "256".into(),
             body: Some("safe public comment with secret-token-123 inside raw body".into()),
@@ -2063,7 +2071,7 @@ mod mutation_plan_tests {
     #[test]
     fn github_mutation_plan_duplicate_suppression_is_deterministic() {
         let request = GithubMutationPlanRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             kind: "label".into(),
             target: "256".into(),
             body: None,
@@ -2077,7 +2085,7 @@ mod mutation_plan_tests {
         assert!(!first.duplicate);
 
         let duplicate = github_mutation_plan(GithubMutationPlanRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             kind: "add-label".into(),
             target: "256".into(),
             body: None,
@@ -2095,7 +2103,7 @@ mod mutation_plan_tests {
     #[test]
     fn github_mutation_plan_blocks_protected_boundary() {
         let plan = github_mutation_plan(GithubMutationPlanRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             kind: "merge".into(),
             target: "pr-256".into(),
             body: None,
@@ -2116,7 +2124,7 @@ mod mutation_plan_tests {
     #[test]
     fn zero_backlog_checkpoint_clear_backlog_suppresses_followup() {
         let checkpoint = zero_backlog_followup_checkpoint(ZeroBacklogCheckpointRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             open_issues: 0,
             open_prs: 0,
             action_needed_sessions: 0,
@@ -2146,7 +2154,7 @@ mod mutation_plan_tests {
     #[test]
     fn zero_backlog_checkpoint_nonzero_backlog_emits_followup() {
         let checkpoint = zero_backlog_followup_checkpoint(ZeroBacklogCheckpointRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             open_issues: 0,
             open_prs: 2,
             action_needed_sessions: 0,
@@ -2163,7 +2171,7 @@ mod mutation_plan_tests {
     #[test]
     fn zero_backlog_checkpoint_holds_force_followup_emission() {
         let checkpoint = zero_backlog_followup_checkpoint(ZeroBacklogCheckpointRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             open_issues: 0,
             open_prs: 0,
             action_needed_sessions: 0,
@@ -2180,7 +2188,7 @@ mod mutation_plan_tests {
     #[test]
     fn zero_backlog_checkpoint_rejects_unsafe_source() {
         let result = zero_backlog_followup_checkpoint(ZeroBacklogCheckpointRequest {
-            repo: "Yeachan-Heo/clawhip".into(),
+            repo: "IYENTeam/op_pi".into(),
             open_issues: 0,
             open_prs: 0,
             action_needed_sessions: 0,
@@ -2369,6 +2377,22 @@ mod tests {
         }
     }
 
+    const HANDLER_COMPLETION_TIMEOUT_MS: u64 = 30_000;
+
+    #[test]
+    fn profile_discovery_prefers_op_pi_when_both_profiles_exist() {
+        let runtime = tempdir().expect("runtime tempdir");
+        let service = runtime.path().join("daemon");
+        fs::create_dir_all(&service).expect("create runtime service");
+        fs::write(service.join(PROFILE_FILE_NAME), "current").expect("write current");
+
+        let profile = discover_runtime_profile_path(runtime.path())
+            .expect("discover profile")
+            .expect("profile");
+
+        assert_eq!(profile, service.join(PROFILE_FILE_NAME));
+    }
+
     #[tokio::test]
     async fn handler_passes_fixed_args_and_event_json_stdin_without_shell_interpolation() {
         let script = r#"#!/bin/sh
@@ -2389,7 +2413,7 @@ printf '{"summary":"ok"}'
             &bin,
             &handler_action(),
             &json!({"type": "github.pr.opened"}),
-            handler_limits(1_000, 1_024),
+            handler_limits(HANDLER_COMPLETION_TIMEOUT_MS, 1_024),
         )
         .await
         .expect("handler should run");
@@ -2399,7 +2423,7 @@ printf '{"summary":"ok"}'
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             vec![
-                "clawhip",
+                "op_pi",
                 "handler",
                 "handle-event",
                 "--label",
@@ -2436,7 +2460,7 @@ printf '{"summary":"ok"}'
             &bin,
             &handler_action(),
             &json!({"type": "github.pr.opened"}),
-            handler_limits(1_000, 4_096),
+            handler_limits(HANDLER_COMPLETION_TIMEOUT_MS, 4_096),
         )
         .await
         .expect("handler should report failure");
@@ -2498,7 +2522,7 @@ printf 'not killed' > "$FAKE_MARKER_FILE"
             &bin,
             &handler_action(),
             &json!({"type": "github.pr.opened"}),
-            handler_limits(1_000, 1_024),
+            handler_limits(HANDLER_COMPLETION_TIMEOUT_MS, 1_024),
         )
         .await
         .expect("handler should run");
@@ -2531,9 +2555,9 @@ routes:
   github.pr-status-changed:
     command: gajae handle github.pr-status-changed
   session.started:
-    command: gajae runtime handle --router clawhip --event session.started
+    command: gajae runtime handle --router op_pi --event session.started
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect("profile should parse");
 
@@ -2543,19 +2567,19 @@ routes:
     }
 
     #[test]
-    fn profile_parser_loads_nested_clawhip_profile_routes() {
+    fn profile_parser_loads_nested_op_pi_profile_routes() {
         let profile = parse_profile(
             r#"
 runtime: hermes
-clawhipProfile:
+op_pi_profile:
   name: gajae
   routes:
     github.issue-opened:
       command: gajae handle github.issue-opened
 safety:
-  liveClawhipEnablement: false
+  live_op_pi_enablement: false
 "#,
-            PathBuf::from(".gajae/runtime/hermes/clawhip-profile.yml"),
+            PathBuf::from(".gajae/runtime/hermes/op_pi-profile.yml"),
         )
         .expect("nested profile should parse");
 
@@ -2571,21 +2595,19 @@ safety:
     }
 
     #[test]
-    fn profile_loader_follows_clawhip_profile_routes_file_from_cwd() {
+    fn profile_loader_follows_op_pi_profile_routes_file_from_cwd() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp
-            .path()
-            .join(".gajae/runtime/hermes/clawhip-profile.yml");
+        let profile_path = temp.path().join(".gajae/runtime/hermes/op_pi-profile.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
-        let routes_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let routes_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(routes_path.parent().expect("routes parent")).expect("routes dir");
         fs::write(
             &profile_path,
             r#"
 runtime: hermes
-clawhipProfile:
+op_pi_profile:
   name: gajae
-  routesFile: .clawhip/gajae.routes.yml
+  routesFile: .op_pi/gajae.routes.yml
 "#,
         )
         .expect("write profile");
@@ -2607,14 +2629,17 @@ routes:
             profile.routes.get("session.started").map(String::as_str),
             Some("gajae handle session.started")
         );
-        assert_eq!(profile.source, routes_path);
+        assert_eq!(
+            profile.source,
+            routes_path.canonicalize().expect("canonical routes path")
+        );
         assert!(validate_profile(&profile).is_clean());
     }
 
     #[test]
     fn profile_loader_rejects_oversized_primary_profile_without_raw_contents() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let profile_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
         fs::write(
             &profile_path,
@@ -2636,19 +2661,17 @@ routes:
     #[test]
     fn profile_loader_rejects_oversized_referenced_routes_without_raw_contents() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp
-            .path()
-            .join(".gajae/runtime/hermes/clawhip-profile.yml");
+        let profile_path = temp.path().join(".gajae/runtime/hermes/op_pi-profile.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
-        let routes_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let routes_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(routes_path.parent().expect("routes parent")).expect("routes dir");
         fs::write(
             &profile_path,
             r#"
 runtime: hermes
-clawhipProfile:
+op_pi_profile:
   name: gajae
-  routesFile: .clawhip/gajae.routes.yml
+  routesFile: .op_pi/gajae.routes.yml
 "#,
         )
         .expect("write profile");
@@ -2673,7 +2696,7 @@ clawhipProfile:
     #[test]
     fn preflight_accepts_profile_validators_and_safe_output() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let profile_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
         fs::write(
             &profile_path,
@@ -2738,7 +2761,7 @@ routes:
     #[test]
     fn preflight_fails_when_validator_unavailable() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let profile_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
         fs::write(
             &profile_path,
@@ -2771,7 +2794,7 @@ routes:
     #[test]
     fn preflight_fails_when_profile_requires_unsafe_output() {
         let temp = tempdir().expect("tempdir");
-        let profile_path = temp.path().join(".clawhip/gajae.routes.yml");
+        let profile_path = temp.path().join(".op_pi/gajae.routes.yml");
         fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
         fs::write(
             &profile_path,
@@ -2803,7 +2826,7 @@ routes:
   session.started:
     command: gajae handle session.started
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect_err("list-style routes should fail");
         let message = error.to_string();
@@ -2818,11 +2841,11 @@ routes:
         let error = parse_profile(
             r#"
 runtime: hermes
-clawhipProfile:
+op_pi_profile:
   routes:
     - event: github.issue-opened
 "#,
-            PathBuf::from(".gajae/runtime/hermes/clawhip-profile.yml"),
+            PathBuf::from(".gajae/runtime/hermes/op_pi-profile.yml"),
         )
         .expect_err("nested list-style routes should fail");
         let message = error.to_string();
@@ -2841,7 +2864,7 @@ routes:
   session.started:
     command: gajae handle session.started
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect_err("missing command should fail");
         let message = error.to_string();
@@ -2860,7 +2883,7 @@ routes:
   github.pr-status-changed:
     command: rm -rf /tmp/example
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect("profile should parse before semantic validation");
 
@@ -2895,7 +2918,7 @@ routes:
   tmux.stale:
     command: gajae handle tmux.stale
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect("current profile should parse");
         assert!(validate_profile(&current).is_clean());
@@ -2912,7 +2935,7 @@ routes:
   session.stale:
     command: gajae handle session.stale
 "#,
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect("stale profile should parse before semantic validation");
         assert_eq!(
@@ -2945,7 +2968,7 @@ routes:
     #[test]
     fn malformed_profile_error_is_sanitized_without_raw_input() {
         let raw_secret = "routes:\n  github.pr-status-changed command: secret-token-123\n";
-        let error = parse_profile(raw_secret, PathBuf::from(".clawhip/gajae.routes.yml"))
+        let error = parse_profile(raw_secret, PathBuf::from(".op_pi/gajae.routes.yml"))
             .expect_err("malformed profile should fail");
         let message = error.to_string();
 
@@ -2964,7 +2987,7 @@ routes:
     fn route_file_rejects_unknown_top_level_key_without_raw_value() {
         let error = parse_profile(
             "routes:\n  session.started:\n    command: gajae handle session.started\nprivate: secret-token-123\n",
-            PathBuf::from(".clawhip/gajae.routes.yml"),
+            PathBuf::from(".op_pi/gajae.routes.yml"),
         )
         .expect_err("unknown key should fail");
         let message = error.to_string();

@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-LOG_DIR="${CLAWHIP_LOG_DIR:-$HOME/.clawhip/logs}"
-MAX_BYTES="${CLAWHIP_LOG_MAX_BYTES:-26214400}"
-KEEP="${CLAWHIP_LOG_KEEP:-4}"
-SERVICE_LABEL="${CLAWHIP_SERVICE_LABEL:-com.clawhip.daemon}"
-LAUNCHD_DOMAIN="${CLAWHIP_LAUNCHD_DOMAIN:-gui/$(id -u)}"
+LOG_DIR="${OP_PI_LOG_DIR:-$HOME/.op_pi/logs}"
+MAX_BYTES="${OP_PI_LOG_MAX_BYTES:-26214400}"
+KEEP="${OP_PI_LOG_KEEP:-4}"
+SERVICE_LABEL="${OP_PI_SERVICE_LABEL:-com.op_pi.daemon}"
+LAUNCHD_DOMAIN="${OP_PI_LAUNCHD_DOMAIN:-gui/$(id -u)}"
 ROTATED_FILES=""
 
 case "$MAX_BYTES:$KEEP" in
@@ -39,7 +39,7 @@ rotate_log "$LOG_DIR/stdout.log"
 
 [ -n "$ROTATED_FILES" ] || exit 0
 
-if [ "${CLAWHIP_LOG_ROTATE_SKIP_RESTART:-0}" != "1" ]; then
+if [ "${OP_PI_LOG_ROTATE_SKIP_RESTART:-0}" != "1" ]; then
     launchctl kickstart -k "$LAUNCHD_DOMAIN/$SERVICE_LABEL"
 fi
 

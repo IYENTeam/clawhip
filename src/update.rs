@@ -12,7 +12,7 @@ use crate::config::AppConfig;
 use crate::events::{IncomingEvent, MessageFormat};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const GITHUB_REPO: &str = "Yeachan-Heo/clawhip";
+const GITHUB_REPO: &str = "IYENTeam/op_pi";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateConfig {
@@ -24,7 +24,7 @@ pub struct UpdateConfig {
     pub check_interval_secs: u64,
     #[serde(default)]
     pub auto_restart: bool,
-    /// Absolute path to the clawhip git checkout used for self-update.
+    /// Absolute path to the op_pi git checkout used for self-update.
     /// Required for daemon/systemd contexts where CWD is not the repo root.
     #[serde(default)]
     pub repo_root: Option<String>,
@@ -74,11 +74,11 @@ pub async fn run_checker(
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let http = reqwest::Client::builder()
-        .user_agent(format!("clawhip/{VERSION}"))
+        .user_agent(format!("op_pi/{VERSION}"))
         .build()
         .expect("http client");
 
-    println!("clawhip update checker starting (interval: {check_secs}s)");
+    println!("op_pi update checker starting (interval: {check_secs}s)");
 
     loop {
         tick.tick().await;
@@ -99,8 +99,8 @@ pub async fn run_checker(
                 *pending.write().await = Some(update);
 
                 let message = format!(
-                    "clawhip update available: v{VERSION} \u{2192} v{latest}\n\
-                     Approve via: POST /api/update/approve  or  clawhip update approve\n\
+                    "op_pi update available: v{VERSION} \u{2192} v{latest}\n\
+                     Approve via: POST /api/update/approve  or  op_pi update approve\n\
                      {}",
                     release.html_url,
                 );
@@ -108,12 +108,12 @@ pub async fn run_checker(
                     .with_format(Some(MessageFormat::Alert));
 
                 if let Err(error) = tx.send(event).await {
-                    eprintln!("clawhip update checker: failed to send notification: {error}");
+                    eprintln!("op_pi update checker: failed to send notification: {error}");
                 }
             }
             Ok(_) => {}
             Err(error) => {
-                eprintln!("clawhip update checker: release check failed: {error}");
+                eprintln!("op_pi update checker: release check failed: {error}");
             }
         }
     }
@@ -171,13 +171,13 @@ pub async fn approve_update(
     match &result {
         Ok(()) => {
             let message =
-                format!("clawhip updated to v{result_version} successfully. Restart may follow.");
+                format!("op_pi updated to v{result_version} successfully. Restart may follow.");
             let event =
                 IncomingEvent::custom(channel, message).with_format(Some(MessageFormat::Alert));
             let _ = tx.send(event).await;
         }
         Err(error) => {
-            let message = format!("clawhip update to v{result_version} failed: {error}");
+            let message = format!("op_pi update to v{result_version} failed: {error}");
             let event =
                 IncomingEvent::custom(channel, message).with_format(Some(MessageFormat::Alert));
             let _ = tx.send(event).await;

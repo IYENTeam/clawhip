@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::Result;
 
-const PLUGIN_DIR_ENV: &str = "CLAWHIP_PLUGIN_DIR";
+const PLUGIN_DIR_ENV: &str = "OP_PI_PLUGIN_DIR";
 
 #[derive(Debug, Clone, Deserialize)]
 struct PluginManifest {
@@ -93,11 +93,13 @@ fn resolve_plugins_dir() -> Option<PathBuf> {
 fn plugin_dir_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Some(dir) = env::var_os(PLUGIN_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        candidates.push(dir);
+    for variable in [PLUGIN_DIR_ENV] {
+        if let Some(dir) = env::var_os(variable)
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            candidates.push(dir);
+        }
     }
 
     candidates.push(app_plugins_dir());
@@ -121,7 +123,7 @@ fn bundled_plugins_dir() -> PathBuf {
 
 fn app_plugins_dir() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-        .join(".clawhip")
+        .join(".op_pi")
         .join("plugins")
 }
 

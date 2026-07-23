@@ -2,9 +2,12 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 const LAUNCHER_NOISE_PATTERNS: &[&str] = &[
-    "clawhip emit agent.started",
-    "clawhip emit agent.finished",
-    "clawhip emit agent.failed",
+    "op_pi emit agent.started",
+    "op_pi emit agent.finished",
+    "op_pi emit agent.failed",
+    "op_pi emit agent.started",
+    "op_pi emit agent.finished",
+    "op_pi emit agent.failed",
     "function else>",
     "registered_at=",
     "parent_pid=",
@@ -336,8 +339,8 @@ mod tests {
     fn collect_keyword_hits_ignores_wrapper_lifecycle_emit_lines() {
         let hits = collect_keyword_hits(
             "boot",
-            "boot\nfunction else>     clawhip emit agent.failed --agent omx --session omx-pr-1340-review --project oh-my-codex --elapsed \"$elapsed\" --error \"exit $exit_code\" --mention '<@1465264645320474637>' || true\nerror: real failure",
-            &["error".into(), "FAILED".into()],
+            "boot\nfunction else>     op_pi emit agent.failed --agent omx --session omx-pr-1340-review --project oh-my-codex --elapsed \"$elapsed\" --error \"exit $exit_code\" --mention '<@1465264645320474637>' || true\nop_pi emit agent.started --agent legacy\nerror: real failure",
+            &["error".into(), "FAILED".into(), "started".into()],
         );
 
         assert_eq!(
@@ -354,7 +357,7 @@ mod tests {
     fn collect_keyword_hits_ignores_tmux_wrapper_audit_lines() {
         let hits = collect_keyword_hits(
             "boot",
-            "boot\nclawhip tmux cli-new start session=issue-166 channel=ops keywords=error mention=- stale_minutes=30 format=- registered_at=2026-04-07T09:58:00Z parent_pid=4242 parent_name=codex\nerror: real failure",
+            "boot\nop_pi tmux cli-new start session=issue-166 channel=ops keywords=error mention=- stale_minutes=30 format=- registered_at=2026-04-07T09:58:00Z parent_pid=4242 parent_name=codex\nerror: real failure",
             &["error".into()],
         );
 
