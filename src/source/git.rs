@@ -438,18 +438,6 @@ fn should_skip_failed_monitor(state: &mut GitMonitorState, now: Instant) -> bool
     };
     if now < failure.next_retry_at {
         failure.suppressed_polls += 1;
-        if failure.suppressed_polls == 1 || failure.suppressed_polls % 10 == 0 {
-            telemetry::emit(source_record(SourceTelemetryInput {
-                event_name: telemetry::event_name::SOURCE_INVENTORY,
-                reason_code: "source_suppressed",
-                source: "git",
-                path: None,
-                classification: Some(failure.classification.as_str()),
-                message: Some(&failure.message),
-                attempts: Some(failure.attempts),
-                suppressed_polls: Some(failure.suppressed_polls),
-            }));
-        }
         return true;
     }
     false
@@ -496,23 +484,25 @@ fn record_monitor_failure(
         _ => (1, 0),
     };
     let backoff = git_monitor_backoff(attempts, poll_interval);
-    telemetry::emit(source_record(SourceTelemetryInput {
-        event_name: telemetry::event_name::SOURCE_DEGRADED,
-        reason_code: "source_snapshot_failed",
-        source: "git",
-        path: Some(path),
-        classification: Some(classification.as_str()),
-        message: Some(&message),
-        attempts: Some(attempts),
-        suppressed_polls: Some(suppressed_polls),
-    }));
-    eprintln!(
-        "clawhip source git {context} degraded for {path}: class={}, attempts={}, suppressed={}, next_retry_secs={}, error={message}",
-        classification.as_str(),
-        attempts,
-        suppressed_polls,
-        backoff.as_secs()
-    );
+    if attempts == 1 {
+        telemetry::emit(source_record(SourceTelemetryInput {
+            event_name: telemetry::event_name::SOURCE_DEGRADED,
+            reason_code: "source_snapshot_failed",
+            source: "git",
+            path: Some(path),
+            classification: Some(classification.as_str()),
+            message: Some(&message),
+            attempts: Some(attempts),
+            suppressed_polls: Some(suppressed_polls),
+        }));
+        eprintln!(
+            "clawhip source git {context} degraded for {path}: class={}, attempts={}, suppressed={}, next_retry_secs={}, error={message}",
+            classification.as_str(),
+            attempts,
+            suppressed_polls,
+            backoff.as_secs()
+        );
+    }
     state.failure = Some(GitMonitorFailureState {
         classification,
         message,
