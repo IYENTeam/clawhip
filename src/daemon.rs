@@ -189,6 +189,7 @@ pub async fn run(
                 crate::intake::LOGPUSH_MAX_BODY_BYTES,
             )),
         )
+        .route("/google/calendar", post(post_google_calendar))
         .route("/api/update/status", get(update_status))
         .route("/api/update/approve", post(approve_update))
         .route("/api/update/dismiss", post(dismiss_update));
@@ -1185,6 +1186,78 @@ async fn post_cloudflare_logpush(
         Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
+}
+
+async fn post_google_calendar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let Some(expected_token) = state
+        .config
+        .google_calendar
+        .channel_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Google Calendar intake is not configured; set [google_calendar].channel_token",
+        )
+            .into_response();
+    };
+    let provided_token = headers
+        .get("x-goog-channel-token")
+        .and_then(|value| value.to_str().ok());
+    if let Err(error) = crate::intake::verify_secret(provided_token, Some(expected_token)) {
+        return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
+    }
+
+    let channel_id = match google_calendar_header(&headers, "x-goog-channel-id") {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let resource_id = match google_calendar_header(&headers, "x-goog-resource-id") {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let resource_uri = match google_calendar_header(&headers, "x-goog-resource-uri") {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let resource_state = match google_calendar_header(&headers, "x-goog-resource-state") {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let message_number = match google_calendar_header(&headers, "x-goog-message-number") {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+
+    match crate::intake::normalize_google_calendar_notification(
+        channel_id,
+        resource_id,
+        resource_uri,
+        resource_state,
+        message_number,
+        headers
+            .get("x-goog-channel-expiration")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+fn google_calendar_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> std::result::Result<&'a str, String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("missing Google Calendar header `{name}`"))
 }
 
 async fn post_github(
@@ -3189,6 +3262,64 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn google_calendar_unconfigured_returns_503() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+
+        let response = post_google_calendar(State(state), HeaderMap::new()).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn google_calendar_rejects_wrong_token_and_accepts_valid_notification() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+
+        let mut missing_token_headers = google_calendar_headers("unused", "exists");
+        missing_token_headers.remove("x-goog-channel-token");
+        let (state, _rx) = app_state_with_config(config.clone());
+        let response = post_google_calendar(State(state), missing_token_headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut wrong_headers = google_calendar_headers("wrong", "exists");
+        let (state, _rx) = app_state_with_config(config.clone());
+        let response = post_google_calendar(State(state), wrong_headers.clone()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut missing_required_header = google_calendar_headers("calendar-secret", "exists");
+        missing_required_header.remove("x-goog-resource-uri");
+        let (state, _rx) = app_state_with_config(config.clone());
+        let response = post_google_calendar(State(state), missing_required_header).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        wrong_headers.insert("x-goog-channel-token", "calendar-secret".parse().unwrap());
+        let (state, mut rx) = app_state_with_config(config);
+        let response = post_google_calendar(State(state), wrong_headers).await;
+        assert!(response.status().is_success());
+
+        let event = rx.recv().await.expect("event should be enqueued");
+        assert_eq!(event.kind, "google.calendar.changed");
+        assert_eq!(event.payload["channel_id"], "channel-1");
+        assert_eq!(event.payload["message_number"], 42);
+    }
+
+    fn google_calendar_headers(token: &str, resource_state: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-channel-id", "channel-1".parse().unwrap());
+        headers.insert("x-goog-channel-token", token.parse().unwrap());
+        headers.insert("x-goog-resource-id", "resource-1".parse().unwrap());
+        headers.insert(
+            "x-goog-resource-uri",
+            "https://www.googleapis.com/calendar/v3/calendars/team/events"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("x-goog-resource-state", resource_state.parse().unwrap());
+        headers.insert("x-goog-message-number", "42".parse().unwrap());
+        headers
     }
 
     #[tokio::test]

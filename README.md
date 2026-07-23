@@ -170,6 +170,7 @@ an escalation channel, and complete in an audit file.
 | AWS EventBridge | `POST /aws/eventbridge` | GuardDuty, Health, EC2, custom events |
 | Cloudflare Notifications | `POST /cloudflare` | alert policies and health checks |
 | Cloudflare Logpush | `POST /cloudflare/logpush` | firewall and audit batches |
+| Google Calendar | `POST /google/calendar` | watch synchronization and resource changes |
 | Custom systems | CLI and `POST /api/event` | internal operational signals |
 
 ### Delivery interfaces
@@ -228,6 +229,22 @@ format = "alert"
 event = "cloudflare.logpush.audit_logs_v2"
 sink = "localfile"
 local_path = "/var/log/op_pi/cloudflare-audit.jsonl"
+```
+
+### Google Calendar changes to Slack
+
+```toml
+[providers.slack]
+bot_token = "xoxb-your-slack-bot-token"
+
+[google_calendar]
+channel_token = "replace-with-a-random-channel-token"
+
+[[routes]]
+event = "google.calendar.changed"
+sink = "slack"
+channel = "C_CALENDAR_OPERATIONS"
+format = "compact"
 ```
 
 ### Approval requests stay requests
@@ -314,7 +331,22 @@ verification.
 
 </details>
 
+<details>
+<summary><strong>Google Calendar channel authentication</strong></summary>
+
+<br />
+
+- returns `503` until `[google_calendar].channel_token` is configured
+- compares `X-Goog-Channel-Token` in constant time
+- validates all required `X-Goog-*` notification headers
+- emits `google.calendar.sync` or `google.calendar.changed`
+- preserves notification metadata without pretending the body contains event details
+
+</details>
+
 Read the complete [AWS and Cloudflare intake guide](docs/aws-cloudflare-intake.md).
+For Calendar watch setup and event fields, see the
+[Google Calendar intake guide](docs/google-calendar-intake.md).
 
 ## Explain before dispatch
 
@@ -377,7 +409,7 @@ deployments, and telemetry. The versioned telemetry schema is
 
 ```text
 src/source/       event producers and monitors
-src/intake.rs     AWS and Cloudflare intake and authentication
+src/intake.rs     AWS, Cloudflare, and Google Calendar intake authentication
 src/router.rs     route resolution
 src/render/       destination-independent rendering
 src/sink/         Discord, Slack, and local-file delivery
