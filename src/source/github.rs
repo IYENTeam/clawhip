@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -39,7 +40,13 @@ impl Source for GitHubSource {
                 None
             }
         };
-        let mut state = HashMap::new();
+
+        let state_path = self.config.monitors.github_monitor_state_path.clone();
+        let reconciliation_interval = self.config.monitors.reconciliation_interval_polls;
+
+        let mut state = load_state(&state_path).await;
+        let state_was_restored = !state.is_empty() && state_path.is_some();
+        let mut poll_count: u64 = 0;
 
         loop {
             run_github_poll_cycle(
@@ -47,8 +54,25 @@ impl Source for GitHubSource {
                 github_client.as_ref(),
                 &tx,
                 &mut state,
+                state_was_restored,
             )
             .await;
+
+            poll_count += 1;
+
+            if reconciliation_interval > 0
+                && poll_count.is_multiple_of(reconciliation_interval)
+                && let Some(client) = github_client.as_ref()
+                && let Err(error) =
+                    run_reconciliation(self.config.as_ref(), client, &tx, &state).await
+            {
+                eprintln!("clawhip source github reconciliation failed: {error}");
+            }
+
+            if let Err(error) = save_state(&state_path, &state).await {
+                eprintln!("clawhip source github failed to save state: {error}");
+            }
+
             sleep(Duration::from_secs(
                 self.config.monitors.poll_interval_secs.max(1),
             ))
@@ -57,6 +81,52 @@ impl Source for GitHubSource {
     }
 }
 
+/// Persist the GitHub monitor state to a JSON file.
+async fn save_state(
+    path: &Option<PathBuf>,
+    state: &HashMap<String, GitHubRepoState>,
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let json = serde_json::to_string_pretty(state)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, json).await?;
+    Ok(())
+}
+
+/// Load the GitHub monitor state from a JSON file.
+async fn load_state(path: &Option<PathBuf>) -> HashMap<String, GitHubRepoState> {
+    let Some(path) = path else {
+        return HashMap::new();
+    };
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                return HashMap::new();
+            }
+            serde_json::from_str(&content).unwrap_or_else(|error| {
+                eprintln!(
+                    "clawhip source github: failed to parse state file at {}: {error}",
+                    path.display()
+                );
+                HashMap::new()
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(error) => {
+            eprintln!(
+                "clawhip source github: failed to read state file at {}: {error}",
+                path.display()
+            );
+            HashMap::new()
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct GitHubRepoState {
     issues: HashMap<u64, IssueSnapshot>,
     prs: HashMap<u64, PullRequestSnapshot>,
@@ -64,14 +134,14 @@ struct GitHubRepoState {
     ci_baseline_established: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct IssueSnapshot {
     title: String,
     state: String,
     comments: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PullRequestSnapshot {
     title: String,
     status: String,
@@ -80,7 +150,7 @@ struct PullRequestSnapshot {
     head_sha: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct GitHubCISnapshot {
     pr_number: Option<u64>,
     workflow: String,
@@ -119,8 +189,9 @@ async fn run_github_poll_cycle(
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
+    state_was_restored: bool,
 ) {
-    if let Err(error) = poll_github(config, github_client, tx, state).await {
+    if let Err(error) = poll_github(config, github_client, tx, state, state_was_restored).await {
         telemetry::emit(source_record(
             telemetry::event_name::SOURCE_DEGRADED,
             "source_poll_failed",
@@ -166,6 +237,7 @@ async fn poll_github(
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
+    state_was_restored: bool,
 ) -> Result<()> {
     for repo in &config.monitors.git.repos {
         if !repo.emit_issue_opened && !repo.emit_pr_status {
@@ -190,6 +262,8 @@ async fn poll_github(
         };
 
         let previous = state.get(&repo.path);
+        let is_new_repo = state_was_restored && previous.is_none();
+
         let issues = match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
             Ok(issues) => issues,
             Err(error) => {
@@ -202,6 +276,11 @@ async fn poll_github(
                     .unwrap_or_default()
             }
         };
+
+        if is_new_repo {
+            backfill_issues(repo, &snapshot, &issues, tx).await?;
+        }
+
         let prs =
             match poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await {
                 Ok(prs) => prs,
@@ -213,6 +292,10 @@ async fn poll_github(
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
             };
+        if is_new_repo {
+            backfill_prs(repo, &snapshot, &prs, tx).await?;
+        }
+
         let (ci, ci_baseline_established) = match poll_ci_statuses(
             config,
             github_client,
@@ -250,6 +333,63 @@ async fn poll_github(
         );
     }
 
+    Ok(())
+}
+
+async fn backfill_issues(
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    issues: &HashMap<u64, IssueSnapshot>,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<()> {
+    for (number, issue) in issues.iter().filter(|(_, issue)| issue.state == "open") {
+        let mut event = IncomingEvent::github_issue_opened(
+            snapshot.repo_name.clone(),
+            *number,
+            issue.title.clone(),
+            repo.channel.clone(),
+        )
+        .with_mention(repo.mention.clone())
+        .with_format(repo.format.clone());
+        if let Some(payload) = event.payload.as_object_mut() {
+            payload.insert("source".to_string(), json!("backfill"));
+        }
+        send_event(tx, event).await?;
+        eprintln!(
+            "clawhip source github backfill: issued issue #{} for {}",
+            number, snapshot.repo_name
+        );
+    }
+    Ok(())
+}
+
+async fn backfill_prs(
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    prs: &HashMap<u64, PullRequestSnapshot>,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<()> {
+    for (number, pr) in prs.iter().filter(|(_, pr)| pr.status == "open") {
+        let mut event = IncomingEvent::github_pr_status_changed(
+            snapshot.repo_name.clone(),
+            *number,
+            pr.title.clone(),
+            "<backfill>".to_string(),
+            pr.status.clone(),
+            pr.url.clone(),
+            repo.channel.clone(),
+        )
+        .with_mention(repo.mention.clone())
+        .with_format(repo.format.clone());
+        if let Some(payload) = event.payload.as_object_mut() {
+            payload.insert("source".to_string(), json!("backfill"));
+        }
+        send_event(tx, event).await?;
+        eprintln!(
+            "clawhip source github backfill: issued PR #{} for {}",
+            number, snapshot.repo_name
+        );
+    }
     Ok(())
 }
 
@@ -464,6 +604,197 @@ async fn send_event(tx: &mpsc::Sender<IncomingEvent>, event: IncomingEvent) -> R
         .map_err(|error| format!("github source channel closed: {error}").into())
 }
 
+// ── Reconciliation ───────────────────────────────────────────────────────
+
+/// Run reconciliation for all repos: fetch open issues/PRs and compare with
+/// tracked state. Emit events for items present on GitHub but absent from
+/// state, marking the payload with `"source": "reconciliation"`.
+async fn run_reconciliation(
+    config: &AppConfig,
+    client: &reqwest::Client,
+    tx: &mpsc::Sender<IncomingEvent>,
+    state: &HashMap<String, GitHubRepoState>,
+) -> Result<()> {
+    for repo in &config.monitors.git.repos {
+        if !repo.emit_issue_opened && !repo.emit_pr_status {
+            continue;
+        }
+
+        let snapshot = match snapshot_github_repo(repo).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                eprintln!(
+                    "clawhip source github reconciliation: snapshot failed for {}: {error}",
+                    repo.path
+                );
+                continue;
+            }
+        };
+
+        let Some(repo_state) = state.get(&repo.path) else {
+            continue;
+        };
+
+        if repo.emit_issue_opened
+            && let Err(error) =
+                reconcile_issues(config, client, repo, &snapshot, repo_state, tx).await
+        {
+            eprintln!(
+                "clawhip source github reconciliation: issue check failed for {}: {error}",
+                repo.path
+            );
+        }
+
+        if repo.emit_pr_status
+            && let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state, tx).await
+        {
+            eprintln!(
+                "clawhip source github reconciliation: PR check failed for {}: {error}",
+                repo.path
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_issues(
+    config: &AppConfig,
+    client: &reqwest::Client,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    repo_state: &GitHubRepoState,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<()> {
+    let github_repo = snapshot
+        .github_repo
+        .clone()
+        .ok_or_else(|| format!("no GitHub repo for {}", repo.path))?;
+
+    let response = github_get(
+        client,
+        &config.monitors.github_api_base,
+        &format!("repos/{github_repo}/issues"),
+        &[("state", "open"), ("per_page", "100")],
+        &format!("reconciliation issues for {github_repo}"),
+    )
+    .await?;
+
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read reconciliation issues response body for {github_repo}: {e}")
+    })?;
+    let issues: Vec<GitHubIssue> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode reconciliation issues response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
+    let mut emitted = 0u64;
+
+    for issue in issues {
+        if issue.is_pull_request() {
+            continue;
+        }
+        if !repo_state.issues.contains_key(&issue.number) {
+            let event = IncomingEvent::github_issue_opened(
+                snapshot.repo_name.clone(),
+                issue.number,
+                issue.title,
+                repo.channel.clone(),
+            )
+            .with_mention(repo.mention.clone())
+            .with_format(repo.format.clone())
+            .with_source("reconciliation");
+
+            send_event(tx, event).await?;
+            emitted += 1;
+        }
+    }
+
+    if emitted > 0 {
+        eprintln!(
+            "clawhip source github reconciliation: emitted {} issue(s) for {}",
+            emitted, snapshot.repo_name
+        );
+    }
+    Ok(())
+}
+
+async fn reconcile_prs(
+    config: &AppConfig,
+    client: &reqwest::Client,
+    repo: &GitRepoMonitor,
+    snapshot: &GitSnapshot,
+    repo_state: &GitHubRepoState,
+    tx: &mpsc::Sender<IncomingEvent>,
+) -> Result<()> {
+    let github_repo = snapshot
+        .github_repo
+        .clone()
+        .ok_or_else(|| format!("no GitHub repo for {}", repo.path))?;
+
+    let response = github_get(
+        client,
+        &config.monitors.github_api_base,
+        &format!("repos/{github_repo}/pulls"),
+        &[("state", "open"), ("per_page", "100")],
+        &format!("reconciliation PRs for {github_repo}"),
+    )
+    .await?;
+
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read reconciliation PRs response body for {github_repo}: {e}")
+    })?;
+    let pulls: Vec<GitHubPullRequest> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode reconciliation PRs response for {github_repo}: {e}, body: {snippet}"
+        )
+    })?;
+    let mut emitted = 0u64;
+
+    for pull in pulls {
+        if !repo_state.prs.contains_key(&pull.number) {
+            let status = if pull.merged_at.is_some() {
+                "merged"
+            } else {
+                pull.state.as_str()
+            };
+
+            let event = IncomingEvent::github_pr_status_changed(
+                snapshot.repo_name.clone(),
+                pull.number,
+                pull.title,
+                "<unknown>".to_string(),
+                status.to_string(),
+                pull.html_url,
+                repo.channel.clone(),
+            )
+            .with_mention(repo.mention.clone())
+            .with_format(repo.format.clone())
+            .with_source("reconciliation");
+
+            send_event(tx, event).await?;
+            emitted += 1;
+        }
+    }
+
+    if emitted > 0 {
+        eprintln!(
+            "clawhip source github reconciliation: emitted {} PR(s) for {}",
+            emitted, snapshot.repo_name
+        );
+    }
+    Ok(())
+}
+
 async fn github_get(
     client: &reqwest::Client,
     api_base: &str,
@@ -614,7 +945,18 @@ async fn fetch_issues(
         &format!("issues for {github_repo}"),
     )
     .await?;
-    let issues: Vec<GitHubIssue> = response.json().await?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read issues response body for {github_repo}: {e}"))?;
+    let issues: Vec<GitHubIssue> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!("failed to decode issues response for {github_repo}: {e}, body: {snippet}")
+    })?;
     Ok(issues
         .into_iter()
         .filter(|issue| !issue.is_pull_request())
@@ -649,7 +991,18 @@ async fn fetch_pull_requests(
         &format!("pull requests for {github_repo}"),
     )
     .await?;
-    let pulls: Vec<GitHubPullRequest> = response.json().await?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read PRs response body for {github_repo}: {e}"))?;
+    let pulls: Vec<GitHubPullRequest> = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!("failed to decode PRs response for {github_repo}: {e}, body: {snippet}")
+    })?;
     Ok(pulls
         .into_iter()
         .map(|pull| {
@@ -726,7 +1079,19 @@ async fn fetch_check_runs(
     )
     .await?;
 
-    let runs: GitHubCheckRunsResponse = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read check-runs response body for {github_repo} PR #{pr_number}: {e}")
+    })?;
+    let runs: GitHubCheckRunsResponse = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!(
+            "failed to decode check-runs response for {github_repo} PR #{pr_number}: {e}, body: {snippet}"
+        )
+    })?;
     let run_summaries = summarize_workflow_runs(&runs.check_runs);
     Ok(runs
         .check_runs
@@ -773,7 +1138,23 @@ async fn fetch_direct_workflow_runs(
     github_repo: &str,
     snapshot: &GitSnapshot,
 ) -> Result<Vec<GitHubCISnapshot>> {
-    let mut query = vec![("per_page", "100"), ("event", "push")];
+    // Limit to runs created in the last 7 days to avoid flooding events for
+    // old runs on cold start or after state loss.
+    let seven_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(7 * 24 * 3600);
+    let secs = seven_days_ago;
+    let days = secs / 86400;
+    // Convert epoch days to YYYY-MM-DD (civil calendar)
+    let (y, m, d) = epoch_days_to_ymd(days as i64);
+    let created_filter = format!(">={y:04}-{m:02}-{d:02}");
+    let mut query = vec![
+        ("per_page", "100"),
+        ("event", "push"),
+        ("created", &created_filter),
+    ];
     if !snapshot.branch.is_empty() {
         query.push(("branch", snapshot.branch.as_str()));
     }
@@ -787,7 +1168,17 @@ async fn fetch_direct_workflow_runs(
     )
     .await?;
 
-    let runs: GitHubWorkflowRunsResponse = response.json().await?;
+    let body = response.text().await.map_err(|e| {
+        format!("failed to read workflow-runs response body for {github_repo}: {e}")
+    })?;
+    let runs: GitHubWorkflowRunsResponse = serde_json::from_str(&body).map_err(|e| {
+        let snippet = if body.len() > 300 {
+            format!("{}... ({} total bytes)", &body[..300], body.len())
+        } else {
+            body.clone()
+        };
+        format!("failed to decode workflow-runs response for {github_repo}: {e}, body: {snippet}")
+    })?;
     Ok(runs
         .workflow_runs
         .into_iter()
@@ -818,6 +1209,22 @@ fn workflow_run_id(url: &str) -> Option<String> {
         .and_then(|tail| tail.split('/').next())
         .filter(|part| !part.is_empty())
         .map(ToString::to_string)
+}
+
+/// Convert days since Unix epoch to (year, month, day) using the civil calendar.
+/// Algorithm from Howard Hinnant's `civil_from_days`.
+fn epoch_days_to_ymd(epoch_days: i64) -> (i64, u32, u32) {
+    let z = epoch_days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn build_github_client(token: Option<String>) -> Result<reqwest::Client> {
@@ -1513,5 +1920,460 @@ mod tests {
 
         source_task.abort();
         let _ = source_task.await;
+    }
+
+    // ── State persistence tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn state_persistence_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("github-state.json");
+
+        let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
+        let mut issues = HashMap::new();
+        issues.insert(
+            42_u64,
+            IssueSnapshot {
+                title: "critical bug".into(),
+                state: "open".into(),
+                comments: 3,
+            },
+        );
+        let mut prs = HashMap::new();
+        prs.insert(
+            7_u64,
+            PullRequestSnapshot {
+                title: "fix it".into(),
+                status: "open".into(),
+                url: "https://github.com/owner/repo/pull/7".into(),
+                head_branch: "fix".into(),
+                head_sha: "abc123".into(),
+            },
+        );
+        state.insert(
+            "/tmp/repo".to_string(),
+            GitHubRepoState {
+                issues,
+                prs,
+                ci: HashMap::new(),
+                ci_baseline_established: false,
+            },
+        );
+
+        save_state(&Some(path.clone()), &state).await.unwrap();
+
+        assert!(path.exists(), "state file should exist after save");
+
+        let loaded = load_state(&Some(path.clone())).await;
+        assert_eq!(loaded.len(), 1);
+
+        let repo_state = loaded.get("/tmp/repo").unwrap();
+        assert_eq!(repo_state.issues.len(), 1);
+        assert_eq!(repo_state.issues.get(&42).unwrap().title, "critical bug");
+        assert_eq!(repo_state.issues.get(&42).unwrap().state, "open");
+        assert_eq!(repo_state.issues.get(&42).unwrap().comments, 3);
+        assert_eq!(repo_state.prs.len(), 1);
+        assert_eq!(repo_state.prs.get(&7).unwrap().title, "fix it");
+        assert_eq!(repo_state.prs.get(&7).unwrap().status, "open");
+        assert!(repo_state.ci.is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_persistence_none_path_returns_empty() {
+        let state = load_state(&None).await;
+        assert!(state.is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_persistence_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        let state = load_state(&Some(path)).await;
+        assert!(state.is_empty());
+    }
+
+    // ── Reconciliation tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reconciliation_emits_events_for_untracked_open_issues() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {
+                    "number": 100,
+                    "title": "untracked issue",
+                    "state": "open",
+                    "comments": 0
+                },
+                {
+                    "number": 200,
+                    "title": "another untracked",
+                    "state": "open",
+                    "comments": 1,
+                    "pull_request": {}
+                }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            req
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        config.monitors.git.repos = vec![GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            github_repo: Some("owner/clawhip".into()),
+            emit_issue_opened: true,
+            emit_pr_status: false,
+            ..GitRepoMonitor::default()
+        }];
+
+        let client = build_github_client(None).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
+        state.insert(
+            "/tmp/clawhip".to_string(),
+            GitHubRepoState {
+                issues: HashMap::new(),
+                prs: HashMap::new(),
+                ci: HashMap::new(),
+                ci_baseline_established: false,
+            },
+        );
+
+        run_reconciliation(&config, &client, &tx, &state)
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.canonical_kind(), "github.issue-opened");
+        assert_eq!(event.payload["number"], json!(100));
+        assert_eq!(event.payload["title"], json!("untracked issue"));
+        assert_eq!(event.payload["source"], json!("reconciliation"));
+
+        // PR #200 should be filtered out (is_pull_request)
+        assert!(rx.try_recv().is_err(), "PR should be filtered out");
+
+        let _req = server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_skips_already_tracked_issues() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {
+                    "number": 100,
+                    "title": "tracked issue",
+                    "state": "open",
+                    "comments": 2
+                }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            req
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        config.monitors.git.repos = vec![GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            github_repo: Some("owner/clawhip".into()),
+            emit_issue_opened: true,
+            emit_pr_status: false,
+            ..GitRepoMonitor::default()
+        }];
+
+        let client = build_github_client(None).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let mut issues = HashMap::new();
+        issues.insert(
+            100_u64,
+            IssueSnapshot {
+                title: "tracked issue".into(),
+                state: "open".into(),
+                comments: 2,
+            },
+        );
+        let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
+        state.insert(
+            "/tmp/clawhip".to_string(),
+            GitHubRepoState {
+                issues,
+                prs: HashMap::new(),
+                ci: HashMap::new(),
+                ci_baseline_established: false,
+            },
+        );
+
+        run_reconciliation(&config, &client, &tx, &state)
+            .await
+            .unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "tracked issue should not emit reconciliation event"
+        );
+
+        let _req = server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_emits_events_for_untracked_open_prs() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = json!([
+                {
+                    "number": 42,
+                    "title": "untracked PR",
+                    "state": "open",
+                    "html_url": "https://github.com/owner/repo/pull/42",
+                    "merged_at": null,
+                    "head": {
+                        "ref": "feat",
+                        "sha": "abc123"
+                    }
+                }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            req
+        });
+
+        let mut config = AppConfig::default();
+        config.monitors.github_api_base = format!("http://{addr}");
+        config.monitors.git.repos = vec![GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            github_repo: Some("owner/clawhip".into()),
+            emit_issue_opened: false,
+            emit_pr_status: true,
+            ..GitRepoMonitor::default()
+        }];
+
+        let client = build_github_client(None).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
+        state.insert(
+            "/tmp/clawhip".to_string(),
+            GitHubRepoState {
+                issues: HashMap::new(),
+                prs: HashMap::new(),
+                ci: HashMap::new(),
+                ci_baseline_established: false,
+            },
+        );
+
+        run_reconciliation(&config, &client, &tx, &state)
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.canonical_kind(), "github.pr-status-changed");
+        assert_eq!(event.payload["number"], json!(42));
+        assert_eq!(event.payload["title"], json!("untracked PR"));
+        assert_eq!(event.payload["source"], json!("reconciliation"));
+
+        let _req = server.await.unwrap();
+    }
+
+    // ── Sink routing test ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn github_events_route_through_discord_sink_correctly() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            channel: Some("dev-channel".into()),
+            format: Some(MessageFormat::Alert),
+            ..GitRepoMonitor::default()
+        };
+        let previous = HashMap::new();
+        let current = [(
+            2_u64,
+            IssueSnapshot {
+                title: "test issue".into(),
+                state: "open".into(),
+                comments: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let events = collect_issue_events(&repo, "clawhip", &previous, &current);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].canonical_kind(), "github.issue-opened");
+
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("fallback".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                sink: "discord".into(),
+                filter: [("repo".to_string(), "clawhip".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("route-channel".into()),
+                channel_name: None,
+                webhook: None,
+                slack_webhook: None,
+                mention: Some("<@test>".into()),
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Alert),
+                template: None,
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let (channel, _, content) = router.preview(&events[0]).await.unwrap();
+        assert_eq!(channel, "route-channel");
+        assert!(content.starts_with("<@test> "));
+        assert!(content.contains("test issue"));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_marked_events_route_through_discord_sink() {
+        let event = IncomingEvent::github_issue_opened(
+            "clawhip".into(),
+            99,
+            "reconciled issue".into(),
+            None,
+        )
+        .with_mention(Some("<@bot>".into()))
+        .with_format(Some(MessageFormat::Alert))
+        .with_source("reconciliation");
+
+        assert_eq!(event.payload["source"], json!("reconciliation"));
+
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "github.*".into(),
+                sink: "discord".into(),
+                filter: [("repo".to_string(), "clawhip".to_string())]
+                    .into_iter()
+                    .collect(),
+                channel: Some("recon-route".into()),
+                channel_name: None,
+                webhook: None,
+                slack_webhook: None,
+                mention: Some("<@bot>".into()),
+                allow_dynamic_tokens: false,
+                format: Some(MessageFormat::Alert),
+                template: None,
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let (channel, format, content) = router.preview(&event).await.unwrap();
+        assert_eq!(channel, "recon-route");
+        assert_eq!(format, MessageFormat::Alert);
+        assert!(content.starts_with("<@bot> "));
+        assert!(content.contains("reconciled issue"));
+    }
+
+    // ── Backfill tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn backfill_emits_only_open_issues_with_source_marker() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            channel: Some("dev-channel".into()),
+            ..GitRepoMonitor::default()
+        };
+        let snapshot = GitSnapshot {
+            repo_name: "clawhip".into(),
+            repo_path: "/tmp/clawhip".into(),
+            worktree_path: "/tmp/clawhip".into(),
+            branch: "main".into(),
+            head: "abc".into(),
+            commits: Vec::new(),
+            github_repo: Some("owner/clawhip".into()),
+        };
+        let mut issues = HashMap::new();
+        // Open issue — should emit
+        issues.insert(
+            1_u64,
+            IssueSnapshot {
+                title: "open issue".into(),
+                state: "open".into(),
+                comments: 0,
+            },
+        );
+        // Closed issue — should NOT emit
+        issues.insert(
+            2_u64,
+            IssueSnapshot {
+                title: "closed issue".into(),
+                state: "closed".into(),
+                comments: 5,
+            },
+        );
+
+        let (tx, mut rx) = mpsc::channel(4);
+        backfill_issues(&repo, &snapshot, &issues, &tx)
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.canonical_kind(), "github.issue-opened");
+        assert_eq!(event.payload["number"], json!(1));
+        assert_eq!(event.payload["title"], json!("open issue"));
+        assert_eq!(event.payload["source"], json!("backfill"));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "closed issue should not be backfilled"
+        );
     }
 }

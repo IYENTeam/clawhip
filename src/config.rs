@@ -87,6 +87,8 @@ pub struct ProvidersConfig {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub slack: SlackConfig,
+    #[serde(default)]
+    pub openclaw: Option<OpenClawConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -128,6 +130,12 @@ impl CloudflareConfig {
     fn is_empty(&self) -> bool {
         self.webhook_secret.is_none() && self.logpush_secret.is_none()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenClawConfig {
+    pub gateway_url: String,
+    pub gateway_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +340,10 @@ pub struct MonitorConfig {
     #[serde(default = "default_github_api_base")]
     pub github_api_base: String,
     #[serde(default)]
+    pub github_monitor_state_path: Option<PathBuf>,
+    #[serde(default = "default_reconciliation_interval_polls")]
+    pub reconciliation_interval_polls: u64,
+    #[serde(default)]
     pub git: GitMonitorConfig,
     #[serde(default)]
     pub tmux: TmuxMonitorConfig,
@@ -345,6 +357,8 @@ impl Default for MonitorConfig {
             poll_interval_secs: default_poll_interval(),
             github_token: None,
             github_api_base: default_github_api_base(),
+            github_monitor_state_path: None,
+            reconciliation_interval_polls: default_reconciliation_interval_polls(),
             git: GitMonitorConfig::default(),
             tmux: TmuxMonitorConfig::default(),
             workspace: Vec::new(),
@@ -700,6 +714,10 @@ fn default_discord_watch_channel_cooldown_ms() -> i64 {
 fn default_discord_watch_doctrine_template() -> String {
     "UltraWorkers: <#{channel_id}> / {channel_name} 스윕하라. 기존 크론 독트린 기준으로 최근 메시지를 읽고 필요한 답변/액션만 수행하라.".into()
 }
+fn default_reconciliation_interval_polls() -> u64 {
+    10
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1925,6 +1943,7 @@ thread = "123456789012345678"
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
             },
             routes: vec![RouteRule {
                 event: "tmux.keyword".into(),
@@ -2000,6 +2019,7 @@ thread = "123456789012345678"
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
             },
             daemon: DaemonConfig {
                 base_url: "http://127.0.0.1:25294".into(),
@@ -2358,6 +2378,7 @@ message = " ping "
                     legacy_default_channel: None,
                 },
                 slack: SlackConfig::default(),
+                openclaw: None,
             },
             cron: CronConfig {
                 poll_interval_secs: 30,

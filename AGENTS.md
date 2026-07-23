@@ -9,6 +9,32 @@ Daemon-first event gateway for Discord. Routes GitHub, tmux, and custom events t
 - New routes/filters: add integration tests.
 - CLI subcommands: include `--help` descriptions for all flags.
 - Keep the daemon lightweight — no unnecessary allocations in the hot path.
+- All CI checks must pass locally before push: `cargo fmt --check && cargo clippy && cargo test`
+- Never push fmt-only fixes — always run clippy too (2026-05-18 incident).
+
+## Build & Test
+
+```bash
+cargo build --release   # build
+cargo test              # 453+ tests
+cargo fmt --check       # format
+cargo clippy            # lint — ALL warnings must be fixed
+```
+
+## Key Paths
+
+- `src/main.rs` — entry point
+- `src/github_monitor.rs` — GitHub polling + event generation
+- `src/discord.rs` — Discord message sending
+- `~/.clawhip/config.toml` — runtime config
+- `~/.clawhip/github/` — CI watchdog metadata ONLY (no source code)
+
+## Forbidden
+
+- Never clone source code under `~/.clawhip/github/` (metadata only)
+- Never push without all 3 checks passing (fmt + clippy + test)
+- Never hardcode tokens or secrets
+- Never send to Discord channels not in config
 
 ## Review guidelines
 
