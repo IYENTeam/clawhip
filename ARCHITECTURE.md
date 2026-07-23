@@ -1,6 +1,6 @@
-# clawhip Architecture — v0.4.0
+# op-pi Architecture — v0.4.0
 
-clawhip v0.4.0 ships a daemon-first event pipeline for Discord delivery, plus the clone-local install/memory surfaces that wrap it. This document describes the architecture that is present on the `release/0.4.0` branch.
+op-pi v0.4.0 ships a daemon-first event pipeline for Discord delivery, plus the clone-local install/memory surfaces that wrap it. This document describes the architecture that is present on the `release/0.4.0` branch.
 
 ## Release themes
 
@@ -97,7 +97,7 @@ Routes continue to use the familiar event/filter model, with a `sink` field that
 ```toml
 [[routes]]
 event = "github.*"
-filter = { repo = "clawhip" }
+filter = { repo = "op-pi" }
 sink = "discord"
 channel = "1480171113253175356"
 mention = "<@1465264645320474637>"

@@ -1,9 +1,9 @@
 ---
-name: clawhip
-description: Attach/install/use clawhip as a daemon-first notification gateway runtime for OpenClaw / Clawdbot
+name: op-pi
+description: Attach/install/use op-pi as a daemon-first notification gateway runtime for OpenClaw / Clawdbot
 ---
 
-# clawhip skill attachment surface
+# op-pi skill attachment surface
 
 ## Intent
 
@@ -14,10 +14,10 @@ Use this repo as:
 
 ## Prerequisites
 
-⭐ If you want to support clawhip, star this repository. The interactive repo-local installer and `clawhip install` can offer an optional post-install GitHub star prompt via authenticated `gh api` access when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `CLAWHIP_SKIP_STAR_PROMPT=1`.
+⭐ If you want to support op-pi, star this repository. The interactive repo-local installer and `op-pi install` can offer an optional post-install GitHub star prompt via authenticated `gh api` access when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `OP_PI_SKIP_STAR_PROMPT=1`.
 
 ```bash
-gh api --method PUT /user/starred/Yeachan-Heo/clawhip --silent
+gh api --method PUT /user/starred/IYENTeam/op-pi --silent
 ```
 
 ## Primary install flow
@@ -25,7 +25,7 @@ gh api --method PUT /user/starred/Yeachan-Heo/clawhip --silent
 Preferred operator instruction:
 
 ```text
-@openclaw install https://github.com/Yeachan-Heo/clawhip
+@openclaw install https://github.com/IYENTeam/op-pi
 ```
 
 Expected automation flow:
@@ -34,7 +34,7 @@ Expected automation flow:
 2. run `./install.sh`
 3. read this `SKILL.md`
 4. attach skill
-5. scaffold `~/.clawhip/config.toml`
+5. scaffold `~/.op-pi/config.toml`
 6. start daemon
 7. run live verification presets
 
@@ -49,28 +49,28 @@ http://127.0.0.1:25294
 Core commands:
 
 ```bash
-clawhip
-clawhip start
-clawhip status
-clawhip config
-clawhip send --channel <id> --message "..."
-clawhip github issue-opened ...
-clawhip github pr-status-changed ...
-clawhip git commit ...
-clawhip tmux keyword ...
-clawhip tmux stale ...
-clawhip tmux new -s <session> --channel <id> --keywords error,complete --shell /bin/zsh -- command
-clawhip tmux watch -s <existing-session> --channel <id> --mention '<@id>' --keywords error,complete
+op-pi
+op-pi start
+op-pi status
+op-pi config
+op-pi send --channel <id> --message "..."
+op-pi github issue-opened ...
+op-pi github pr-status-changed ...
+op-pi git commit ...
+op-pi tmux keyword ...
+op-pi tmux stale ...
+op-pi tmux new -s <session> --channel <id> --keywords error,complete --shell /bin/zsh -- command
+op-pi tmux watch -s <existing-session> --channel <id> --mention '<@id>' --keywords error,complete
 ```
 
 ## Lifecycle surface
 
 ```bash
-clawhip install
-clawhip install --systemd
-clawhip install --skip-star-prompt
-clawhip update --restart
-clawhip uninstall --remove-systemd --remove-config
+op-pi install
+op-pi install --systemd
+op-pi install --skip-star-prompt
+op-pi update --restart
+op-pi uninstall --remove-systemd --remove-config
 ./install.sh
 ./install.sh --systemd
 ./install.sh --skip-star-prompt
@@ -78,24 +78,24 @@ clawhip uninstall --remove-systemd --remove-config
 
 ## Discord bot token (recommended setup)
 
-⚠️ **Create a dedicated Discord bot for clawhip notifications.** Do not reuse your Clawdbot / OpenClaw bot token.
+⚠️ **Create a dedicated Discord bot for op-pi notifications.** Do not reuse your Clawdbot / OpenClaw bot token.
 
 Why:
-- clawhip sends high-volume notifications (commits, PRs, tmux events)
+- op-pi sends high-volume notifications (commits, PRs, tmux events)
 - Using the same bot token as your gateway pollutes the bot's identity
 - A separate bot (e.g. "CCNotifier") keeps notifications cleanly separated from AI chat
-- If clawhip restarts or crashes, it won't affect your main bot
+- If op-pi restarts or crashes, it won't affect your main bot
 
 Setup:
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application (e.g. "clawhip-notifier" or "CCNotifier")
+2. Create a new application (e.g. "op-pi-notifier" or "CCNotifier")
 3. Create a bot, copy the token
 4. Invite the bot to your server with Send Messages permission
-5. Use this token in `~/.clawhip/config.toml`:
+5. Use this token in `~/.op-pi/config.toml`:
 
 ```toml
 [discord]
-token = "your-dedicated-clawhip-bot-token"
+token = "your-dedicated-op-pi-bot-token"
 ```
 
 ## Config scaffold expectations
@@ -114,7 +114,7 @@ Typical preset route:
 ```toml
 [[routes]]
 event = "github.*"
-filter = { repo = "clawhip" }
+filter = { repo = "op-pi" }
 channel = "1480171113253175356"
 mention = "<@1465264645320474637>"
 format = "compact"
@@ -139,7 +139,7 @@ Allowed dynamic tokens:
 
 ## Filesystem-offloaded memory pattern
 
-When using clawhip as part of a broader Claw OS workflow, treat memory as an offloaded filesystem tree:
+When using op-pi as part of a broader Claw OS workflow, treat memory as an offloaded filesystem tree:
 
 - `MEMORY.md` = small pointer/index/current-beliefs layer
 - `memory/` = detailed project/channel/daily/handoff memory

@@ -15,22 +15,22 @@ A good default policy is:
 - write detail into leaf files
 - update root pointers only when the map or current beliefs change
 
-## Bootstrap with clawhip
+## Bootstrap with op-pi
 
-clawhip now ships a first runtime vertical slice for this pattern:
+op-pi now ships a first runtime vertical slice for this pattern:
 
 ```bash
 # initialize a scaffold in the current repo
-clawhip memory init --project clawhip --channel discord-alerts --agent codex
+op-pi memory init --project op-pi --channel discord-alerts --agent codex
 
 # pin a specific daily shard name when backfilling or scripting
-clawhip memory init --project clawhip --date 2026-03-10
+op-pi memory init --project op-pi --date 2026-03-10
 
 # inspect the scaffold and list missing recommended paths
-clawhip memory status --project clawhip --channel discord-alerts --agent codex
+op-pi memory status --project op-pi --channel discord-alerts --agent codex
 ```
 
-What `clawhip memory init` bootstraps:
+What `op-pi memory init` bootstraps:
 
 - `MEMORY.md`
 - `memory/README.md`
@@ -187,7 +187,7 @@ Concrete example files in this repo:
 - [docs/examples/memory/channels/example-channel.md](examples/memory/channels/example-channel.md)
 - [docs/examples/memory/daily/2026-03-10.md](examples/memory/daily/2026-03-10.md)
 - [skills/memory-offload/SKILL.md](../skills/memory-offload/SKILL.md)
-- [docs/examples/memory/projects/clawhip.md](examples/memory/projects/clawhip.md)
+- [docs/examples/memory/projects/op-pi.md](examples/memory/projects/op-pi.md)
 - [docs/examples/memory/topics/rules.md](examples/memory/topics/rules.md)
 - [docs/examples/memory/topics/lessons.md](examples/memory/topics/lessons.md)
 

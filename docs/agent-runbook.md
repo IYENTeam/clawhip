@@ -1,4 +1,4 @@
-# clawhip Agent Runbook
+# op-pi Agent Runbook
 
 ## Build
 
@@ -6,7 +6,7 @@
 cargo build --release
 ```
 
-Binary: `target/release/clawhip`
+Binary: `target/release/op-pi`
 
 ## Test
 
@@ -25,7 +25,7 @@ cargo clippy        # lint check — fix ALL warnings before push
 cargo build --release
 
 # Copy to wherever needed
-cp target/release/clawhip /usr/local/bin/clawhip
+cp target/release/op-pi /usr/local/bin/op-pi
 
 # Restart
 # (systemd on VMs, or direct process on Mac mini)
@@ -33,32 +33,32 @@ cp target/release/clawhip /usr/local/bin/clawhip
 
 ## Config
 
-- Config file: `~/.clawhip/config.toml`
+- Config file: `~/.op-pi/config.toml`
 - State file: configured via `github_monitor_state_path` (MUST be set, otherwise CI flood on restart)
-- Repo metadata: `~/.clawhip/github/` (CI watchdog metadata ONLY, no source code)
-- Source code: `~/projects/` (never under .clawhip)
+- Repo metadata: `~/.op-pi/github/` (CI watchdog metadata ONLY, no source code)
+- Source code: `~/projects/` (never under .op-pi)
 
 ## Common Operations
 
 ### Add repo monitoring
 ```bash
-clawhip repo add <owner/repo>
+op-pi repo add <owner/repo>
 ```
 
 ### Check monitoring status
 ```bash
-clawhip watch status
+op-pi watch status
 ```
 
 ### Manual event send
 ```bash
-clawhip send --channel <ID> --message "text"
+op-pi send --channel <ID> --message "text"
 ```
 
 ## Incident Patterns
 
 ### CI event flood on restart (2026-05-19)
-- Symptom: dozens of stale CI events sent on clawhip restart
+- Symptom: dozens of stale CI events sent on op-pi restart
 - Cause: no persistent state + no date filter + cold start treated all runs as new
 - Fix: state persistence + 7-day filter + cold start skip
 - Prevention: always set `github_monitor_state_path` in config
@@ -66,5 +66,5 @@ clawhip send --channel <ID> --message "text"
 ## Forbidden Actions
 
 - `git push --force` on main
-- Cloning source code under `~/.clawhip/github/` (metadata only)
+- Cloning source code under `~/.op-pi/github/` (metadata only)
 - Pushing without `cargo fmt + clippy + test` all passing

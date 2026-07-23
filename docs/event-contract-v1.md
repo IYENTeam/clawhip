@@ -1,6 +1,6 @@
 # Event Contract v1
 
-This document freezes clawhip's v1 shared provider-native hook contract for Codex and Claude.
+This document freezes op-pi's v1 shared provider-native hook contract for Codex and Claude.
 
 ## Status
 
@@ -11,7 +11,7 @@ This document freezes clawhip's v1 shared provider-native hook contract for Code
 
 ## Shared event family
 
-clawhip v1 supports exactly these five provider-native events:
+op-pi v1 supports exactly these five provider-native events:
 
 - `SessionStart`
 - `PreToolUse`
@@ -23,7 +23,7 @@ Provider-specific extras are out of scope for v1.
 
 ## Additive question-request bridge
 
-Within the frozen shared event family, clawhip treats `PreToolUse`/`PostToolUse` calls to
+Within the frozen shared event family, op-pi treats `PreToolUse`/`PostToolUse` calls to
 explicit ask-user tools as operator question requests. The bridge maps ask-tool identifiers
 (`ask`, `ask_user`, `ask_user_question`, `AskUserQuestion`, `askuserquestion`) to the
 `question.requested` route key, which canonicalizes to `session.blocked` for existing routes.
@@ -38,13 +38,13 @@ normalized `payload`/`event_payload` copies.
 The public local ingress for shared provider-native payloads is:
 
 ```bash
-clawhip native hook --provider codex --file payload.json
-clawhip native hook --provider claude --file payload.json
+op-pi native hook --provider codex --file payload.json
+op-pi native hook --provider claude --file payload.json
 ```
 
 ## Frozen base fields
 
-After clawhip normalizes a provider payload, these base routing fields are the v1 contract:
+After op-pi normalizes a provider payload, these base routing fields are the v1 contract:
 
 | Field | Required | Notes |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ After clawhip normalizes a provider payload, these base routing fields are the v
 
 ## Augmentation rules
 
-`.clawhip/hooks/` may only add data to the normalized base contract.
+`.op-pi/hooks/` may only add data to the normalized base contract.
 
 Allowed:
 

@@ -1,6 +1,7 @@
-# clawhip — AGENTS.md
+# op-pi — AGENTS.md
 
-Daemon-first event gateway for Discord. Routes GitHub, tmux, and custom events to channels.
+Local-first operation pipeline for typed events. Routes development, agent, and
+cloud signals to Discord, Slack, and local interfaces.
 
 ## Working agreements
 
@@ -24,14 +25,14 @@ cargo clippy            # lint — ALL warnings must be fixed
 ## Key Paths
 
 - `src/main.rs` — entry point
-- `src/github_monitor.rs` — GitHub polling + event generation
+- `src/source/github.rs` — GitHub polling + event generation
 - `src/discord.rs` — Discord message sending
-- `~/.clawhip/config.toml` — runtime config
-- `~/.clawhip/github/` — CI watchdog metadata ONLY (no source code)
+- `~/.op-pi/config.toml` — runtime config
+- `~/.op-pi/github/` — CI watchdog metadata ONLY (no source code)
 
 ## Forbidden
 
-- Never clone source code under `~/.clawhip/github/` (metadata only)
+- Never clone source code under `~/.op-pi/github/` (metadata only)
 - Never push without all 3 checks passing (fmt + clippy + test)
 - Never hardcode tokens or secrets
 - Never send to Discord channels not in config

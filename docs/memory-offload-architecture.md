@@ -1,6 +1,6 @@
 # Filesystem-Offloaded Memory Architecture
 
-This document defines the Claw OS-style memory pattern that clawhip recommends for filesystem-backed project memory: keep `MEMORY.md` small and high-signal, and offload detailed memory into structured filesystem documents.
+This document defines the Claw OS-style memory pattern that op-pi recommends for filesystem-backed project memory: keep `MEMORY.md` small and high-signal, and offload detailed memory into structured filesystem documents.
 
 ## Goal
 
@@ -14,7 +14,7 @@ In this pattern:
 - agents write detailed updates to leaf files, not back into a monolith
 - memory refactoring/offloading is ongoing maintenance, not a one-time cleanup
 
-This is the memory model that fits clawhip's broader direction as an OS-like runtime: small control surfaces, explicit routing, and durable state outside the hot path.
+This is the memory model that fits op-pi's broader direction as an OS-like runtime: small control surfaces, explicit routing, and durable state outside the hot path.
 
 ## Design principles
 
@@ -134,7 +134,7 @@ Example:
 ```text
 Need current repo status?
 -> MEMORY.md
--> memory/projects/clawhip.md
+-> memory/projects/op-pi.md
 -> latest daily file if recent execution context matters
 ```
 
@@ -172,9 +172,9 @@ When offloading:
 3. replace the old root section with a one-line pointer and current takeaway
 4. add or update a subtree index if the new area will grow
 
-## Clawhip-as-OS fit
+## op-pi-as-OS fit
 
-clawhip already models the world as routed events, normalized contracts, and explicit sinks. The offloaded memory pattern applies the same operating idea to project state:
+op-pi already models the world as routed events, normalized contracts, and explicit sinks. The offloaded memory pattern applies the same operating idea to project state:
 
 - `MEMORY.md` behaves like a control-plane index
 - filesystem shards behave like durable state partitions
@@ -185,9 +185,9 @@ That makes memory a first-class operating pattern instead of an accidental giant
 
 ## Non-goals
 
-This pattern does **not** require clawhip to become a database, vector store, or embedded note service.
+This pattern does **not** require op-pi to become a database, vector store, or embedded note service.
 
-It is a documentation and workflow architecture for filesystem-backed memory that agents and operators can adopt around clawhip.
+It is a documentation and workflow architecture for filesystem-backed memory that agents and operators can adopt around op-pi.
 
 ## Related docs
 

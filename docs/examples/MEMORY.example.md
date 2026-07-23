@@ -8,7 +8,7 @@
 
 ## Quick file map
 
-- Project status: `memory/projects/clawhip.md`
+- Project status: `memory/projects/op-pi.md`
 - Today's execution log: `memory/daily/2026-03-10.md`
 - Channel-specific state: `memory/channels/example-channel.md`
 - Durable rules and lessons: `memory/topics/rules.md`, `memory/topics/lessons.md`
@@ -16,7 +16,7 @@
 
 ## Read this when...
 
-- You need current repo status -> read `memory/projects/clawhip.md`
+- You need current repo status -> read `memory/projects/op-pi.md`
 - You need latest execution context -> read today's file in `memory/daily/`
 - You are acting in one channel/lane -> read that file in `memory/channels/`
 - You are changing workflow policy -> read `memory/topics/rules.md`
