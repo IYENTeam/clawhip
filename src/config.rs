@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub aws: AwsConfig,
     #[serde(default, skip_serializing_if = "CloudflareConfig::is_empty")]
     pub cloudflare: CloudflareConfig,
+    #[serde(default, skip_serializing_if = "GoogleCalendarConfig::is_empty")]
+    pub google_calendar: GoogleCalendarConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,18 @@ impl CloudflareConfig {
 pub struct OpenClawConfig {
     pub gateway_url: String,
     pub gateway_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoogleCalendarConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_token: Option<String>,
+}
+
+impl GoogleCalendarConfig {
+    fn is_empty(&self) -> bool {
+        self.channel_token.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1479,6 +1493,8 @@ impl AppConfig {
     }
 
     fn normalize(&mut self) {
+        self.google_calendar.channel_token =
+            normalize_secret(self.google_calendar.channel_token.take());
         self.providers.discord.bot_token =
             normalize_secret(self.providers.discord.bot_token.clone());
         self.defaults.channel = normalize_text(self.defaults.channel.clone());
@@ -2579,6 +2595,21 @@ name = "general"
         assert!(toml.contains("[discord_watch]"));
         assert!(toml.contains("pending_mentions_threshold = 7"));
         assert!(toml.contains("doctrine_template = \"Sweep <#{channel_id}>\""));
+    }
+
+    #[test]
+    fn google_calendar_channel_token_is_trimmed_and_empty_values_are_removed() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("  calendar-secret  ".into());
+        config.normalize();
+        assert_eq!(
+            config.google_calendar.channel_token.as_deref(),
+            Some("calendar-secret")
+        );
+
+        config.google_calendar.channel_token = Some(" \n ".into());
+        config.normalize();
+        assert_eq!(config.google_calendar.channel_token, None);
     }
 
     fn slack_channel_route(event: &str, channel: Option<&str>) -> RouteRule {

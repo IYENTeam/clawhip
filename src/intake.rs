@@ -1,4 +1,5 @@
-//! External intake normalization for AWS and Cloudflare webhooks.
+//! External intake normalization for AWS, Cloudflare, and Google Calendar
+//! webhooks.
 //!
 //! Each source has a pure `normalize_*` function that maps the provider's
 //! wire format into an [`IncomingEvent`] following op_pi's event model, so
@@ -133,6 +134,72 @@ pub fn normalize_eventbridge(payload: &Value) -> Result<IncomingEvent, IntakeErr
             "detail": payload.get("detail").cloned().unwrap_or(Value::Null),
         }),
     ))
+}
+
+/// Normalize a Google Calendar API push notification.
+///
+/// Calendar notifications carry metadata in `X-Goog-*` headers and no body.
+/// They signal that the watched collection must be synchronized; they do not
+/// identify the individual event that changed.
+pub fn normalize_google_calendar_notification(
+    channel_id: &str,
+    resource_id: &str,
+    resource_uri: &str,
+    resource_state: &str,
+    message_number: &str,
+    channel_expiration: Option<&str>,
+) -> Result<IncomingEvent, IntakeError> {
+    for (name, value) in [
+        ("channel id", channel_id),
+        ("resource id", resource_id),
+        ("resource URI", resource_uri),
+        ("resource state", resource_state),
+        ("message number", message_number),
+    ] {
+        if value.trim().is_empty() {
+            return Err(IntakeError::BadRequest(format!(
+                "missing Google Calendar {name}"
+            )));
+        }
+    }
+
+    let resource_state = resource_state.trim();
+    let (kind, summary) = match resource_state {
+        "sync" => (
+            "google.calendar.sync",
+            "Google Calendar watch channel synchronized",
+        ),
+        "exists" => (
+            "google.calendar.changed",
+            "Google Calendar resource changed",
+        ),
+        state => {
+            return Err(IntakeError::BadRequest(format!(
+                "unsupported Google Calendar resource state '{state}'"
+            )));
+        }
+    };
+    let message_number = message_number.trim().parse::<u64>().map_err(|_| {
+        IntakeError::BadRequest("invalid Google Calendar message number".to_string())
+    })?;
+
+    let mut payload = json!({
+        "summary": summary,
+        "source": "google.calendar",
+        "channel_id": channel_id.trim(),
+        "resource_id": resource_id.trim(),
+        "resource_uri": resource_uri.trim(),
+        "resource_state": resource_state,
+        "message_number": message_number,
+    });
+    if let Some(expiration) = channel_expiration
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        payload["channel_expiration"] = Value::String(expiration.to_string());
+    }
+
+    Ok(intake_event(kind, payload))
 }
 
 /// Normalize a Cloudflare Notifications generic-webhook payload.
@@ -662,6 +729,60 @@ mod tests {
     fn eventbridge_requires_source_and_detail_type() {
         assert!(normalize_eventbridge(&json!({"source": "aws.ec2"})).is_err());
         assert!(normalize_eventbridge(&json!({"detail-type": "X"})).is_err());
+    }
+
+    #[test]
+    fn google_calendar_normalizes_sync_and_change_notifications() {
+        let sync = normalize_google_calendar_notification(
+            "channel-1",
+            "resource-1",
+            "https://www.googleapis.com/calendar/v3/calendars/team/events",
+            "sync",
+            "1",
+            Some("Tue, 19 Nov 2030 01:13:52 GMT"),
+        )
+        .expect("sync notification should normalize");
+        assert_eq!(sync.kind, "google.calendar.sync");
+        assert_eq!(sync.payload["channel_id"], "channel-1");
+        assert_eq!(sync.payload["message_number"], 1);
+
+        let changed = normalize_google_calendar_notification(
+            "channel-1",
+            "resource-1",
+            "https://www.googleapis.com/calendar/v3/calendars/team/events",
+            "exists",
+            "42",
+            None,
+        )
+        .expect("change notification should normalize");
+        assert_eq!(changed.kind, "google.calendar.changed");
+        assert_eq!(changed.payload["resource_state"], "exists");
+        assert_eq!(changed.payload["message_number"], 42);
+    }
+
+    #[test]
+    fn google_calendar_rejects_unknown_state_and_invalid_message_number() {
+        let unsupported = normalize_google_calendar_notification(
+            "channel-1",
+            "resource-1",
+            "https://www.googleapis.com/calendar/v3/calendars/team/events",
+            "deleted",
+            "2",
+            None,
+        )
+        .expect_err("unsupported resource state must fail");
+        assert!(unsupported.to_string().contains("resource state"));
+
+        let invalid_number = normalize_google_calendar_notification(
+            "channel-1",
+            "resource-1",
+            "https://www.googleapis.com/calendar/v3/calendars/team/events",
+            "exists",
+            "not-a-number",
+            None,
+        )
+        .expect_err("invalid message number must fail");
+        assert!(invalid_number.to_string().contains("message number"));
     }
 
     #[test]

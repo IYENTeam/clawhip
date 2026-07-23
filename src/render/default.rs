@@ -38,6 +38,15 @@ impl Renderer for DefaultRenderer {
                 format!("🚨 {}", string_field(payload, "message")?)
             }
             ("custom", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
+            ("google.calendar.sync" | "google.calendar.changed", MessageFormat::Compact) => {
+                render_google_calendar(payload, false, false)?
+            }
+            ("google.calendar.sync" | "google.calendar.changed", MessageFormat::Inline) => {
+                render_google_calendar(payload, false, true)?
+            }
+            ("google.calendar.sync" | "google.calendar.changed", MessageFormat::Alert) => {
+                render_google_calendar(payload, true, false)?
+            }
 
             ("agent.started", MessageFormat::Compact)
             | ("agent.blocked", MessageFormat::Compact)
@@ -434,6 +443,22 @@ fn render_ticket_agent_action_stale(payload: &Value, alert: bool) -> Result<Stri
 
     Ok(format!(
         "{prefix}{title}\n{tickets}{suffix}\n회장님 조치 필요 없음."
+    ))
+}
+
+fn render_google_calendar(payload: &Value, alert: bool, inline: bool) -> Result<String> {
+    let summary = string_field(payload, "summary")?;
+    let message_number = optional_u64_field(payload, "message_number")
+        .ok_or_else(|| anyhow::anyhow!("missing integer field 'message_number'"))?;
+    let prefix = if alert { "🚨 " } else { "" };
+
+    if inline {
+        return Ok(format!("{prefix}{summary} · message {message_number}"));
+    }
+
+    let resource_uri = string_field(payload, "resource_uri")?;
+    Ok(format!(
+        "{prefix}{summary} · message {message_number}\n{resource_uri}"
     ))
 }
 
@@ -1093,6 +1118,53 @@ mod tests {
             .unwrap();
         assert!(rendered.contains("repo-a"));
         assert!(rendered.contains("workspace skill state changed"));
+    }
+
+    #[test]
+    fn renders_google_calendar_change_compact_without_raw_json() {
+        let event = IncomingEvent {
+            kind: "google.calendar.changed".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": "Google Calendar resource changed",
+                "resource_uri": "https://www.googleapis.com/calendar/v3/calendars/team/events",
+                "message_number": 42
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Compact)
+            .unwrap();
+        assert!(rendered.contains("Google Calendar resource changed"));
+        assert!(rendered.contains("message 42"));
+        assert!(rendered.contains("calendars/team/events"));
+        assert!(!rendered.starts_with('{'));
+    }
+
+    #[test]
+    fn renders_google_calendar_sync_inline() {
+        let event = IncomingEvent {
+            kind: "google.calendar.sync".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": "Google Calendar watch channel synchronized",
+                "resource_uri": "https://www.googleapis.com/calendar/v3/calendars/team/events",
+                "message_number": 1
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Inline)
+            .unwrap();
+        assert!(rendered.contains("Google Calendar watch channel synchronized"));
+        assert!(rendered.contains("message 1"));
+        assert!(!rendered.starts_with('{'));
     }
 
     #[test]
