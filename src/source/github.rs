@@ -12,17 +12,23 @@ use tokio::time::sleep;
 use crate::Result;
 use crate::config::{AppConfig, GitRepoMonitor};
 use crate::events::IncomingEvent;
-use crate::source::Source;
 use crate::source::git::{GitSnapshot, repo_display_name, snapshot_git_repo};
+use crate::source::{
+    ErrorLogDeduper, SharedSourceHealth, Source, mark_source_error, mark_source_success,
+};
 use crate::telemetry;
 
 pub struct GitHubSource {
     config: Arc<AppConfig>,
+    health: Option<SharedSourceHealth>,
 }
 
 impl GitHubSource {
-    pub fn new(config: Arc<AppConfig>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<AppConfig>, health: SharedSourceHealth) -> Self {
+        Self {
+            config,
+            health: Some(health),
+        }
     }
 }
 
@@ -47,16 +53,40 @@ impl Source for GitHubSource {
         let mut state = load_state(&state_path).await;
         let state_was_restored = !state.is_empty() && state_path.is_some();
         let mut poll_count: u64 = 0;
+        let mut error_logs = ErrorLogDeduper::default();
 
         loop {
-            run_github_poll_cycle(
+            match run_github_poll_cycle(
                 self.config.as_ref(),
                 github_client.as_ref(),
                 &tx,
                 &mut state,
                 state_was_restored,
             )
-            .await;
+            .await
+            {
+                Ok(()) => {
+                    error_logs.clear("poll");
+                    if let Some(health) = &self.health {
+                        mark_source_success(health, self.name()).await;
+                    }
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    if let Some(health) = &self.health {
+                        mark_source_error(health, self.name(), error.clone()).await;
+                    }
+                    if error_logs.should_log("poll", &error) {
+                        telemetry::emit(source_record(
+                            telemetry::event_name::SOURCE_DEGRADED,
+                            "source_poll_failed",
+                            None,
+                            Some(error.clone()),
+                        ));
+                        eprintln!("clawhip source github poll failed: {error}");
+                    }
+                }
+            }
 
             poll_count += 1;
 
@@ -147,6 +177,8 @@ struct PullRequestSnapshot {
     url: String,
     head_branch: String,
     head_sha: String,
+    review_count: u64,
+    review_comment_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,16 +221,8 @@ async fn run_github_poll_cycle(
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
     state_was_restored: bool,
-) {
-    if let Err(error) = poll_github(config, github_client, tx, state, state_was_restored).await {
-        telemetry::emit(source_record(
-            telemetry::event_name::SOURCE_DEGRADED,
-            "source_poll_failed",
-            None,
-            Some(error.to_string()),
-        ));
-        eprintln!("clawhip source github poll failed: {error}");
-    }
+) -> Result<()> {
+    poll_github(config, github_client, tx, state, state_was_restored).await
 }
 
 async fn snapshot_github_repo(repo: &GitRepoMonitor) -> Result<GitSnapshot> {
@@ -238,6 +262,7 @@ async fn poll_github(
     state: &mut HashMap<String, GitHubRepoState>,
     state_was_restored: bool,
 ) -> Result<()> {
+    let mut errors = Vec::new();
     for repo in &config.monitors.git.repos {
         if !repo.emit_issue_opened && !repo.emit_pr_status {
             continue;
@@ -256,6 +281,7 @@ async fn poll_github(
                     "clawhip source github snapshot failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} snapshot: {error}", repo.path));
                 continue;
             }
         };
@@ -270,6 +296,7 @@ async fn poll_github(
                     "clawhip source GitHub issue processing failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} issues: {error}", repo.path));
                 previous
                     .map(|entry| entry.issues.clone())
                     .unwrap_or_default()
@@ -288,6 +315,7 @@ async fn poll_github(
                         "clawhip source GitHub pull request processing failed for {}: {error}",
                         repo.path
                     );
+                    errors.push(format!("{} pulls: {error}", repo.path));
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
             };
@@ -305,6 +333,7 @@ async fn poll_github(
                     "clawhip source GitHub CI processing failed for {}: {error}",
                     repo.path
                 );
+                errors.push(format!("{} ci: {error}", repo.path));
                 previous.map(|entry| entry.ci.clone()).unwrap_or_default()
             }
         };
@@ -312,7 +341,16 @@ async fn poll_github(
         state.insert(repo.path.clone(), GitHubRepoState { issues, prs, ci });
     }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "GitHub poll completed with {} repo/path error(s): {}",
+            errors.len(),
+            errors.join("; ")
+        )
+        .into())
+    }
 }
 
 async fn backfill_issues(
@@ -403,21 +441,7 @@ async fn poll_issues(
             }
             Ok(issues)
         }
-        Err(error) => {
-            telemetry::emit(source_record(
-                telemetry::event_name::SOURCE_DEGRADED,
-                "source_poll_failed",
-                Some(&repo.path),
-                Some(error.to_string()),
-            ));
-            eprintln!(
-                "clawhip source GitHub issue polling failed for {}: {error}",
-                repo.path
-            );
-            Ok(previous
-                .map(|entry| entry.issues.clone())
-                .unwrap_or_default())
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -440,45 +464,13 @@ async fn poll_pull_requests(
     match fetch_pull_requests(client, &config.monitors.github_api_base, repo, snapshot).await {
         Ok(prs) => {
             if let Some(previous) = previous {
-                for (number, pr) in &prs {
-                    match previous.prs.get(number) {
-                        Some(old) if old.status == pr.status => {}
-                        old => {
-                            send_event(
-                                tx,
-                                IncomingEvent::github_pr_status_changed(
-                                    snapshot.repo_name.clone(),
-                                    *number,
-                                    pr.title.clone(),
-                                    old.map(|value| value.status.clone())
-                                        .unwrap_or_else(|| "<new>".to_string()),
-                                    pr.status.clone(),
-                                    pr.url.clone(),
-                                    repo.channel.clone(),
-                                )
-                                .with_mention(repo.mention.clone())
-                                .with_format(repo.format.clone()),
-                            )
-                            .await?;
-                        }
-                    }
+                for event in collect_pr_events(repo, &snapshot.repo_name, &previous.prs, &prs) {
+                    send_event(tx, event).await?;
                 }
             }
             Ok(prs)
         }
-        Err(error) => {
-            telemetry::emit(source_record(
-                telemetry::event_name::SOURCE_DEGRADED,
-                "source_poll_failed",
-                Some(&repo.path),
-                Some(error.to_string()),
-            ));
-            eprintln!(
-                "clawhip source GitHub polling failed for {}: {error}",
-                repo.path
-            );
-            Ok(previous.map(|entry| entry.prs.clone()).unwrap_or_default())
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -527,19 +519,7 @@ async fn poll_ci_statuses(
             }
             Ok(ci)
         }
-        Err(error) => {
-            telemetry::emit(source_record(
-                telemetry::event_name::SOURCE_DEGRADED,
-                "source_poll_failed",
-                Some(&repo.path),
-                Some(error.to_string()),
-            ));
-            eprintln!(
-                "clawhip source GitHub CI polling failed for {}: {error}",
-                repo.path
-            );
-            Ok(previous.map(|entry| entry.ci.clone()).unwrap_or_default())
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -735,7 +715,7 @@ async fn reconcile_prs(
                 snapshot.repo_name.clone(),
                 pull.number,
                 pull.title,
-                "<unknown>".to_string(),
+                "<new>".to_string(),
                 status.to_string(),
                 pull.html_url,
                 repo.channel.clone(),
@@ -763,25 +743,22 @@ async fn github_get(
     api_base: &str,
     path: &str,
     query: &[(&str, &str)],
-    context: &str,
+    _context: &str,
 ) -> Result<reqwest::Response> {
     let url = format!(
         "{}/{}",
         api_base.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-    eprintln!("clawhip source github: GET {url} ({context})");
 
     let response = client.get(&url).query(query).send().await?;
     let status = response.status();
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        eprintln!("clawhip source github: GET {url} ({context}) failed with {status}: {body}");
         return Err(format!("GitHub API request failed with {status}: {body}").into());
     }
 
-    eprintln!("clawhip source github: GET {url} ({context}) -> {status}");
     Ok(response)
 }
 
@@ -831,6 +808,80 @@ fn collect_issue_events(
                     );
                 }
             }
+        }
+    }
+    events
+}
+
+fn collect_pr_events(
+    repo: &GitRepoMonitor,
+    repo_name: &str,
+    previous: &HashMap<u64, PullRequestSnapshot>,
+    current: &HashMap<u64, PullRequestSnapshot>,
+) -> Vec<IncomingEvent> {
+    let mut events = Vec::new();
+    for (number, pr) in current {
+        match previous.get(number) {
+            Some(old) => {
+                if old.status != pr.status {
+                    events.push(
+                        IncomingEvent::github_pr_status_changed(
+                            repo_name.to_string(),
+                            *number,
+                            pr.title.clone(),
+                            old.status.clone(),
+                            pr.status.clone(),
+                            pr.url.clone(),
+                            repo.channel.clone(),
+                        )
+                        .with_mention(repo.mention.clone())
+                        .with_format(repo.format.clone()),
+                    );
+                }
+                if pr.review_count > old.review_count {
+                    events.push(
+                        IncomingEvent::github_pr_review_activity(
+                            repo_name.to_string(),
+                            *number,
+                            pr.title.clone(),
+                            "review".to_string(),
+                            pr.review_count,
+                            pr.url.clone(),
+                            repo.channel.clone(),
+                        )
+                        .with_mention(repo.mention.clone())
+                        .with_format(repo.format.clone()),
+                    );
+                }
+                if pr.review_comment_count > old.review_comment_count {
+                    events.push(
+                        IncomingEvent::github_pr_review_activity(
+                            repo_name.to_string(),
+                            *number,
+                            pr.title.clone(),
+                            "review_comment".to_string(),
+                            pr.review_comment_count,
+                            pr.url.clone(),
+                            repo.channel.clone(),
+                        )
+                        .with_mention(repo.mention.clone())
+                        .with_format(repo.format.clone()),
+                    );
+                }
+            }
+            None => events.push(
+                IncomingEvent::github_pr_status_changed(
+                    repo_name.to_string(),
+                    *number,
+                    pr.title.clone(),
+                    "<new>".to_string(),
+                    pr.status.clone(),
+                    pr.url.clone(),
+                    repo.channel.clone(),
+                )
+                .with_mention(repo.mention.clone())
+                .with_format(repo.format.clone()),
+            ),
         }
     }
     events
@@ -981,6 +1032,8 @@ async fn fetch_pull_requests(
                     url: pull.html_url,
                     head_branch: pull.head.reference,
                     head_sha: pull.head.sha,
+                    review_count: pull.review_comments + pull.comments,
+                    review_comment_count: pull.review_comments,
                 },
             )
         })
@@ -1230,6 +1283,10 @@ struct GitHubPullRequest {
     state: String,
     html_url: String,
     merged_at: Option<String>,
+    #[serde(default)]
+    comments: u64,
+    #[serde(default)]
+    review_comments: u64,
     head: GitHubPullRequestHead,
 }
 
@@ -1354,6 +1411,70 @@ mod tests {
         assert_eq!(channel, "route-channel");
         assert!(content.starts_with("<@1465264645320474637> "));
         assert!(content.contains("live issue"));
+    }
+
+    #[test]
+    fn pr_review_activity_events_are_emitted() {
+        let repo = GitRepoMonitor {
+            path: "/tmp/clawhip".into(),
+            name: Some("clawhip".into()),
+            channel: Some("dev-channel".into()),
+            mention: Some("<@123>".into()),
+            format: Some(MessageFormat::Compact),
+            ..GitRepoMonitor::default()
+        };
+        let previous = [(
+            42_u64,
+            PullRequestSnapshot {
+                title: "review me".into(),
+                status: "open".into(),
+                url: "https://github.com/owner/repo/pull/42".into(),
+                head_branch: "feat".into(),
+                head_sha: "abc".into(),
+                review_count: 0,
+                review_comment_count: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let current = [(
+            42_u64,
+            PullRequestSnapshot {
+                title: "review me".into(),
+                status: "open".into(),
+                url: "https://github.com/owner/repo/pull/42".into(),
+                head_branch: "feat".into(),
+                head_sha: "abc".into(),
+                review_count: 1,
+                review_comment_count: 1,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let events = collect_pr_events(&repo, "clawhip", &previous, &current);
+
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.canonical_kind() == "github.pr-review-activity")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.payload["activity"] == "review")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.payload["activity"] == "review_comment")
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.channel.as_deref() == Some("dev-channel"))
+        );
     }
 
     #[test]
@@ -1568,6 +1689,8 @@ mod tests {
             url: "https://github.com/org/repo/pull/42".into(),
             head_branch: "feat/pr".into(),
             head_sha: "prsha".into(),
+            review_count: 0,
+            review_comment_count: 0,
         };
         let open_prs = vec![(42_u64, &pr)];
 
@@ -1800,7 +1923,7 @@ mod tests {
             ..GitRepoMonitor::default()
         }];
 
-        let source = GitHubSource::new(Arc::new(config));
+        let source = GitHubSource::new(Arc::new(config), crate::source::new_shared_source_health());
         let (tx, _rx) = mpsc::channel(4);
         let source_task = tokio::spawn(async move { source.run(tx).await });
 
@@ -1854,6 +1977,8 @@ mod tests {
                 url: "https://github.com/owner/repo/pull/7".into(),
                 head_branch: "fix".into(),
                 head_sha: "abc123".into(),
+                review_count: 0,
+                review_comment_count: 0,
             },
         );
         state.insert(

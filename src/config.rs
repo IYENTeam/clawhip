@@ -232,6 +232,8 @@ pub struct MonitorConfig {
     pub tmux: TmuxMonitorConfig,
     #[serde(default)]
     pub workspace: Vec<WorkspaceMonitor>,
+    #[serde(default)]
+    pub discord_threads: Vec<DiscordThreadMonitor>,
 }
 
 impl Default for MonitorConfig {
@@ -245,6 +247,7 @@ impl Default for MonitorConfig {
             git: GitMonitorConfig::default(),
             tmux: TmuxMonitorConfig::default(),
             workspace: Vec::new(),
+            discord_threads: Vec::new(),
         }
     }
 }
@@ -333,6 +336,18 @@ impl Default for TmuxSessionMonitor {
             format: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordThreadMonitor {
+    pub parent_channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_channel_name: Option<String>,
+    pub mention: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -676,7 +691,7 @@ impl AppConfig {
                     format!("route #{} ({}) must set a sink", index + 1, route.event).into(),
                 );
             }
-            if !matches!(sink, "discord" | "slack") {
+            if !matches!(sink, "discord" | "slack" | "drop") {
                 return Err(format!(
                     "route #{} ({}) uses unsupported sink '{}'",
                     index + 1,
@@ -725,7 +740,32 @@ impl AppConfig {
                         .into());
                     }
                 }
+                "drop" => {}
                 _ => unreachable!(),
+            }
+        }
+
+        for (index, monitor) in self.monitors.discord_threads.iter().enumerate() {
+            if monitor.parent_channel.trim().is_empty() {
+                return Err(format!(
+                    "discord thread monitor #{} must set parent_channel",
+                    index + 1
+                )
+                .into());
+            }
+            if monitor.mention.trim().is_empty() {
+                return Err(
+                    format!("discord thread monitor #{} must set mention", index + 1).into(),
+                );
+            }
+            if let Some(secs) = monitor.poll_interval_secs
+                && secs == 0
+            {
+                return Err(format!(
+                    "discord thread monitor #{} poll_interval_secs must be at least 1",
+                    index + 1
+                )
+                .into());
             }
         }
 
@@ -1068,6 +1108,15 @@ impl AppConfig {
             session.mention = normalize_text(session.mention.clone());
         }
 
+        for monitor in &mut self.monitors.discord_threads {
+            monitor.parent_channel =
+                normalize_text(Some(monitor.parent_channel.clone())).unwrap_or_default();
+            monitor.parent_channel_name = normalize_text(monitor.parent_channel_name.clone());
+            monitor.mention = normalize_text(Some(monitor.mention.clone())).unwrap_or_default();
+            monitor.message = normalize_text(monitor.message.clone());
+            monitor.poll_interval_secs = monitor.poll_interval_secs.map(|secs| secs.max(1));
+        }
+
         for workspace in &mut self.monitors.workspace {
             workspace.path = normalize_text(Some(workspace.path.clone())).unwrap_or_default();
             workspace.channel = normalize_text(workspace.channel.clone());
@@ -1310,6 +1359,34 @@ mod tests {
 
         assert!(config.validate().is_ok());
         assert_eq!(config.webhook_route_count(), 1);
+    }
+
+    #[test]
+    fn drop_route_satisfies_delivery_validation_without_target() {
+        let config = AppConfig {
+            providers: ProvidersConfig {
+                discord: DiscordConfig {
+                    bot_token: Some("token".into()),
+                    legacy_default_channel: None,
+                },
+                slack: SlackConfig::default(),
+                openclaw: None,
+            },
+            defaults: DefaultsConfig {
+                channel: Some("default-ch".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "agent.status.*.continue".into(),
+                sink: "drop".into(),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.webhook_route_count(), 0);
     }
 
     #[test]
@@ -1885,5 +1962,56 @@ poll_interval_secs = 9
         let config = AppConfig::load_or_default(&path).unwrap();
         assert!(config.monitors.workspace.is_empty());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn discord_thread_monitor_config_parses_and_normalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[providers.discord]
+token = "abc"
+
+[[monitors.discord_threads]]
+parent_channel = " 1506217431465463929 "
+parent_channel_name = " task-request "
+mention = " <@1486621536520769547> "
+message = " {mention} thread={thread_id} parent={parent_channel} "
+poll_interval_secs = 3
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load_or_default(&path).unwrap();
+        let monitor = &config.monitors.discord_threads[0];
+        assert_eq!(monitor.parent_channel, "1506217431465463929");
+        assert_eq!(monitor.parent_channel_name.as_deref(), Some("task-request"));
+        assert_eq!(monitor.mention, "<@1486621536520769547>");
+        assert_eq!(
+            monitor.message.as_deref(),
+            Some("{mention} thread={thread_id} parent={parent_channel}")
+        );
+        assert_eq!(monitor.poll_interval_secs, Some(3));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn discord_thread_monitor_requires_parent_and_mention() {
+        let mut config = AppConfig::default();
+        config.monitors.discord_threads.push(DiscordThreadMonitor {
+            parent_channel: "".into(),
+            parent_channel_name: None,
+            mention: "".into(),
+            message: None,
+            poll_interval_secs: Some(1),
+        });
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("discord thread monitor #1 must set parent_channel"));
+
+        config.monitors.discord_threads[0].parent_channel = "1506217431465463929".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("discord thread monitor #1 must set mention"));
     }
 }

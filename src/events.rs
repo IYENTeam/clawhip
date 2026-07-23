@@ -444,6 +444,34 @@ impl IncomingEvent {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn github_pr_review_activity(
+        repo: String,
+        number: u64,
+        title: String,
+        activity: String,
+        count: u64,
+        url: String,
+        channel: Option<String>,
+    ) -> Self {
+        Self {
+            kind: "github.pr-review-activity".to_string(),
+            channel,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "repo": repo,
+                "number": number,
+                "title": title,
+                "activity": activity,
+                "count": count,
+                "url": url,
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn github_ci(
         kind: &str,
         repo: String,
@@ -1729,6 +1757,48 @@ mod tests {
                 "error_message": "build failed"
             })
         );
+    }
+
+    #[test]
+    fn renders_github_pr_status_as_actionable_card() {
+        let event = IncomingEvent::github_pr_status_changed(
+            "IYENTeam/Hent-ai".into(),
+            104,
+            "docs: sync image-gen + architecture docs".into(),
+            "<new>".into(),
+            "open".into(),
+            "https://github.com/IYENTeam/Hent-ai/pull/104".into(),
+            Some("hent-ai".into()),
+        );
+
+        let rendered = event.render_default(&MessageFormat::Compact).unwrap();
+
+        assert!(rendered.starts_with("[PR 새 PR 접수] IYENTeam/Hent-ai#104"));
+        assert!(rendered.contains("상태: <new> → open"));
+        assert!(rendered.contains("다음 액션: 이연이 티켓을 만들고 diff/CI를 확인합니다."));
+        assert!(rendered.contains("링크: <https://github.com/IYENTeam/Hent-ai/pull/104>"));
+        assert_eq!(event.channel.as_deref(), Some("hent-ai"));
+    }
+
+    #[test]
+    fn renders_github_pr_review_activity_as_actionable_card() {
+        let event = IncomingEvent::github_pr_review_activity(
+            "IYENTeam/Hent-ai".into(),
+            104,
+            "docs: sync image-gen + architecture docs".into(),
+            "review_comment".into(),
+            3,
+            "https://github.com/IYENTeam/Hent-ai/pull/104".into(),
+            Some("hent-ai".into()),
+        );
+
+        let rendered = event.render_default(&MessageFormat::Compact).unwrap();
+
+        assert!(rendered.starts_with("[PR 리뷰 코멘트 추가] IYENTeam/Hent-ai#104"));
+        assert!(rendered.contains("상태: review_comment count=3"));
+        assert!(rendered.contains("다음 액션: 이연이 리뷰/코멘트 내용을 확인"));
+        assert!(rendered.contains("링크: <https://github.com/IYENTeam/Hent-ai/pull/104>"));
+        assert_eq!(event.channel.as_deref(), Some("hent-ai"));
     }
 
     #[test]

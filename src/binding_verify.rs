@@ -41,6 +41,7 @@ pub enum BindingSource {
     Route { index: usize },
     GitMonitor { index: usize },
     TmuxMonitor { index: usize },
+    DiscordThreadMonitor { index: usize },
 }
 
 impl fmt::Display for BindingSource {
@@ -50,6 +51,9 @@ impl fmt::Display for BindingSource {
             Self::Route { index } => write!(f, "routes[{}]", index + 1),
             Self::GitMonitor { index } => write!(f, "monitors.git.repos[{}]", index + 1),
             Self::TmuxMonitor { index } => write!(f, "monitors.tmux.sessions[{}]", index + 1),
+            Self::DiscordThreadMonitor { index } => {
+                write!(f, "monitors.discord_threads[{}]", index + 1)
+            }
         }
     }
 }
@@ -136,6 +140,18 @@ pub fn collect_bindings(config: &AppConfig) -> Vec<ChannelBinding> {
                 expected_name: session.channel_name.clone(),
                 source: BindingSource::TmuxMonitor { index },
                 label: format!("tmux:{}", session.session),
+            });
+        }
+    }
+
+    // Discord thread monitors
+    for (index, monitor) in config.monitors.discord_threads.iter().enumerate() {
+        if !monitor.parent_channel.is_empty() {
+            bindings.push(ChannelBinding {
+                channel_id: monitor.parent_channel.clone(),
+                expected_name: monitor.parent_channel_name.clone(),
+                source: BindingSource::DiscordThreadMonitor { index },
+                label: "discord thread monitor parent".to_string(),
             });
         }
     }

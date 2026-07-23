@@ -17,6 +17,8 @@ use crate::sink::SinkMessage;
 use crate::sink::SinkTarget;
 use crate::telemetry;
 
+const DROP_SINK: &str = "drop";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTrace {
     pub result: RouteTraceResult,
@@ -107,6 +109,9 @@ impl Router {
             deliveries.push(self.resolve_delivery(event, None, None)?);
         } else {
             for route in matched_routes {
+                if route.effective_sink() == DROP_SINK {
+                    continue;
+                }
                 let index = self
                     .config
                     .routes
@@ -322,6 +327,9 @@ impl Router {
                 .iter()
                 .filter_map(|&idx| {
                     let route = &self.config.routes[idx];
+                    if route.effective_sink() == DROP_SINK {
+                        return None;
+                    }
                     self.resolve_delivery(event, Some(route), Some(idx))
                         .ok()
                         .map(|d| delivery_explanation(&d, Some(idx)))
@@ -534,6 +542,12 @@ fn matching_routes_for<'a>(
         }
     }
 
+    if canonical_kind.starts_with("github.")
+        && preferred.iter().any(|route| route_has_repo_scope(route))
+    {
+        preferred.retain(|route| route_has_repo_scope(route));
+    }
+
     preferred.sort_by(|left, right| {
         route_specificity_score(right, context).cmp(&route_specificity_score(left, context))
     });
@@ -546,6 +560,15 @@ fn matching_routes_for<'a>(
     }
 
     preferred
+}
+
+fn route_has_repo_scope(route: &RouteRule) -> bool {
+    route.filter.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "repo" | "repo_name" | "repo_path" | "worktree_path" | "project"
+        )
+    })
 }
 
 fn route_specificity_score(
@@ -1190,6 +1213,69 @@ mod tests {
         let (_, _, content) = router.preview(&event).await.unwrap();
         assert!(content.starts_with("<@route> "));
         assert!(!content.starts_with("<@event> "));
+    }
+
+    #[tokio::test]
+    async fn github_repo_route_suppresses_generic_task_request_route() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("task-request".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![
+                RouteRule {
+                    event: "github.pr-status-changed".into(),
+                    sink: "discord".into(),
+                    filter: [
+                        ("old_status".to_string(), "<new>".to_string()),
+                        ("new_status".to_string(), "open".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    channel: Some("task-request".into()),
+                    mention: Some("<@iyen>".into()),
+                    format: Some(MessageFormat::Compact),
+                    template: Some("generic task intake".into()),
+                    ..RouteRule::default()
+                },
+                RouteRule {
+                    event: "github.*".into(),
+                    sink: "discord".into(),
+                    filter: [("repo_name".to_string(), "*Hent-ai*".to_string())]
+                        .into_iter()
+                        .collect(),
+                    channel: Some("hent-ai".into()),
+                    mention: Some("<@iyen>".into()),
+                    format: Some(MessageFormat::Compact),
+                    ..RouteRule::default()
+                },
+            ],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = normalize_event(IncomingEvent::github_pr_status_changed(
+            "IYENTeam/Hent-ai".into(),
+            104,
+            "docs sync".into(),
+            "<new>".into(),
+            "open".into(),
+            "https://github.com/IYENTeam/Hent-ai/pull/104".into(),
+            None,
+        ));
+
+        let deliveries = router.resolve(&event).await.unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            deliveries[0].target,
+            SinkTarget::DiscordChannel("hent-ai".into())
+        );
+        let rendered = router
+            .render_delivery(&event, &deliveries[0], &DefaultRenderer)
+            .await
+            .unwrap();
+        assert!(rendered.starts_with("<@iyen> [PR 새 PR 접수] IYENTeam/Hent-ai#104"));
+        assert!(!rendered.contains("generic task intake"));
     }
 
     #[tokio::test]
@@ -1981,6 +2067,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drop_route_suppresses_event_without_default_fallback() {
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("default-ch".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![RouteRule {
+                event: "agent.status.*.continue".into(),
+                sink: "drop".into(),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+
+        // Given: a default Discord channel exists.
+        // When: an event matches an explicit drop route.
+        let event = IncomingEvent::workspace(
+            "agent.status.iyen.continue".into(),
+            json!({ "agent_name": "iyen", "status": "continue" }),
+            None,
+        );
+        let deliveries = router.resolve(&event).await.unwrap();
+
+        // Then: the matched drop route suppresses the event instead of falling back.
+        assert!(deliveries.is_empty());
+    }
+
+    #[tokio::test]
     async fn slack_webhook_route_is_used_as_delivery_target() {
         let config = AppConfig {
             defaults: DefaultsConfig {
@@ -2413,6 +2529,50 @@ mod tests {
         assert_eq!(provenance.deliveries[0].channel.as_deref(), Some("ops"));
         assert_eq!(provenance.deliveries[1].matched_route_index, Some(1));
         assert_eq!(provenance.deliveries[1].channel.as_deref(), Some("eng"));
+    }
+
+    #[tokio::test]
+    async fn ticket_agent_action_stale_alert_mentions_iyen_once_and_is_actionable() {
+        let iyen_mention = "<@1486621536520769547>";
+        let template = "[stale-agent-action] 15분 이상 방치된 agent_action 티켓
+{tickets}
+
+액션: 이연이 지금 위 티켓을 이어서 처리하고 checkpoint를 남기기. 회장님 조치 필요 없음.";
+        let config = AppConfig {
+            defaults: DefaultsConfig {
+                channel: Some("1506217431465463929".into()),
+                channel_name: None,
+                format: MessageFormat::Compact,
+            },
+            routes: vec![],
+            ..AppConfig::default()
+        };
+        let router = Router::new(Arc::new(config));
+        let event = IncomingEvent {
+            kind: "ticket.agent-action-stale".into(),
+            channel: Some("1506217431465463929".into()),
+            mention: Some(iyen_mention.into()),
+            format: Some(MessageFormat::Alert),
+            template: Some(template.into()),
+            payload: json!({
+                "tickets": "T-20260619-003 [doing] owner=iyen age=20m :: gh pr view/checks #88210"
+            }),
+        };
+
+        let delivery = router.preview_delivery(&event).await.unwrap();
+        let rendered = router
+            .render_delivery(&event, &delivery, &DefaultRenderer)
+            .await
+            .unwrap();
+
+        assert_eq!(rendered.matches(iyen_mention).count(), 1);
+        assert!(rendered.starts_with(iyen_mention));
+        assert!(
+            rendered.contains("액션: 이연이 지금 위 티켓을 이어서 처리하고 checkpoint를 남기기")
+        );
+        assert!(rendered.contains("회장님 조치 필요 없음"));
+        assert!(!rendered.contains("contract_event"));
+        assert!(!rendered.contains("{tickets}"));
     }
 
     #[test]

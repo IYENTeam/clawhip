@@ -184,22 +184,28 @@ impl Renderer for DefaultRenderer {
             ),
             ("git.branch-changed", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
-            ("github.pr-status-changed", MessageFormat::Compact) => format!(
-                "PR {}#{} {} -> {}: {}",
+            ("github.pr-review-activity", MessageFormat::Compact) => {
+                render_github_pr_review_activity(payload, false)?
+            }
+            ("github.pr-review-activity", MessageFormat::Alert) => {
+                render_github_pr_review_activity(payload, true)?
+            }
+            ("github.pr-review-activity", MessageFormat::Inline) => format!(
+                "[PR review] {}#{} {}",
                 string_field(payload, "repo")?,
                 payload.field_u64("number")?,
-                string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?,
                 string_field(payload, "title")?
             ),
-            ("github.pr-status-changed", MessageFormat::Alert) => format!(
-                "🚨 PR status changed in {}: #{} {} -> {} ({})",
-                string_field(payload, "repo")?,
-                payload.field_u64("number")?,
-                string_field(payload, "old_status")?,
-                string_field(payload, "new_status")?,
-                string_field(payload, "title")?
-            ),
+            ("github.pr-review-activity", MessageFormat::Raw) => {
+                serde_json::to_string_pretty(payload)?
+            }
+
+            ("github.pr-status-changed", MessageFormat::Compact) => {
+                render_github_pr_status_changed(payload, false)?
+            }
+            ("github.pr-status-changed", MessageFormat::Alert) => {
+                render_github_pr_status_changed(payload, true)?
+            }
             ("github.pr-status-changed", MessageFormat::Inline) => format!(
                 "[PR {}#{}] {} -> {}",
                 string_field(payload, "repo")?,
@@ -313,12 +319,101 @@ impl Renderer for DefaultRenderer {
             ),
             ("tmux.stale", MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
 
+            ("ticket.agent-action-stale", MessageFormat::Compact)
+            | ("ticket.agent-action-stale", MessageFormat::Inline) => {
+                render_ticket_agent_action_stale(payload, false)?
+            }
+            ("ticket.agent-action-stale", MessageFormat::Alert) => {
+                render_ticket_agent_action_stale(payload, true)?
+            }
+            ("ticket.agent-action-stale", MessageFormat::Raw) => {
+                serde_json::to_string_pretty(payload)?
+            }
+
             (_, MessageFormat::Raw) => serde_json::to_string_pretty(payload)?,
             (_, _) => serde_json::to_string(payload)?,
         };
 
         Ok(text)
     }
+}
+
+fn render_github_pr_status_changed(payload: &Value, alert: bool) -> Result<String> {
+    let repo = string_field(payload, "repo")?;
+    let number = payload.field_u64("number")?;
+    let title = string_field(payload, "title")?;
+    let old_status = string_field(payload, "old_status")?;
+    let new_status = string_field(payload, "new_status")?;
+    let url = optional_string_field(payload, "url");
+    let source = optional_string_field(payload, "source");
+    let state_label = match (old_status.as_str(), new_status.as_str()) {
+        ("<new>", "open") => "새 PR 접수",
+        (_, "open") => "PR 열림",
+        (_, "merged") => "머지됨",
+        (_, "closed") => "닫힘",
+        _ => "상태 변경",
+    };
+    let next_action = match (old_status.as_str(), new_status.as_str(), source.as_deref()) {
+        ("<new>", "open", Some("backfill")) => {
+            "다음 액션: 과거 미처리 PR이면 이연이 중복 확인 후 필요한 경우만 리뷰합니다."
+        }
+        ("<new>", "open", _) => "다음 액션: 이연이 티켓을 만들고 diff/CI를 확인합니다.",
+        (_, "open", _) => "다음 액션: 이연이 변경 상태와 CI를 재확인합니다.",
+        (_, "merged", _) => "다음 액션: 관련 티켓을 done으로 닫고 결과 증거를 남깁니다.",
+        (_, "closed", _) => "다음 액션: 관련 티켓을 정리합니다.",
+        _ => "다음 액션: 이연이 상태 변화 의미를 분류합니다.",
+    };
+    let prefix = if alert { "🚨 " } else { "" };
+    let source_suffix = source
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" · source={value}"))
+        .unwrap_or_default();
+    let url_line = url
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("\n링크: <{value}>"))
+        .unwrap_or_default();
+
+    Ok(format!(
+        "{prefix}[PR {state_label}] {repo}#{number} — {title}\n상태: {old_status} → {new_status}{source_suffix}\n{next_action}{url_line}"
+    ))
+}
+
+fn render_github_pr_review_activity(payload: &Value, alert: bool) -> Result<String> {
+    let repo = string_field(payload, "repo")?;
+    let number = payload.field_u64("number")?;
+    let title = string_field(payload, "title")?;
+    let activity = string_field(payload, "activity")?;
+    let count = payload.field_u64("count")?;
+    let url = optional_string_field(payload, "url");
+    let activity_label = match activity.as_str() {
+        "review" => "리뷰 추가",
+        "review_comment" => "리뷰 코멘트 추가",
+        _ => "리뷰 활동",
+    };
+    let prefix = if alert { "🚨 " } else { "" };
+    let url_line = url
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("\n링크: <{value}>"))
+        .unwrap_or_default();
+
+    Ok(format!(
+        "{prefix}[PR {activity_label}] {repo}#{number} — {title}\n상태: {activity} count={count}\n다음 액션: 이연이 리뷰/코멘트 내용을 확인하고 필요하면 수정 또는 gate를 기록합니다.{url_line}"
+    ))
+}
+
+fn render_ticket_agent_action_stale(payload: &Value, alert: bool) -> Result<String> {
+    let title = optional_string_field(payload, "title")
+        .unwrap_or_else(|| "[stale-agent-action] agent_action 티켓 방치".to_string());
+    let tickets = string_field(payload, "tickets")?;
+    let stale_minutes = optional_u64_field(payload, "stale_minutes");
+    let suffix = stale_minutes
+        .map(|minutes| format!("\n\nnext_action.type=agent_action · stale>{minutes}m"))
+        .unwrap_or_else(|| "\n\nnext_action.type=agent_action".to_string());
+    let prefix = if alert { "🚨 " } else { "" };
+
+    Ok(format!(
+        "{prefix}{title}\n{tickets}{suffix}\n회장님 조치 필요 없음."
+    ))
 }
 
 fn string_field(payload: &Value, key: &str) -> Result<String> {
@@ -1081,5 +1176,33 @@ mod tests {
             .unwrap();
         assert!(rendered.starts_with("🚨"));
         assert!(rendered.contains("release published"));
+    }
+
+    #[test]
+    fn renders_ticket_agent_action_stale_without_raw_json() {
+        let event = IncomingEvent {
+            kind: "ticket.agent-action-stale".into(),
+            channel: Some("1506217431465463929".into()),
+            mention: None,
+            format: Some(MessageFormat::Alert),
+            template: None,
+            payload: json!({
+                "title": "[stale-agent-action] 15분 이상 방치된 agent_action 티켓",
+                "tickets": "T-20260619-003 [doing] owner=iyen age=20m :: gh pr view/checks #88210",
+                "stale_minutes": 15,
+                "summary": "raw summary should not be dumped as JSON"
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Alert)
+            .unwrap();
+
+        assert_eq!(
+            rendered,
+            "🚨 [stale-agent-action] 15분 이상 방치된 agent_action 티켓\nT-20260619-003 [doing] owner=iyen age=20m :: gh pr view/checks #88210\n\nnext_action.type=agent_action · stale>15m\n회장님 조치 필요 없음."
+        );
+        assert!(!rendered.starts_with('{'));
+        assert!(!rendered.contains("\"contract_event\""));
     }
 }
