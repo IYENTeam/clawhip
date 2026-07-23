@@ -1,0 +1,12 @@
+Message
+{"AlarmName":"ServerCpuTooHigh","NewStateValue":"ALARM"}
+MessageId
+22b80b92
+Subject
+ALARM: ServerCpuTooHigh
+Timestamp
+2026-07-22T12:00:01.000Z
+TopicArn
+arn:aws:sns:us-east-1:123456789012:clawhip-alarms
+Type
+Notification

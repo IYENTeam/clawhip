@@ -68,7 +68,14 @@ impl PendingKeywordHits {
 
 #[cfg(test)]
 pub fn collect_keyword_hits(previous: &str, current: &str, keywords: &[String]) -> Vec<KeywordHit> {
-    collect_keyword_hits_from_lines(appended_lines(previous, current), keywords, None)
+    collect_keyword_hits_from_lines(
+        appended_lines_with_cursors(previous, current)
+            .into_iter()
+            .map(|(_, line)| (None, line))
+            .collect(),
+        keywords,
+        None,
+    )
 }
 
 pub fn collect_keyword_hits_with_provenance(
@@ -78,14 +85,17 @@ pub fn collect_keyword_hits_with_provenance(
     provenance: KeywordMatchProvenance,
 ) -> Vec<KeywordHit> {
     collect_keyword_hits_from_lines(
-        appended_lines(previous, current),
+        appended_lines_with_cursors(previous, current)
+            .into_iter()
+            .map(|(cursor, line)| (Some(cursor), line))
+            .collect(),
         keywords,
         Some(provenance),
     )
 }
 
 fn collect_keyword_hits_from_lines(
-    lines: Vec<&str>,
+    lines: Vec<(Option<usize>, &str)>,
     keywords: &[String],
     provenance: Option<KeywordMatchProvenance>,
 ) -> Vec<KeywordHit> {
@@ -100,7 +110,7 @@ fn collect_keyword_hits_from_lines(
     let mut seen = HashSet::new();
     let mut hits = Vec::new();
 
-    for line in lines {
+    for (line_cursor, line) in lines {
         if should_ignore_launcher_line(line) {
             continue;
         }
@@ -109,7 +119,7 @@ fn collect_keyword_hits_from_lines(
         for (keyword, lower_keyword) in &normalized_keywords {
             if lower_line.contains(lower_keyword) {
                 if is_negated_default_failure_match(lower_keyword, &lower_line)
-                    || is_default_review_marker_prose(lower_keyword, line)
+                    || is_instruction_or_search_review_marker_prose(lower_keyword, line)
                 {
                     continue;
                 }
@@ -119,7 +129,12 @@ fn collect_keyword_hits_from_lines(
                     hits.push(KeywordHit {
                         keyword: key.0,
                         line: key.1,
-                        provenance: provenance.clone(),
+                        provenance: provenance.clone().map(|mut provenance| {
+                            if let Some(cursor) = line_cursor {
+                                provenance.cursor = Some(cursor);
+                            }
+                            provenance
+                        }),
                     });
                 }
             }
@@ -169,20 +184,26 @@ fn is_negated_default_failure_match(lower_keyword: &str, lower_line: &str) -> bo
     }
 }
 
-fn is_default_review_marker_prose(lower_keyword: &str, line: &str) -> bool {
+fn is_instruction_or_search_review_marker_prose(lower_keyword: &str, line: &str) -> bool {
     if !matches!(lower_keyword, "blocker" | "request_changes" | "approve") {
         return false;
     }
 
-    let trimmed = line.trim();
-    let normalized = trimmed.to_ascii_lowercase();
+    let normalized = line.trim().to_ascii_lowercase();
     if normalized == lower_keyword {
         return false;
     }
-    !normalized
-        .strip_prefix(lower_keyword)
-        .map(|suffix| suffix.starts_with(':'))
-        .unwrap_or(false)
+
+    // Only suppress obvious instruction/search prose that mentions the review
+    // marker as text to look for. Fresh verdict prose such as
+    // "Final verdict APPROVE with evidence" or "I found a BLOCKER..." must
+    // still alert; stale prompt/search scrollback is handled by the appended
+    // output boundary before this filter runs.
+    normalized.contains("end with")
+        || normalized.contains("search ")
+        || normalized.contains("query ")
+        || normalized.contains("keywords")
+        || normalized.contains("using ralph until")
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -221,12 +242,17 @@ fn should_ignore_launcher_line(line: &str) -> bool {
         .any(|pattern| trimmed.contains(pattern))
 }
 
-fn appended_lines<'a>(previous: &'a str, current: &'a str) -> Vec<&'a str> {
+fn appended_lines_with_cursors<'a>(previous: &'a str, current: &'a str) -> Vec<(usize, &'a str)> {
     let previous_lines = previous.lines().collect::<Vec<_>>();
     let current_lines = current.lines().collect::<Vec<_>>();
     let overlap = overlapping_suffix_prefix_len(&previous_lines, &current_lines);
 
-    current_lines.into_iter().skip(overlap).collect()
+    current_lines
+        .into_iter()
+        .enumerate()
+        .skip(overlap)
+        .map(|(index, line)| (index + 1, line))
+        .collect()
 }
 
 fn overlapping_suffix_prefix_len(previous: &[&str], current: &[&str]) -> usize {
@@ -414,7 +440,7 @@ ISSUE2843_PR_READY";
     }
 
     #[test]
-    fn collect_keyword_hits_suppresses_default_marker_prose_but_keeps_custom_markers() {
+    fn collect_keyword_hits_suppresses_instruction_marker_prose_but_keeps_custom_markers() {
         let hits = collect_keyword_hits(
             "armed",
             "armed
@@ -431,6 +457,111 @@ ISSUE2843_PR_READY",
                 line: "ISSUE2843_PR_READY".into(),
                 provenance: None,
             }]
+        );
+    }
+
+    #[test]
+    fn collect_keyword_hits_alerts_on_fresh_review_verdict_prose() {
+        let hits = collect_keyword_hits_with_provenance(
+            "armed",
+            "armed
+Final verdict APPROVE with evidence
+REQUEST_CHANGES with evidence
+I found a BLOCKER in tmux cursor handling",
+            &["APPROVE".into(), "REQUEST_CHANGES".into(), "BLOCKER".into()],
+            KeywordMatchProvenance {
+                pane_id: "%11".into(),
+                pane_name: "0.0".into(),
+                cursor: None,
+                source: KeywordMatchSource::FreshOutput,
+            },
+        );
+
+        assert_eq!(
+            hits.iter().map(|hit| hit.line.as_str()).collect::<Vec<_>>(),
+            vec![
+                "Final verdict APPROVE with evidence",
+                "REQUEST_CHANGES with evidence",
+                "I found a BLOCKER in tmux cursor handling",
+            ]
+        );
+        assert_eq!(hits[0].keyword, "APPROVE");
+        assert_eq!(hits[0].provenance.as_ref().unwrap().cursor, Some(2));
+        assert_eq!(hits[1].keyword, "REQUEST_CHANGES");
+        assert_eq!(hits[1].provenance.as_ref().unwrap().cursor, Some(3));
+        assert_eq!(hits[2].keyword, "BLOCKER");
+        assert_eq!(hits[2].provenance.as_ref().unwrap().cursor, Some(4));
+    }
+
+    #[test]
+    fn collect_keyword_hits_treats_existing_prompt_and_search_markers_as_existing_buffer() {
+        // Regression for #220 / Discord message 1502008605518594172:
+        // markers present in the user's initial prompt and search/query text
+        // are registration-time scrollback, not fresh model output.
+        let previous = "Welcome
+End with PR_READY #220 and summary
+Search keywords.*...PR_READY";
+        let current = "Welcome
+End with PR_READY #220 and summary
+Search keywords.*...PR_READY
+still running";
+
+        let hits = collect_keyword_hits(previous, current, &["PR_READY".into()]);
+
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn collect_keyword_hits_suppresses_existing_prompt_search_but_keeps_fresh_custom_marker() {
+        let previous = "Welcome
+End with PR_READY #220 and summary
+Search keywords.*...PR_READY";
+        let current = "Welcome
+End with PR_READY #220 and summary
+Search keywords.*...PR_READY
+still running
+PR_READY #220";
+
+        let hits = collect_keyword_hits_with_provenance(
+            previous,
+            current,
+            &["PR_READY".into()],
+            KeywordMatchProvenance {
+                pane_id: "%9".into(),
+                pane_name: "0.0".into(),
+                cursor: None,
+                source: KeywordMatchSource::FreshOutput,
+            },
+        );
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, "PR_READY #220");
+        assert_eq!(hits[0].provenance.as_ref().unwrap().cursor, Some(5));
+    }
+
+    #[test]
+    fn collect_keyword_hits_keeps_exact_cursor_for_fresh_custom_marker() {
+        let hits = collect_keyword_hits_with_provenance(
+            "boot",
+            "boot
+working
+ISSUE220_PR_READY",
+            &["ISSUE220_PR_READY".into()],
+            KeywordMatchProvenance {
+                pane_id: "%7".into(),
+                pane_name: "0.0".into(),
+                cursor: None,
+                source: KeywordMatchSource::FreshOutput,
+            },
+        );
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].keyword, "ISSUE220_PR_READY");
+        assert_eq!(hits[0].line, "ISSUE220_PR_READY");
+        assert_eq!(hits[0].provenance.as_ref().unwrap().cursor, Some(3));
+        assert_eq!(
+            hits[0].provenance.as_ref().unwrap().source,
+            KeywordMatchSource::FreshOutput
         );
     }
 

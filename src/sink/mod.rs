@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod local_file;
 pub mod slack;
 
 use async_trait::async_trait;
@@ -8,13 +9,17 @@ use crate::events::MessageFormat;
 use serde_json::Value;
 
 pub use discord::DiscordSink;
+pub use local_file::LocalFileSink;
 pub use slack::SlackSink;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SinkTarget {
     DiscordChannel(String),
+    DiscordThread(String),
     DiscordWebhook(String),
+    SlackChannel(String),
     SlackWebhook(String),
+    LocalFile(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

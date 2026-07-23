@@ -10,8 +10,110 @@
 </p>
 
 > **⭐ Optional support:** the interactive repo-local install paths (`./install.sh` and `clawhip install` from a clone) can offer to star this repo after a successful install when `gh` is installed and authenticated. Skip it with `--skip-star-prompt` or `CLAWHIP_SKIP_STAR_PROMPT=1`.
+> **Community:** Join the clawhip Discord at https://discord.gg/jq6jnSGABY.
 
-clawhip is a daemon-first Discord notification router with a typed event pipeline, extracted sources, and a clean renderer/sink split.
+**gajae-claw (clawhip) is the control plane for agents:** route events from GitHub, Discord, tmux, and other tools to the right human or agent, record what happened, and separate automatic actions from approval-required actions.
+
+## Start with recipes
+
+Use clawhip when you have an event, a destination, and a policy for whether the next step can happen automatically or needs a human/operator approval. These recipes use placeholder channel IDs and names; replace them with your own public-safe values.
+
+### Recipe 1: PR opened -> notify the maintainer/project channel
+
+When GitHub reports a pull request event, route it to the project channel so the right maintainer sees it.
+
+```toml
+# ~/.clawhip/config.toml
+[[routes]]
+event = "github.pr-status-changed"
+filter = { repo = "my-app" }
+sink = "discord"
+channel = "PROJECT_CHANNEL_ID"
+format = "compact"
+```
+
+Example event shape:
+
+```json
+{
+  "source": "github",
+  "event": "pull_request.opened",
+  "repo": "my-app",
+  "pr": 42,
+  "action": "notify",
+  "target": "PROJECT_CHANNEL_ID"
+}
+```
+
+Result: clawhip records the routed event and posts a compact PR notification to the project channel.
+
+### Recipe 2: CI failed twice -> summarize and escalate
+
+Let routine CI status flow to the project channel, but reserve an escalation route for repeated failures. Your CI watcher or automation can emit the second-failure event after it observes two failed runs for the same PR or branch.
+
+```toml
+# ~/.clawhip/config.toml
+[[routes]]
+event = "github.ci-failed"
+filter = { repo = "my-app" }
+sink = "discord"
+channel = "PROJECT_CHANNEL_ID"
+format = "compact"
+
+[[routes]]
+event = "ci.failed-twice"
+filter = { repo = "my-app" }
+sink = "discord"
+channel = "ESCALATION_CHANNEL_ID"
+format = "alert"
+```
+
+Example escalation payload:
+
+```json
+{
+  "source": "ci-watcher",
+  "event": "ci.failed-twice",
+  "repo": "my-app",
+  "branch": "feature/auth-flow",
+  "summary": "CI failed twice on the same PR; test logs point at integration/auth_test.",
+  "action": "summarize_and_escalate",
+  "target": "ESCALATION_CHANNEL_ID"
+}
+```
+
+Result: normal failures stay low-noise; repeated failures get a short summary in the escalation channel.
+
+### Recipe 3: cleanup, merge, or config change requested -> require operator approval
+
+Some requests should notify an operator instead of letting an agent act immediately. Send those events to an approval channel and keep the requested action in the message body.
+
+```toml
+# ~/.clawhip/config.toml
+[[routes]]
+event = "agent.approval-requested"
+filter = { repo = "my-app" }
+sink = "discord"
+channel = "APPROVAL_CHANNEL_ID"
+format = "alert"
+```
+
+Example approval event:
+
+```json
+{
+  "source": "agent",
+  "event": "agent.approval-requested",
+  "repo": "my-app",
+  "request": "merge PR #42 after checks pass",
+  "reason": "merge changes the shared branch and should be operator-approved",
+  "policy": "approval_required",
+  "action": "notify_operator",
+  "target": "APPROVAL_CHANNEL_ID"
+}
+```
+
+Result: clawhip records the request and alerts an operator; the agent waits for explicit approval before cleanup, merge, or config-changing work.
 
 Human install pitch:
 
@@ -80,71 +182,6 @@ clawhip deliver --session <tmux-session> --prompt "..." --max-enters 4
 `clawhip deliver` validates repo-local prompt-submit hook setup, confirms the target pane is an
 active Codex/Claude (including OMC/OMX wrapper) session, then retries Enter until
 `.clawhip/state/prompt-submit.json` changes or the bounded retry limit is reached.
-
-## Recipes
-
-### Dev-channel follow-up cron for Clawdbot
-
-One practical pattern is:
-
-```text
-system cron -> clawhip send -> Discord dev channel -> Clawdbot follows up on open PRs/issues
-```
-
-This works well when you want a lightweight scheduler that nudges your dev channels every 30 minutes without keeping a gateway/LLM session open just for reminders.
-
-Example follow-up script:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# dev-followup.sh
-# Send a periodic follow-up to active dev channels.
-
-CHANNELS=(
-  "1480171113253175356|clawhip"
-  "1480171113253175357|gaebal-gajae-api"
-  "1480171113253175358|worker-ops"
-)
-
-MENTION="<@1465264645320474637>"
-
-for entry in "${CHANNELS[@]}"; do
-  IFS='|' read -r channel_id project_name <<< "$entry"
-
-  clawhip send \
-    --channel "$channel_id" \
-    --message "🔄 **[$project_name] Dev follow-up** $MENTION — check open PRs/issues, review open blockers, merge anything ready, and continue any stalled work."
-done
-```
-
-You can also send one-off nudges manually:
-
-```bash
-clawhip send \
-  --channel 1480171113253175356 \
-  --message "🔄 **[clawhip] Dev follow-up** <@1465264645320474637> — check open PRs/issues, review blockers, and continue anything stalled."
-
-clawhip send \
-  --channel 1480171113253175357 \
-  --message "🔄 **[gaebal-gajae-api] PR sweep** <@1465264645320474637> — review open PRs, merge anything ready, and post blockers on anything stuck."
-```
-
-Example system cron config:
-
-```crontab
-SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
-
-*/30 * * * * bellman /home/bellman/bin/dev-followup.sh >> /tmp/dev-followup.log 2>&1
-```
-
-Operational notes:
-- keep one channel entry per active repo/project
-- mention your Clawdbot/OpenClaw bot user so the bot actually wakes up and acts
-- use plain operational language like "check open PRs/issues", "review blockers", and "continue stalled work"
-- this keeps scheduling outside the agent loop: cron handles timing, clawhip handles delivery, Discord handles the handoff
 
 ## Filesystem-offloaded memory pattern
 
@@ -673,8 +710,8 @@ Route model:
 event = "github.*"
 filter = { repo = "clawhip" }
 sink = "discord"
-channel = "1480171113253175356"
-mention = "<@1465264645320474637>"
+channel = "PROJECT_CHANNEL_ID"
+mention = "@maintainer-or-team"
 format = "compact"
 allow_dynamic_tokens = false
 
@@ -682,7 +719,15 @@ allow_dynamic_tokens = false
 event = "session.*"
 filter = { tool = "omx", repo_name = "clawhip" }
 sink = "discord"
-channel = "1480171113253175356"
+channel = "PROJECT_CHANNEL_ID"
+format = "compact"
+allow_dynamic_tokens = false
+
+[[routes]]
+event = "session.*"
+filter = { tool = "omx", repo_name = "clawhip", session_id = "sess-123" }
+sink = "discord"
+thread = "DISCORD_THREAD_ID"
 format = "compact"
 allow_dynamic_tokens = false
 
@@ -690,7 +735,7 @@ allow_dynamic_tokens = false
 event = "agent.*"
 filter = { project = "clawhip" }
 sink = "discord"
-channel = "1480171113253175356"
+channel = "PROJECT_CHANNEL_ID"
 format = "alert"
 allow_dynamic_tokens = false
 ```
@@ -700,6 +745,41 @@ Resolution rules:
 2. payload filter match
 3. route sink / target / format / template / mention applied
 4. default fallback used if route fields absent
+
+Discord thread targets:
+- Use `thread = "DISCORD_THREAD_ID"` on a Discord route to deliver directly into
+  a thread. This is explicit; clawhip does not infer threads from `channel` IDs,
+  names, session labels, or payload fields.
+- A Discord route may set exactly one delivery target: `channel`, `thread`, or
+  `webhook`.
+- Thread delivery uses the configured thread ID as the Discord message target.
+  If Discord reports the thread as archived, missing, forbidden, or otherwise
+  unreachable, clawhip records a concise delivery error and does **not**
+  automatically fall back to the parent channel.
+- Diagnostics and binding verification only reference configured IDs and status
+  outcomes; clawhip does not list or dump private channel/thread inventories.
+
+## Gateway allowlist diagnostics
+
+When clawhip sends through a local Clawdbot gateway, route channel IDs must also
+be present in the gateway's Discord allowlist. Check that boundary with:
+
+```bash
+clawhip config verify-gateway-allowlist
+clawhip config verify-gateway-allowlist --gateway-config ~/.clawdbot/clawdbot.json
+clawhip config verify-gateway-allowlist --json
+```
+
+The default gateway config path is `~/.clawdbot/clawdbot.json` when `HOME` is
+available; use `--gateway-config <path>` for any other local file. The command
+reads only `channels.discord.guilds[*].channels.<channel_id>.allow = true`,
+compares it with clawhip's configured Discord channel destinations, and exits
+non-zero when any destination is missing or not explicitly allowed.
+
+Output is public-safe by design: text and JSON reports include counts, clawhip
+source labels, and channel IDs only. They do not dump gateway tokens, webhook
+URLs, raw config payloads, or unrelated gateway fields. Webhooks, Slack routes,
+localfile routes, and thread-only targets are outside this allowlist check.
 
 ## Dynamic token contract
 
@@ -813,6 +893,7 @@ Required live sign-off presets:
 clawhip                 # start daemon
 clawhip status          # daemon health
 clawhip config          # bounded preset editor / config inspection
+clawhip config verify-gateway-allowlist  # check Clawdbot gateway allowlist coverage
 clawhip send ...        # thin client custom event
 clawhip github ...      # thin client GitHub event
 clawhip git ...         # thin client git event
@@ -820,7 +901,41 @@ clawhip agent ...       # thin client agent lifecycle event
 clawhip native hook ... # provider-native hook thin client
 clawhip tmux ...        # thin client / wrapper surface
 clawhip plugin list     # list installed/bundled shell-hook plugins
+clawhip gajae status    # check local GAJAE CLI bridge availability
 ```
+
+
+## GAJAE CLI bridge
+
+`clawhip gajae` provides a small Rust CLI bridge for local GAJAE dogfooding:
+
+```bash
+clawhip gajae status
+clawhip gajae profile install
+clawhip gajae preflight
+clawhip gajae doctor --repo owner/repo
+clawhip gajae profile verify
+```
+
+`status` discovers GAJAE from `GAJAE_BIN` first, then the `gajae` executable on `PATH`, and verifies it by running `gajae --help`. `profile install` forwards to `gajae clawhip profile install` with stdout/stderr attached so GAJAE owns the profile update flow. `preflight` is the #257 public-safe readiness check: it verifies GAJAE discovery, required receipt validators, the installed clawhip profile, public-safe output mode, and disabled raw-payload export, then prints a concise JSON summary safe to paste into issues or PRs. Preflight does not mutate cron/config, does not contact GitHub, and does not require GAJAE for baseline clawhip routing. `doctor` extends those bounded diagnostics with schema capability, handler-command drift, and optional dry-run onboard-plan checks. `profile verify` checks the installed profile and handler commands without executing routes. Doctor and verify never run `gajae clawhip profile install` and never mutate live profiles.
+
+GAJAE route handlers are daemon-side and default off. Enable them explicitly and attach a bounded handler to an approved route:
+
+```toml
+[gajae]
+handlers_enabled = true
+handler_timeout_ms = 5000
+handler_max_output_bytes = 16384
+
+[[routes]]
+event = "github.pr-*"
+filter = { repo = "clawhip" }
+sink = "discord"
+channel = "OPS_CHANNEL_ID"
+gajae = { subcommand = "handle-event", args = ["--profile", "safe"] }
+```
+
+Handler execution uses the `GAJAE_BIN` override or `gajae` on `PATH`, runs only fixed allowlisted GAJAE handler subcommands, passes the event JSON on child stdin, closes parent stdin, enforces timeout/output caps, and emits `gajae.handler.completed`, `gajae.handler.failed`, `gajae.handler.timeout`, or `gajae.handler.approval-required` through normal routing. Handler output is data-only; mutation-shaped output is converted to an approval-required event instead of being applied automatically.
 
 ## Internal PR fast-path
 
@@ -837,3 +952,10 @@ scripts/internal-pr-format-gate.sh --fix
 ```
 
 This catches the cheapest class of red CI (`cargo fmt` only) locally before PR create/update churn.
+
+## GEO visibility benchmark
+
+clawhip includes a [`geobench`](https://github.com/NomaDamas/geobench) product spec for measuring LLM hit rate, MRR, share of voice, and citations for event-to-channel AI-agent operations queries.
+
+- Spec: [`geobench/clawhip.yaml`](geobench/clawhip.yaml)
+- Runbook: [`docs/geobench.md`](docs/geobench.md)

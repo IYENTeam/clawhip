@@ -8,6 +8,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::Result;
+use crate::discord_watch::DiscordMessageCreateEvent;
 use crate::render::{DefaultRenderer, Renderer};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, ValueEnum)]
@@ -547,6 +548,114 @@ impl IncomingEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn gajae_release_hold(
+        repo: String,
+        target: String,
+        action: String,
+        version: String,
+        disallowed_action: String,
+        why_autonomous_disallowed: String,
+        actor: Option<String>,
+    ) -> Self {
+        Self::gajae_hold(
+            "gajae.release.hold",
+            repo,
+            target,
+            action,
+            "release".to_string(),
+            Some(version),
+            None,
+            disallowed_action,
+            why_autonomous_disallowed,
+            actor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gajae_merge_hold(
+        repo: String,
+        target: String,
+        action: String,
+        sha: String,
+        disallowed_action: String,
+        why_autonomous_disallowed: String,
+        actor: Option<String>,
+    ) -> Self {
+        Self::gajae_hold(
+            "gajae.merge.hold",
+            repo,
+            target,
+            action,
+            "main-merge".to_string(),
+            None,
+            Some(sha),
+            disallowed_action,
+            why_autonomous_disallowed,
+            actor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gajae_hold(
+        kind: &str,
+        repo: String,
+        target: String,
+        action: String,
+        boundary: String,
+        version: Option<String>,
+        sha: Option<String>,
+        disallowed_action: String,
+        why_autonomous_disallowed: String,
+        actor: Option<String>,
+    ) -> Self {
+        let relevant_ref = version.as_deref().or(sha.as_deref()).unwrap_or_default();
+        let dedupe_key = gajae_hold_dedupe_key(&repo, &target, &action, relevant_ref);
+        let mut payload = Map::new();
+        payload.insert("repo".to_string(), json!(repo));
+        payload.insert("target".to_string(), json!(target.clone()));
+        payload.insert("action".to_string(), json!(action));
+        payload.insert("boundary".to_string(), json!(boundary));
+        payload.insert("disallowed_action".to_string(), json!(disallowed_action));
+        payload.insert(
+            "why_autonomous_disallowed".to_string(),
+            json!(why_autonomous_disallowed),
+        );
+        payload.insert("autonomous_execution_allowed".to_string(), json!(false));
+        payload.insert("held_action_executed".to_string(), json!(false));
+        payload.insert("dedupe_key".to_string(), json!(dedupe_key));
+        if let Some(version) = version {
+            payload.insert("version".to_string(), json!(version));
+        }
+        if let Some(sha) = sha {
+            payload.insert("sha".to_string(), json!(sha));
+        }
+        if let Some(actor) = actor {
+            payload.insert("actor".to_string(), json!(actor));
+        }
+
+        Self {
+            kind: kind.to_string(),
+            channel: Some(target),
+            mention: None,
+            format: Some(MessageFormat::Compact),
+            template: None,
+            payload: Value::Object(payload),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn discord_message_create(message: DiscordMessageCreateEvent) -> Self {
+        Self {
+            kind: "discord.message-create".to_string(),
+            channel: Some(message.channel_id.clone()),
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!(message),
+        }
+    }
+
     pub fn tmux_keyword(
         session: String,
         keyword: String,
@@ -691,6 +800,9 @@ impl IncomingEvent {
     pub fn canonical_kind(&self) -> &str {
         match self.kind.as_str() {
             "issue-opened" => "github.issue-opened",
+            "discord.message_create" | "discord.message.created" | "discord.message-create" => {
+                "discord.message-create"
+            }
             "git.pr-status-changed" => "github.pr-status-changed",
             "session-start" | "started" => "session.started",
             "session-idle" | "blocked" => "session.blocked",
@@ -1191,6 +1303,16 @@ fn normalize_native_metadata(payload: &mut Value, raw_kind: &str, canonical_kind
     insert_string_if_missing(object, "tmux_pane_tty", tmux_pane_tty);
     insert_bool_if_missing(object, "tmux_attached", tmux_attached);
     insert_u64_if_missing(object, "tmux_client_count", tmux_client_count);
+}
+
+fn gajae_hold_dedupe_key(repo: &str, target: &str, action: &str, relevant_ref: &str) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        repo.trim(),
+        target.trim(),
+        action.trim(),
+        relevant_ref.trim()
+    )
 }
 
 fn now_rfc3339() -> String {
@@ -2308,5 +2430,33 @@ mod tests {
             assert_eq!(event.payload["status"], json!(expected_status));
             assert_eq!(event.payload["normalized_event"], json!(expected_status));
         }
+    }
+
+    #[test]
+    fn normalize_event_maps_question_requested_to_session_blocked() {
+        let event = normalize_event(IncomingEvent {
+            kind: "question.requested".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "tool": "codex",
+                "agent_name": "codex",
+                "session_id": "sess-234",
+                "repo_name": "clawhip",
+                "tool_name": "ask_user_question",
+                "route_key": "question.requested",
+                "question_summary": "Approve the deploy?",
+                "summary": "Approve the deploy?"
+            }),
+        });
+
+        assert_eq!(event.kind, "session.blocked");
+        assert_eq!(event.payload["raw_event"], json!("question.requested"));
+        assert_eq!(event.payload["contract_event"], json!("session.blocked"));
+        assert_eq!(event.payload["status"], json!("blocked"));
+        assert_eq!(event.payload["normalized_event"], json!("blocked"));
+        assert_eq!(event.payload["summary"], json!("Approve the deploy?"));
     }
 }

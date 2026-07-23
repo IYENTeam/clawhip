@@ -1,11 +1,11 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use time::{OffsetDateTime, Weekday};
 use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
@@ -127,11 +127,7 @@ struct CronScheduler {
     jobs: Vec<ScheduledCronJob>,
     last_processed_minute: Option<i64>,
     job_fingerprints: HashMap<String, String>,
-    /// Counts how many consecutive ticks each job has been at the same
-    /// zero-backlog fingerprint.  Used to cycle through hardening candidates
-    /// so the operator always sees a fresh improvement suggestion rather than
-    /// silence.
-    zero_backlog_counters: HashMap<String, u64>,
+    zero_backlog_suppressions: HashMap<String, ZeroBacklogSuppression>,
     state_path: Option<PathBuf>,
 }
 
@@ -154,14 +150,14 @@ impl CronScheduler {
             });
         }
 
-        let (last_processed_minute, job_fingerprints, zero_backlog_counters) =
+        let (last_processed_minute, job_fingerprints, zero_backlog_suppressions) =
             match state_path.as_deref() {
                 Some(path) => {
                     let state = load_scheduler_state(path)?;
                     (
                         state.last_processed_minute,
                         state.job_fingerprints,
-                        state.zero_backlog_counters,
+                        state.zero_backlog_suppressions,
                     )
                 }
                 None => (None, HashMap::new(), HashMap::new()),
@@ -171,7 +167,7 @@ impl CronScheduler {
             jobs,
             last_processed_minute,
             job_fingerprints,
-            zero_backlog_counters,
+            zero_backlog_suppressions,
             state_path,
         })
     }
@@ -202,32 +198,50 @@ impl CronScheduler {
                         .state_file
                         .as_deref()
                         .and_then(evaluate_state_file);
-                    if should_suppress(&state, self.job_fingerprints.get(&job.config.id)) {
-                        // Rather than staying silent, surface one hardening
-                        // candidate so zero-backlog ticks remain actionable.
-                        let cycle = {
-                            let c = self
-                                .zero_backlog_counters
-                                .entry(job.config.id.clone())
-                                .or_insert(0);
-                            *c += 1;
-                            *c
-                        };
-                        emitter
-                            .emit(build_hardening_event(&job.config, state.as_ref(), cycle))
-                            .await?;
-                        executed.push(job.config.id.clone());
+                    if let Some(eval) = state.as_ref()
+                        && should_suppress(
+                            &job.config,
+                            eval,
+                            self.job_fingerprints.get(&job.config.id),
+                            self.zero_backlog_suppressions.get(&job.config.id),
+                            scheduled_for.unix_timestamp(),
+                        )
+                    {
+                        if let Some(suppression) =
+                            self.zero_backlog_suppressions.get(&job.config.id)
+                        {
+                            eprintln!(
+                                "{}",
+                                suppression_notice(
+                                    &job.config.id,
+                                    suppression,
+                                    scheduled_for.unix_timestamp(),
+                                )
+                            );
+                        }
                         continue;
                     }
-                    // Normal emission: reset any accumulated hardening cycle.
-                    self.zero_backlog_counters.remove(&job.config.id);
                     emitter
                         .emit(build_job_event(&job.config, state.as_ref()))
                         .await?;
                     executed.push(job.config.id.clone());
                     if let Some(eval) = state {
                         self.job_fingerprints
-                            .insert(job.config.id.clone(), eval.fingerprint);
+                            .insert(job.config.id.clone(), eval.fingerprint.clone());
+                        if eval.zero_backlog && job.config.zero_backlog_suppression_ttl_secs > 0 {
+                            self.zero_backlog_suppressions.insert(
+                                job.config.id.clone(),
+                                ZeroBacklogSuppression {
+                                    key: eval.suppression_key,
+                                    expires_at: scheduled_for.unix_timestamp()
+                                        + job.config.zero_backlog_suppression_ttl_secs as i64,
+                                },
+                            );
+                        } else {
+                            self.zero_backlog_suppressions.remove(&job.config.id);
+                        }
+                    } else {
+                        self.zero_backlog_suppressions.remove(&job.config.id);
                     }
                 }
             }
@@ -248,7 +262,7 @@ impl CronScheduler {
             &CronSchedulerState {
                 last_processed_minute: self.last_processed_minute,
                 job_fingerprints: self.job_fingerprints.clone(),
-                zero_backlog_counters: self.zero_backlog_counters.clone(),
+                zero_backlog_suppressions: self.zero_backlog_suppressions.clone(),
             },
         )
     }
@@ -289,90 +303,46 @@ fn build_job_event(job: &CronJob, state: Option<&StateEvaluation>) -> IncomingEv
                 "repo_state_zero_backlog".to_string(),
                 json!(state.zero_backlog),
             );
-        }
-    }
-
-    event
-}
-
-/// Hardening / operator-UX improvement lanes surfaced when a zero-backlog
-/// cron job would otherwise be silently suppressed.  The scheduler cycles
-/// through these in order so consecutive quiet ticks each suggest a fresh,
-/// concrete action rather than repeating a no-op status confirmation.
-///
-/// Each entry is `(lane_label, rationale)` where:
-/// - `lane_label` — a short imperative phrase naming the improvement area
-/// - `rationale`  — one sentence explaining why it's worth doing right now
-const HARDENING_CANDIDATES: &[(&str, &str)] = &[
-    (
-        "audit tmux-wrapper false-positive rate",
-        "scan last-week logs for zero-delta keyword hits that fired on noise",
-    ),
-    (
-        "verify Discord channel bindings",
-        "run binding-verify to catch stale channel config before the next incident",
-    ),
-    (
-        "review cron cadence vs review velocity",
-        "check whether follow-up schedules match actual PR/issue turnaround times",
-    ),
-    (
-        "audit zero-delta event spam",
-        "repeated identical payloads may indicate a misconfigured state_file path",
-    ),
-    (
-        "review release/main merge friction",
-        "recurring conflicts could be eliminated with an explicit merge strategy or branch policy",
-    ),
-];
-
-/// Build the event emitted when a job would be suppressed due to a stable
-/// zero-backlog fingerprint.  `cycle` is the 1-based count of consecutive
-/// suppressed ticks for this job; it drives candidate selection and is
-/// embedded in the payload so downstream consumers can observe the rotation.
-fn build_hardening_event(
-    job: &CronJob,
-    state: Option<&StateEvaluation>,
-    cycle: u64,
-) -> IncomingEvent {
-    let idx = ((cycle - 1) as usize) % HARDENING_CANDIDATES.len();
-    let (lane, rationale) = HARDENING_CANDIDATES[idx];
-    let message = format!("[zero-backlog hardening] {lane} — {rationale}");
-    let mut event = IncomingEvent::custom(job.channel.clone(), message)
-        .with_mention(job.mention.clone())
-        .with_format(job.format.clone());
-    if let Some(payload) = event.payload.as_object_mut() {
-        payload.insert("cron_job_id".to_string(), json!(job.id));
-        payload.insert("cron_schedule".to_string(), json!(job.schedule));
-        payload.insert("cron_timezone".to_string(), json!(job.timezone));
-        payload.insert("hardening_cycle".to_string(), json!(cycle));
-        payload.insert("hardening_lane".to_string(), json!(lane));
-        if let Some(state) = state {
             payload.insert(
-                "repo_state_fingerprint".to_string(),
-                json!(state.fingerprint),
+                "repo_state_observation_source".to_string(),
+                json!(state.observation_source),
             );
             payload.insert(
-                "repo_state_zero_backlog".to_string(),
-                json!(state.zero_backlog),
+                "repo_state_observation_confidence".to_string(),
+                json!(state.observation_confidence),
+            );
+            payload.insert(
+                "repo_state_github_api_fallback".to_string(),
+                json!(state.github_api_fallback),
             );
         }
     }
+
     event
 }
 
 /// Snapshot derived from a cron job's `state_file`, used to decide whether to
-/// suppress an emission and to attach context to events that do fire.
+/// suppress an emission and to attach public-safe context to events that do fire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StateEvaluation {
-    /// Canonical JSON serialization of the state file contents. Any byte-level
-    /// change in the parsed value changes the fingerprint, which breaks
-    /// suppression and causes the job to fire immediately on the next tick.
+    /// Deterministic bounded hash of a canonical public-safe subset of the state.
     fingerprint: String,
-    /// True only when both `open_issues` and `open_prs` are present and zero.
-    /// Missing counters default to non-zero so jobs keep firing until the
-    /// state file explicitly advertises a zero backlog.
+    /// Deterministic bounded key used for TTL suppression. It never includes raw
+    /// logs, config, tokens, private channel payloads, or full receipt bodies.
+    suppression_key: String,
+    /// True only for validated GAJAE zero-backlog/follow-up receipts with zero
+    /// PRs/issues, green dev CI, no action-needed sessions, and no holds.
     zero_backlog: bool,
+    /// Public-safe label for where this observation came from (e.g.
+    /// `github-api`, `github-api-fallback`, or an operator-provided source).
+    observation_source: String,
+    /// Confidence marker: `validated` for full zero-backlog authority,
+    /// `fallback-unverified` for a degraded API fallback lacking evidence,
+    /// otherwise `reported`.
+    observation_confidence: String,
+    /// True when the receipt signals a GitHub API/rate-limit failure, detected
+    /// separately from an empty backlog.
+    github_api_fallback: bool,
 }
 
 /// Read and evaluate a cron job's `state_file`. Returns `None` when the file
@@ -385,34 +355,255 @@ fn evaluate_state_file(path: &Path) -> Option<StateEvaluation> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let open_issues = value
-        .get("open_issues")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1);
-    let open_prs = value.get("open_prs").and_then(|v| v.as_u64()).unwrap_or(1);
-    let zero_backlog = open_issues == 0 && open_prs == 0;
-    let fingerprint = serde_json::to_string(&value).ok()?;
+    let public_state = public_suppression_state(&value);
+    let canonical = serde_json::to_string(&public_state).ok()?;
+    let fingerprint = stable_hash_hex(canonical.as_bytes());
+    let suppression_key = format!("gajae-zero-backlog:{fingerprint}");
+    let github_api_fallback = github_api_failed(&value);
+    let zero_backlog = is_validated_zero_backlog_receipt(&value);
     Some(StateEvaluation {
         fingerprint,
+        suppression_key,
+        observation_source: observation_source(&value, github_api_fallback),
+        observation_confidence: observation_confidence(&value, zero_backlog, github_api_fallback),
         zero_backlog,
+        github_api_fallback,
     })
 }
 
-/// A cron job should be suppressed only when its state file advertises a zero
-/// backlog *and* its canonical fingerprint matches the one stored from the
-/// previous emission. Any other case (non-zero backlog, missing state,
-/// different fingerprint, first fire) fires the job.
-fn should_suppress(state: &Option<StateEvaluation>, previous_fingerprint: Option<&String>) -> bool {
-    let Some(eval) = state else {
-        return false;
-    };
-    if !eval.zero_backlog {
+fn public_suppression_state(value: &Value) -> BTreeMap<String, Value> {
+    let mut state = BTreeMap::new();
+    insert_public_value(&mut state, value, "family");
+    insert_public_value(&mut state, value, "status");
+    insert_public_value(&mut state, value, "receipt_id");
+    insert_public_value(&mut state, value, "subject");
+    insert_public_value(&mut state, value, "open_issues");
+    insert_public_value(&mut state, value, "open_prs");
+    insert_public_value(&mut state, value, "latest_dev_ci");
+    insert_public_value(&mut state, value, "dev_ci");
+    // Branch head / check-summary digests so a real `dev` head change (a new
+    // commit landing with otherwise-identical counts and CI label) alters the
+    // fingerprint and re-emits, instead of being coalesced as an unchanged tick.
+    // Values pass through `bounded_public_token`, so only public-safe identifiers
+    // (e.g. a commit SHA) are retained.
+    insert_public_value(&mut state, value, "dev_head");
+    insert_public_value(&mut state, value, "branch_head");
+    insert_public_value(&mut state, value, "head_sha");
+    insert_public_value(&mut state, value, "dev_check_summary");
+    insert_public_value(&mut state, value, "check_summary");
+    insert_public_value(&mut state, value, "active_sessions_needing_action");
+    insert_public_value(&mut state, value, "sessions_needing_action");
+    insert_public_value(&mut state, value, "session_stale_events");
+    insert_public_value(&mut state, value, "approval_hold");
+    insert_public_value(&mut state, value, "release_hold");
+    insert_public_value(&mut state, value, "action_needed_sessions");
+    insert_public_value(&mut state, value, "action_required");
+    insert_public_value(&mut state, value, "observation_source");
+    insert_public_value(&mut state, value, "stop_decision");
+    insert_public_value(&mut state, value, "new_event_id");
+    insert_public_value(&mut state, value, "github_api_status");
+    insert_public_value(&mut state, value, "github_api");
+    insert_public_value(&mut state, value, "observation_source");
+    insert_public_value(&mut state, value, "fallback_evidence");
+    state
+}
+
+fn insert_public_value(state: &mut BTreeMap<String, Value>, value: &Value, key: &str) {
+    if let Some(value) = value.get(key) {
+        state.insert(key.to_string(), public_value(value));
+    }
+}
+
+fn public_value(value: &Value) -> Value {
+    match value {
+        Value::String(value) => json!(bounded_public_token(value)),
+        Value::Number(_) | Value::Bool(_) | Value::Null => value.clone(),
+        Value::Array(values) => json!(values.len()),
+        Value::Object(_) => json!("object"),
+    }
+}
+
+fn bounded_public_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
+        .take(96)
+        .collect()
+}
+
+fn is_validated_zero_backlog_receipt(value: &Value) -> bool {
+    is_full_zero_backlog_receipt(value) || is_lightweight_zero_backlog_checkpoint(value)
+}
+
+/// Full zero-backlog receipt: requires green dev CI and explicit session/hold
+/// evidence in addition to a clear backlog. Used for richer transitions.
+fn is_full_zero_backlog_receipt(value: &Value) -> bool {
+    validated_zero_backlog_family(value)
+        && receipt_status_validated(value)
+        && numeric_field(value, "open_issues") == Some(0)
+        && numeric_field(value, "open_prs") == Some(0)
+        && ci_is_green(value)
+        && numeric_field(value, "active_sessions_needing_action").unwrap_or(0) == 0
+        && numeric_field(value, "sessions_needing_action").unwrap_or(0) == 0
+        && numeric_field(value, "session_stale_events").unwrap_or(0) == 0
+        && !bool_field(value, "approval_hold")
+        && !bool_field(value, "release_hold")
+        && fallback_has_authority(value)
+}
+
+/// Lightweight zero-backlog follow-up checkpoint: a compact receipt for routine
+/// ticks. It carries observed counts and a deterministic stop decision but
+/// intentionally omits the full CI/session evidence. Suppression only applies
+/// when the checkpoint itself decided to suppress the follow-up.
+fn is_lightweight_zero_backlog_checkpoint(value: &Value) -> bool {
+    value.get("family").and_then(Value::as_str)
+        == Some(crate::gajae::ZERO_BACKLOG_FOLLOWUP_CHECKPOINT_FAMILY)
+        && receipt_status_validated(value)
+        && numeric_field(value, "open_issues") == Some(0)
+        && numeric_field(value, "open_prs") == Some(0)
+        && numeric_field(value, "action_needed_sessions").unwrap_or(0) == 0
+        && !bool_field(value, "approval_hold")
+        && !bool_field(value, "release_hold")
+        && !bool_field(value, "action_required")
+        && value.get("stop_decision").and_then(Value::as_str) == Some("suppress-followup")
+        && bool_field(value, "stop_decision_deterministic")
+}
+
+fn validated_zero_backlog_family(value: &Value) -> bool {
+    matches!(
+        value.get("family").and_then(Value::as_str),
+        Some(
+            "runtime-followup-receipt"
+                | "zero-backlog-checkpoint"
+                | "backlog-suppression-snapshot"
+                | "zero-backlog-post-merge-event-coalescing"
+        )
+    )
+}
+
+fn receipt_status_validated(value: &Value) -> bool {
+    matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("validated" | "valid")
+    )
+}
+
+fn ci_is_green(value: &Value) -> bool {
+    let status = value
+        .get("latest_dev_ci")
+        .or_else(|| value.get("dev_ci"))
+        .and_then(Value::as_str);
+    matches!(status, Some("green" | "passed" | "success"))
+}
+
+fn numeric_field(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Detect a GitHub API / rate-limit failure from a receipt, separately from an
+/// empty backlog. A degraded observation must never be silently treated like a
+/// healthy zero-backlog confirmation.
+fn github_api_failed(value: &Value) -> bool {
+    let status = value
+        .get("github_api_status")
+        .or_else(|| value.get("github_api"))
+        .and_then(Value::as_str)
+        .map(|status| status.trim().to_ascii_lowercase());
+    matches!(
+        status.as_deref(),
+        Some(
+            "rate_limited"
+                | "rate-limited"
+                | "ratelimited"
+                | "throttled"
+                | "error"
+                | "errored"
+                | "failed"
+                | "failure"
+                | "unavailable"
+                | "degraded"
+        )
+    )
+}
+
+/// Public-safe label for where a follow-up observation came from. Honors an
+/// explicit `observation_source` and otherwise reflects whether the GitHub API
+/// path was healthy or fell back.
+fn observation_source(value: &Value, github_api_fallback: bool) -> String {
+    if let Some(source) = value.get("observation_source").and_then(Value::as_str) {
+        let token = bounded_public_token(source);
+        if !token.is_empty() {
+            return token;
+        }
+    }
+    if github_api_fallback {
+        "github-api-fallback".to_string()
+    } else {
+        "github-api".to_string()
+    }
+}
+
+/// Confidence marker for a follow-up observation. `validated` only when every
+/// zero-backlog authority check passes; a degraded API fallback lacking the
+/// required corroborating evidence is flagged `fallback-unverified` so it is
+/// never mistaken for one.
+fn observation_confidence(value: &Value, zero_backlog: bool, github_api_fallback: bool) -> String {
+    if zero_backlog {
+        "validated".to_string()
+    } else if github_api_fallback && !fallback_has_authority(value) {
+        "fallback-unverified".to_string()
+    } else {
+        "reported".to_string()
+    }
+}
+
+/// A degraded GitHub API fallback may only carry merge/close authority when the
+/// receipt explicitly advertises that the required corroborating evidence was
+/// gathered from a safe source (e.g. confirmed via public repository pages).
+fn fallback_has_authority(value: &Value) -> bool {
+    !github_api_failed(value) || bool_field(value, "fallback_evidence")
+}
+
+fn stable_hash_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn should_suppress(
+    job: &CronJob,
+    eval: &StateEvaluation,
+    previous_fingerprint: Option<&String>,
+    suppression: Option<&ZeroBacklogSuppression>,
+    now: i64,
+) -> bool {
+    if job.zero_backlog_suppression_ttl_secs == 0 || !eval.zero_backlog {
         return false;
     }
-    match previous_fingerprint {
-        Some(prev) => prev.as_str() == eval.fingerprint.as_str(),
-        None => false,
-    }
+    previous_fingerprint.is_some_and(|prev| prev == &eval.fingerprint)
+        && suppression.is_some_and(|suppression| {
+            suppression.key == eval.suppression_key && suppression.expires_at > now
+        })
+}
+
+/// Public-safe one-line notice recorded when a zero-backlog follow-up nudge is
+/// intentionally suppressed. It contains only the operator-defined job id, the
+/// deterministic public-safe suppression key, and the remaining lease seconds —
+/// never raw receipts, logs, tokens, or private payloads — so operators can see
+/// the nudge was withheld on purpose, not silently dropped.
+fn suppression_notice(job_id: &str, suppression: &ZeroBacklogSuppression, now: i64) -> String {
+    let remaining = (suppression.expires_at - now).max(0);
+    format!(
+        "clawhip cron '{job_id}' zero-backlog follow-up suppressed (key={}, expires_in={remaining}s); nudge intentionally withheld, not dropped",
+        suppression.key
+    )
 }
 
 fn validate_timezone(job: &CronJob) -> Result<()> {
@@ -599,18 +790,21 @@ fn weekday_to_cron(weekday: Weekday) -> u8 {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ZeroBacklogSuppression {
+    key: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct CronSchedulerState {
     last_processed_minute: Option<i64>,
-    /// Per-job canonical JSON fingerprint of the `state_file` contents at the
-    /// time of the last successful emission. Used to detect when a zero-backlog
-    /// state changes so the job fires again rather than emitting hardening only.
+    /// Per-job public-safe fingerprint from the last successful emission.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     job_fingerprints: HashMap<String, String>,
-    /// Per-job count of consecutive ticks at the same zero-backlog fingerprint.
-    /// Cycles through `HARDENING_CANDIDATES` so each quiet tick surfaces a
-    /// different improvement suggestion.
+    /// Per-job zero-backlog suppression lease. Matching follow-up receipts are
+    /// suppressed only until `expires_at`; any public-safe key delta breaks it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    zero_backlog_counters: HashMap<String, u64>,
+    zero_backlog_suppressions: HashMap<String, ZeroBacklogSuppression>,
 }
 
 fn load_scheduler_state(path: &Path) -> Result<CronSchedulerState> {
@@ -784,6 +978,7 @@ mod tests {
             mention: None,
             format: None,
             state_file: None,
+            zero_backlog_suppression_ttl_secs: 60 * 60,
             kind: CronJobKind::CustomMessage {
                 message: "wake up".into(),
             },
@@ -793,92 +988,65 @@ mod tests {
         assert!(error.to_string().contains("supports UTC only"));
     }
 
+    #[test]
+    fn suppression_notice_is_public_safe_and_observable() {
+        let suppression = ZeroBacklogSuppression {
+            key: "gajae-zero-backlog:0123456789abcdef".into(),
+            expires_at: 1_000,
+        };
+        let notice = suppression_notice("dev-followup", &suppression, 400);
+        assert!(notice.contains("dev-followup"));
+        assert!(notice.contains("gajae-zero-backlog:0123456789abcdef"));
+        assert!(notice.contains("expires_in=600s"));
+        assert!(notice.contains("not dropped"));
+
+        // Past-expiry leases clamp to zero rather than reporting negatives.
+        let expired = suppression_notice("dev-followup", &suppression, 5_000);
+        assert!(expired.contains("expires_in=0s"));
+    }
+
     #[tokio::test]
-    async fn zero_backlog_steady_state_emits_hardening_candidates_not_churn() {
+    async fn validated_zero_backlog_receipt_suppresses_repeated_followups_until_ttl() {
         let dir = tempdir().expect("tempdir");
         let state_path = dir.path().join("cron-state.json");
         let repo_state = dir.path().join("repo.json");
-        fs::write(
-            &repo_state,
-            r#"{"open_issues":0,"open_prs":0,"sha":"deadbeef"}"#,
-        )
-        .expect("write repo state");
+        write_zero_backlog_receipt(&repo_state, None, false).expect("write receipt");
 
         let config = sample_config_with_state("*/10 * * * *", Some(repo_state));
         let mut scheduler =
             CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
         let emitter = RecordingEmitter::default();
 
-        // First tick fires normally: fingerprint not yet stored so no suppression.
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 3))
             .await
             .expect("first tick");
-        // Second tick: same zero-backlog fingerprint → emit hardening candidate #1.
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 5))
             .await
-            .expect("second tick — hardening #1");
-        // Third tick: same fingerprint → emit hardening candidate #2 (different lane).
+            .expect("second tick suppressed");
         scheduler
-            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 40, 5))
+            .emit_due(&emitter, dt(2026, Month::April, 2, 9, 30, 5))
             .await
-            .expect("third tick — hardening #2");
+            .expect("ttl expired tick");
 
         let events = emitter.events.lock().expect("events lock");
-        assert_eq!(
-            events.len(),
-            3,
-            "first normal emission + two hardening candidates, no silent drops"
-        );
-        // First event is the normal job message.
-        assert_eq!(
-            events[0].payload["message"],
-            json!("check open PRs"),
-            "tick 1 must emit the configured job message"
-        );
-        assert_eq!(
-            events[0].payload["repo_state_zero_backlog"],
-            json!(true),
-            "tick 1 must carry the zero-backlog signal"
-        );
-        // Second event is hardening cycle 1.
-        assert_eq!(
-            events[1].payload["hardening_cycle"],
-            json!(1_u64),
-            "tick 2 must be hardening cycle 1"
-        );
-        assert!(
-            events[1].payload["hardening_lane"].is_string(),
-            "hardening event must carry a lane label"
-        );
-        assert_eq!(
-            events[1].payload["repo_state_zero_backlog"],
-            json!(true),
-            "hardening event must still carry zero-backlog signal"
-        );
-        // Third event is hardening cycle 2 with a different lane.
-        assert_eq!(
-            events[2].payload["hardening_cycle"],
-            json!(2_u64),
-            "tick 3 must be hardening cycle 2"
-        );
-        assert_ne!(
-            events[2].payload["hardening_lane"], events[1].payload["hardening_lane"],
-            "consecutive hardening ticks must rotate through different lanes"
-        );
+        assert_eq!(events.len(), 2, "middle follow-up should be silent");
+        assert_eq!(events[0].payload["message"], json!("check open PRs"));
+        assert_eq!(events[0].payload["repo_state_zero_backlog"], json!(true));
+        let fingerprint = events[0].payload["repo_state_fingerprint"]
+            .as_str()
+            .expect("fingerprint");
+        assert_eq!(fingerprint.len(), 16);
+        assert!(!fingerprint.contains("secret-token"));
     }
 
     #[tokio::test]
-    async fn emits_again_when_state_file_changes_even_with_zero_backlog() {
+    async fn new_public_event_breaks_zero_backlog_suppression_immediately() {
         let dir = tempdir().expect("tempdir");
         let state_path = dir.path().join("cron-state.json");
         let repo_state = dir.path().join("repo.json");
-        fs::write(
-            &repo_state,
-            r#"{"open_issues":0,"open_prs":0,"sha":"aaaa"}"#,
-        )
-        .expect("write repo state v1");
+        write_zero_backlog_receipt(&repo_state, None, false).expect("write receipt v1");
 
         let config = sample_config_with_state("*/10 * * * *", Some(repo_state.clone()));
         let mut scheduler =
@@ -889,23 +1057,51 @@ mod tests {
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 3))
             .await
             .expect("first tick");
-
-        // A real delta lands: sha changes even though counters stay zero. The
-        // scheduler must re-fire because "zero-delta" means the state itself
-        // has not moved; any byte-level change breaks that assumption.
-        fs::write(
-            &repo_state,
-            r#"{"open_issues":0,"open_prs":0,"sha":"bbbb"}"#,
-        )
-        .expect("write repo state v2");
-
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 5))
             .await
-            .expect("second tick — should re-emit");
+            .expect("suppressed tick");
+
+        write_zero_backlog_receipt(&repo_state, Some("github-pr-262"), false)
+            .expect("write receipt with new event");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 40, 5))
+            .await
+            .expect("new event breaks suppression");
 
         let events = emitter.events.lock().expect("events lock");
         assert_eq!(events.len(), 2);
+        assert_ne!(
+            events[0].payload["repo_state_fingerprint"],
+            events[1].payload["repo_state_fingerprint"],
+            "new PR/issue/CI/stale marker must alter public-safe key and re-emit"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_hold_receipt_is_not_zero_backlog_suppressed() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("cron-state.json");
+        let repo_state = dir.path().join("repo.json");
+        write_zero_backlog_receipt(&repo_state, None, true).expect("write release hold receipt");
+
+        let config = sample_config_with_state("*/10 * * * *", Some(repo_state));
+        let mut scheduler =
+            CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
+        let emitter = RecordingEmitter::default();
+
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 3))
+            .await
+            .expect("first tick");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 5))
+            .await
+            .expect("release hold remains routed");
+
+        let events = emitter.events.lock().expect("events lock");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].payload["repo_state_zero_backlog"], json!(false));
     }
 
     #[tokio::test]
@@ -938,67 +1134,164 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re_emits_immediately_when_backlog_transitions_back_from_zero() {
+    async fn stale_session_marker_breaks_zero_backlog_suppression_immediately() {
         let dir = tempdir().expect("tempdir");
         let state_path = dir.path().join("cron-state.json");
         let repo_state = dir.path().join("repo.json");
-        fs::write(&repo_state, r#"{"open_issues":0,"open_prs":0}"#)
-            .expect("write repo state v1 (zero)");
+        write_zero_backlog_receipt(&repo_state, None, false).expect("write receipt v1");
 
         let config = sample_config_with_state("*/10 * * * *", Some(repo_state.clone()));
         let mut scheduler =
             CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
         let emitter = RecordingEmitter::default();
 
-        // First tick establishes the zero-backlog baseline and fires once.
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 0))
             .await
             .expect("tick 1");
-        // Second tick: same zero-backlog fingerprint → hardening candidate instead of silence.
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 0))
             .await
-            .expect("tick 2");
+            .expect("tick 2 suppressed");
 
-        // Backlog grows: a new PR lands.
-        fs::write(&repo_state, r#"{"open_issues":0,"open_prs":1}"#)
-            .expect("write repo state v2 (nonzero)");
+        fs::write(
+            &repo_state,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"green","session_stale_events":1,"secret":"raw log"}"#,
+        )
+        .expect("write stale session receipt");
         scheduler
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 40, 0))
             .await
-            .expect("tick 3 — nonzero delta");
+            .expect("stale session breaks suppression");
 
-        // Work ships; backlog drops back to zero. The scheduler fires once to
-        // announce the transition (different fingerprint from the nonzero state).
-        fs::write(&repo_state, r#"{"open_issues":0,"open_prs":0}"#)
-            .expect("write repo state v3 (back to zero)");
+        let events = emitter.events.lock().expect("events lock");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].payload["repo_state_zero_backlog"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn ci_failure_breaks_zero_backlog_suppression_immediately() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("cron-state.json");
+        let repo_state = dir.path().join("repo.json");
+        write_zero_backlog_receipt(&repo_state, None, false).expect("write receipt v1");
+
+        let config = sample_config_with_state("*/10 * * * *", Some(repo_state.clone()));
+        let mut scheduler =
+            CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
+        let emitter = RecordingEmitter::default();
+
         scheduler
-            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 50, 0))
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 0))
             .await
-            .expect("tick 4 — zero transition");
-        // Tick 5: same zero fingerprint again → hardening candidate (counter resets after tick 3).
+            .expect("tick 1");
         scheduler
-            .emit_due(&emitter, dt(2026, Month::April, 2, 9, 0, 0))
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 0))
             .await
-            .expect("tick 5 — hardening again");
+            .expect("tick 2 suppressed");
+
+        fs::write(
+            &repo_state,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"failed","active_sessions_needing_action":0}"#,
+        )
+        .expect("write failed-ci receipt");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 40, 0))
+            .await
+            .expect("ci failure breaks suppression");
+
+        let events = emitter.events.lock().expect("events lock");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].payload["repo_state_zero_backlog"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn branch_head_change_breaks_zero_backlog_suppression_immediately() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("cron-state.json");
+        let repo_state = dir.path().join("repo.json");
+        fs::write(
+            &repo_state,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"green","active_sessions_needing_action":0,"dev_head":"aaaaaaaaaaaa"}"#,
+        )
+        .expect("write head-a receipt");
+
+        let config = sample_config_with_state("*/10 * * * *", Some(repo_state.clone()));
+        let mut scheduler =
+            CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
+        let emitter = RecordingEmitter::default();
+
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 0))
+            .await
+            .expect("tick 1");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 0))
+            .await
+            .expect("tick 2 suppressed");
+
+        // Identical zero-backlog counts and CI label, but a new dev commit landed:
+        // the head digest changed, so this is a real transition and must re-emit.
+        fs::write(
+            &repo_state,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"green","active_sessions_needing_action":0,"dev_head":"bbbbbbbbbbbb"}"#,
+        )
+        .expect("write head-b receipt");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 40, 0))
+            .await
+            .expect("branch head change re-emits");
 
         let events = emitter.events.lock().expect("events lock");
         assert_eq!(
             events.len(),
-            5,
-            "all five ticks emit: ticks 1/3/4 normal, ticks 2/5 hardening"
+            2,
+            "first tick + head-change tick emit; the identical middle tick coalesces"
         );
+        assert_eq!(
+            events[1].payload["repo_state_zero_backlog"],
+            json!(true),
+            "a new dev head is still a valid zero-backlog state, just a fresh transition"
+        );
+        assert_ne!(
+            events[0].payload["repo_state_fingerprint"],
+            events[1].payload["repo_state_fingerprint"],
+            "a branch head change must alter the public-safe key and re-emit"
+        );
+    }
+
+    #[test]
+    fn branch_head_digest_is_part_of_fingerprint_and_public_safe() {
+        let dir = tempdir().expect("tempdir");
+        let head_a = dir.path().join("head-a.json");
+        let head_b = dir.path().join("head-b.json");
+        fs::write(
+            &head_a,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"green","active_sessions_needing_action":0,"dev_head":"abc123def456","raw_log":"secret-token must not leak"}"#,
+        )
+        .expect("write head-a");
+        fs::write(
+            &head_b,
+            r#"{"family":"runtime-followup-receipt","status":"validated","open_issues":0,"open_prs":0,"latest_dev_ci":"green","active_sessions_needing_action":0,"dev_head":"999fedcba000","raw_log":"secret-token must not leak"}"#,
+        )
+        .expect("write head-b");
+
+        let eval_a = evaluate_state_file(&head_a).expect("eval a");
+        let eval_b = evaluate_state_file(&head_b).expect("eval b");
         assert!(
-            events[1].payload.get("hardening_lane").is_some(),
-            "tick 2 is hardening"
+            eval_a.zero_backlog && eval_b.zero_backlog,
+            "both receipts remain valid zero-backlog states"
         );
+        assert_ne!(
+            eval_a.fingerprint, eval_b.fingerprint,
+            "a branch head change must alter the fingerprint"
+        );
+        assert_ne!(eval_a.suppression_key, eval_b.suppression_key);
         assert!(
-            events[4].payload.get("hardening_lane").is_some(),
-            "tick 5 is hardening"
+            !eval_a.fingerprint.contains("secret-token"),
+            "the fingerprint must never leak private receipt content"
         );
-        // Hardening counter resets after the nonzero interlude, so tick 5 restarts at cycle 1.
-        assert_eq!(events[4].payload["hardening_cycle"], json!(1_u64));
+        assert_eq!(eval_a.fingerprint.len(), 16);
     }
 
     #[tokio::test]
@@ -1053,11 +1346,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fingerprint_and_counter_persist_across_scheduler_restarts() {
+    async fn suppression_lease_persists_across_scheduler_restarts() {
         let dir = tempdir().expect("tempdir");
         let state_path = dir.path().join("cron-state.json");
         let repo_state = dir.path().join("repo.json");
-        fs::write(&repo_state, r#"{"open_issues":0,"open_prs":0}"#).expect("write repo state");
+        write_zero_backlog_receipt(&repo_state, None, false).expect("write receipt");
 
         let config = sample_config_with_state("*/10 * * * *", Some(repo_state));
         let emitter = RecordingEmitter::default();
@@ -1069,28 +1362,16 @@ mod tests {
             .await
             .expect("first emit");
 
-        // Restart reads the persisted fingerprint and counter.  The zero-backlog
-        // state hasn't changed, so the restarted scheduler should emit hardening
-        // cycle 1 (not a spurious duplicate of the original nudge).
         let mut restarted =
             CronScheduler::new_with_state_path(&config, state_path).expect("restarted scheduler");
         restarted
             .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 0))
             .await
-            .expect("restarted emit");
+            .expect("restarted suppressed");
 
         let events = emitter.events.lock().expect("events lock");
-        assert_eq!(
-            events.len(),
-            2,
-            "tick 1 normal + tick 2 hardening after restart"
-        );
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["message"], json!("check open PRs"));
-        assert_eq!(
-            events[1].payload["hardening_cycle"],
-            json!(1_u64),
-            "persisted counter resumes cycling after restart"
-        );
     }
 
     #[test]
@@ -1111,8 +1392,11 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let compact = dir.path().join("compact.json");
         let pretty = dir.path().join("pretty.json");
-        fs::write(&compact, r#"{"open_issues":0,"open_prs":0}"#).expect("write compact");
-        fs::write(&pretty, "{\n  \"open_issues\": 0,\n  \"open_prs\": 0\n}\n")
+        write_zero_backlog_receipt(&compact, None, false).expect("write compact");
+        fs::write(
+            &pretty,
+            "{\n  \"family\": \"runtime-followup-receipt\",\n  \"status\": \"validated\",\n  \"receipt_id\": \"public-1\",\n  \"open_issues\": 0,\n  \"open_prs\": 0,\n  \"latest_dev_ci\": \"green\",\n  \"active_sessions_needing_action\": 0,\n  \"release_hold\": false,\n  \"raw_log\": \"different private log must not affect fingerprint\"\n}\n",
+        )
             .expect("write pretty");
 
         let compact_eval = evaluate_state_file(&compact).expect("compact eval");
@@ -1124,6 +1408,90 @@ mod tests {
     }
 
     #[test]
+    fn healthy_receipt_marks_validated_github_api_source() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("repo.json");
+        write_zero_backlog_receipt(&path, None, false).expect("write receipt");
+
+        let eval = evaluate_state_file(&path).expect("evaluation");
+        assert!(eval.zero_backlog, "healthy validated receipt has authority");
+        assert!(!eval.github_api_fallback);
+        assert_eq!(eval.observation_source, "github-api");
+        assert_eq!(eval.observation_confidence, "validated");
+    }
+
+    #[test]
+    fn rate_limited_fallback_loses_zero_backlog_authority() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("repo.json");
+        let value = json!({
+            "family": "runtime-followup-receipt",
+            "status": "validated",
+            "receipt_id": "public-1",
+            "open_issues": 0,
+            "open_prs": 0,
+            "latest_dev_ci": "green",
+            "active_sessions_needing_action": 0,
+            "release_hold": false,
+            "github_api_status": "rate_limited",
+        });
+        fs::write(&path, serde_json::to_string(&value).unwrap()).expect("write receipt");
+
+        let eval = evaluate_state_file(&path).expect("evaluation");
+        assert!(
+            !eval.zero_backlog,
+            "a rate-limited fallback without evidence must not carry merge/close authority"
+        );
+        assert!(eval.github_api_fallback);
+        assert_eq!(eval.observation_source, "github-api-fallback");
+        assert_eq!(eval.observation_confidence, "fallback-unverified");
+    }
+
+    #[test]
+    fn rate_limited_fallback_with_evidence_keeps_authority() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("repo.json");
+        let value = json!({
+            "family": "runtime-followup-receipt",
+            "status": "validated",
+            "receipt_id": "public-1",
+            "open_issues": 0,
+            "open_prs": 0,
+            "latest_dev_ci": "green",
+            "active_sessions_needing_action": 0,
+            "release_hold": false,
+            "github_api_status": "rate_limited",
+            "observation_source": "public-repo-pages",
+            "fallback_evidence": true,
+        });
+        fs::write(&path, serde_json::to_string(&value).unwrap()).expect("write receipt");
+
+        let eval = evaluate_state_file(&path).expect("evaluation");
+        assert!(
+            eval.zero_backlog,
+            "a fallback advertising the required evidence retains authority"
+        );
+        assert!(eval.github_api_fallback);
+        assert_eq!(eval.observation_source, "public-repo-pages");
+        assert_eq!(eval.observation_confidence, "validated");
+    }
+
+    #[test]
+    fn api_fallback_is_distinct_from_empty_backlog() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("repo.json");
+        // No backlog counters at all, but the API failed: the failure is detected
+        // separately from an (absent) empty-backlog claim.
+        fs::write(&path, r#"{"github_api_status":"error"}"#).expect("write receipt");
+
+        let eval = evaluate_state_file(&path).expect("evaluation");
+        assert!(!eval.zero_backlog);
+        assert!(eval.github_api_fallback);
+        assert_eq!(eval.observation_source, "github-api-fallback");
+        assert_eq!(eval.observation_confidence, "fallback-unverified");
+    }
+
+    #[test]
     fn schedule_parser_supports_lists_ranges_and_steps() {
         let schedule = CronSchedule::parse("0,15,30-45/15 9-17/4 * * 1-5").expect("schedule");
 
@@ -1132,6 +1500,74 @@ mod tests {
         assert!(schedule.matches(dt(2026, Month::April, 10, 17, 45, 0)));
         assert!(!schedule.matches(dt(2026, Month::April, 10, 17, 10, 0)));
         assert!(!schedule.matches(dt(2026, Month::April, 11, 9, 0, 0)));
+    }
+
+    fn write_lightweight_checkpoint(path: &Path, open_prs: u64) -> std::io::Result<()> {
+        let checkpoint = crate::gajae::zero_backlog_followup_checkpoint(
+            crate::gajae::ZeroBacklogCheckpointRequest {
+                repo: "Yeachan-Heo/clawhip".into(),
+                open_issues: 0,
+                open_prs,
+                action_needed_sessions: 0,
+                observation_source: "github-api".into(),
+                approval_hold: false,
+                release_hold: false,
+            },
+        )
+        .expect("build checkpoint");
+        fs::write(path, serde_json::to_string(&checkpoint).expect("serialize"))
+    }
+
+    #[tokio::test]
+    async fn lightweight_checkpoint_suppresses_repeated_followups_until_ttl() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("cron-state.json");
+        let repo_state = dir.path().join("repo.json");
+        write_lightweight_checkpoint(&repo_state, 0).expect("write checkpoint");
+
+        let config = sample_config_with_state("*/10 * * * *", Some(repo_state));
+        let mut scheduler =
+            CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
+        let emitter = RecordingEmitter::default();
+
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 3))
+            .await
+            .expect("first tick");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 5))
+            .await
+            .expect("second tick suppressed");
+
+        let events = emitter.events.lock().expect("events lock");
+        assert_eq!(events.len(), 1, "routine follow-up should be silent");
+        assert_eq!(events[0].payload["repo_state_zero_backlog"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn lightweight_checkpoint_with_open_backlog_does_not_suppress() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("cron-state.json");
+        let repo_state = dir.path().join("repo.json");
+        write_lightweight_checkpoint(&repo_state, 1).expect("write checkpoint");
+
+        let config = sample_config_with_state("*/10 * * * *", Some(repo_state));
+        let mut scheduler =
+            CronScheduler::new_with_state_path(&config, state_path).expect("scheduler");
+        let emitter = RecordingEmitter::default();
+
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 20, 3))
+            .await
+            .expect("first tick");
+        scheduler
+            .emit_due(&emitter, dt(2026, Month::April, 2, 8, 30, 5))
+            .await
+            .expect("second tick");
+
+        let events = emitter.events.lock().expect("events lock");
+        assert_eq!(events.len(), 2, "nonzero backlog must keep emitting");
+        assert_eq!(events[0].payload["repo_state_zero_backlog"], json!(false));
     }
 
     fn sample_config(schedule: &str) -> AppConfig {
@@ -1156,6 +1592,7 @@ mod tests {
                     mention: Some("<@bot>".into()),
                     format: Some(MessageFormat::Alert),
                     state_file,
+                    zero_backlog_suppression_ttl_secs: 60 * 60,
                     kind: CronJobKind::CustomMessage {
                         message: "check open PRs".into(),
                     },
@@ -1163,6 +1600,28 @@ mod tests {
             },
             ..AppConfig::default()
         }
+    }
+
+    fn write_zero_backlog_receipt(
+        path: &Path,
+        new_event_id: Option<&str>,
+        release_hold: bool,
+    ) -> std::io::Result<()> {
+        let mut value = json!({
+            "family": "runtime-followup-receipt",
+            "status": "validated",
+            "receipt_id": "public-1",
+            "open_issues": 0,
+            "open_prs": 0,
+            "latest_dev_ci": "green",
+            "active_sessions_needing_action": 0,
+            "release_hold": release_hold,
+            "raw_log": "secret-token private channel transcript must not leak",
+        });
+        if let Some(new_event_id) = new_event_id {
+            value["new_event_id"] = json!(new_event_id);
+        }
+        fs::write(path, serde_json::to_string(&value)?)
     }
 
     fn dt(year: i32, month: Month, day: u8, hour: u8, minute: u8, second: u8) -> OffsetDateTime {

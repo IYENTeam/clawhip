@@ -25,6 +25,7 @@ pub mod event_name {
 
 pub mod reason {
     pub const DAEMON_STARTUP: &str = "daemon_startup";
+    pub const DISCORD_TOKEN_ENV_SHADOW: &str = "discord_token_env_shadow";
     pub const DAEMON_LISTENING: &str = "daemon_listening";
     pub const SOURCE_START: &str = "source_start";
     pub const SOURCE_STOPPED: &str = "source_stopped";
@@ -104,12 +105,17 @@ pub fn stable_correlation_id(event_kind: &str, payload: &Value) -> String {
 pub fn safe_target_id(target: &SinkTarget) -> String {
     match target {
         SinkTarget::DiscordChannel(channel_id) => format!("discord:channel:{channel_id}"),
+        SinkTarget::DiscordThread(thread_id) => {
+            format!("discord:thread:redacted:{:016x}", fingerprint(thread_id))
+        }
         SinkTarget::DiscordWebhook(webhook_url) => {
             format!("discord:webhook:{}", redacted_url_fingerprint(webhook_url))
         }
+        SinkTarget::SlackChannel(channel_id) => format!("slack:channel:{channel_id}"),
         SinkTarget::SlackWebhook(webhook_url) => {
             format!("slack:webhook:{}", redacted_url_fingerprint(webhook_url))
         }
+        SinkTarget::LocalFile(path) => format!("localfile:{:016x}", fingerprint(path)),
     }
 }
 
@@ -158,9 +164,12 @@ pub fn emit(object: Map<String, Value>) {
 }
 
 fn fingerprint(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+
+    value.bytes().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
 }
 
 #[cfg(test)]
@@ -184,6 +193,31 @@ mod tests {
             safe_target_id(&SinkTarget::DiscordChannel("ops".into())),
             "discord:channel:ops"
         );
+    }
+
+    #[test]
+    fn thread_target_id_is_stable_and_redacted() {
+        let raw_thread_id = "123456789012345678";
+        let safe = safe_target_id(&SinkTarget::DiscordThread(raw_thread_id.into()));
+
+        assert!(safe.starts_with("discord:thread:redacted:"));
+        assert!(!safe.contains(raw_thread_id));
+        assert_eq!(
+            safe,
+            safe_target_id(&SinkTarget::DiscordThread(raw_thread_id.into()))
+        );
+        assert_ne!(
+            safe,
+            safe_target_id(&SinkTarget::DiscordThread("987654321098765432".into()))
+        );
+    }
+
+    #[test]
+    fn local_file_target_id_does_not_expose_path() {
+        let safe = safe_target_id(&SinkTarget::LocalFile("/tmp/clawhip/events.jsonl".into()));
+
+        assert!(safe.starts_with("localfile:"));
+        assert!(!safe.contains("/tmp/clawhip/events.jsonl"));
     }
 
     #[test]

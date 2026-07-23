@@ -153,6 +153,11 @@ pub enum Commands {
     /// Shows which routes match, which filters pass/fail, and where the
     /// event would be delivered — useful for debugging config.
     Explain(ExplainArgs),
+    /// Bridge to the local gajae CLI.
+    Gajae {
+        #[command(subcommand)]
+        command: GajaeCommands,
+    },
     /// Release consistency checks.
     Release {
         #[command(subcommand)]
@@ -244,6 +249,18 @@ pub struct SetupArgs {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct VerifyBindingsArgs {
+    /// Emit machine-readable JSON instead of the human-readable text report.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct VerifyGatewayAllowlistArgs {
+    /// Path to the local Clawdbot gateway JSON config.
+    ///
+    /// Defaults to ~/.clawdbot/clawdbot.json when HOME is available.
+    #[arg(long = "gateway-config")]
+    pub gateway_config: Option<PathBuf>,
     /// Emit machine-readable JSON instead of the human-readable text report.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -463,6 +480,187 @@ impl NativeHookArgs {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+pub enum GajaeCommands {
+    /// Check whether gajae is available.
+    Status,
+    /// Verify GAJAE-native receipts, profile install, and public-safe output readiness.
+    Preflight,
+    /// Diagnose GAJAE CLI/profile conformance without mutating local profiles.
+    Doctor(GajaeDoctorArgs),
+    /// Manage gajae-installed clawhip profiles.
+    Profile {
+        #[command(subcommand)]
+        command: GajaeProfileCommands,
+    },
+    /// Validate and ingest gajae receipt families.
+    Receipt {
+        #[command(subcommand)]
+        command: GajaeReceiptCommands,
+    },
+    /// Produce public-safe GAJAE mutation-plan artifacts for GitHub actions.
+    MutationPlan {
+        #[command(subcommand)]
+        command: GajaeMutationPlanCommands,
+    },
+    /// Produce a lightweight public-safe zero-backlog follow-up checkpoint receipt.
+    Checkpoint {
+        #[command(subcommand)]
+        command: GajaeCheckpointCommands,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum GajaeProfileCommands {
+    /// Install the clawhip profile through gajae.
+    Install,
+    /// Verify the installed GAJAE clawhip profile and handler commands without executing routes.
+    Verify(GajaeProfileVerifyArgs),
+    /// Inspect the installed GAJAE clawhip route profile without executing routes.
+    Inspect(GajaeProfileFileArgs),
+    /// Explain which GAJAE route would match an event without executing it.
+    Explain(GajaeProfileExplainArgs),
+    /// Validate a GAJAE route profile apply plan; live apply is approval-gated.
+    Apply(GajaeProfileApplyArgs),
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct GajaeProfileFileArgs {
+    /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GajaeProfileExplainArgs {
+    /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// GAJAE event name to explain, e.g. github.pr-status-changed.
+    #[arg(long)]
+    pub event: String,
+    /// Optional repository label to include in the explanation report.
+    #[arg(long)]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct GajaeProfileApplyArgs {
+    /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// Validate and explain the apply plan without executing commands.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+    /// Placeholder approval gate for future live apply support; does not enable execution yet.
+    #[arg(long, default_value_t = false)]
+    pub approve: bool,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct GajaeDoctorArgs {
+    /// Optional owner/repo used to check whether GAJAE can produce a dry-run clawhip onboard plan.
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct GajaeProfileVerifyArgs {
+    /// Read this profile/routes file instead of auto-discovering the installed GAJAE profile.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum GajaeReceiptCommands {
+    /// Validate a receipt and emit a bounded public-safe clawhip event.
+    Ingest(GajaeReceiptIngestArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GajaeReceiptIngestArgs {
+    /// GAJAE receipt family to validate.
+    #[arg(long)]
+    pub family: String,
+    /// Receipt JSON file to validate.
+    #[arg(long, conflicts_with = "stdin")]
+    pub file: Option<PathBuf>,
+    /// Read receipt JSON from stdin before validation.
+    #[arg(long, conflicts_with = "file")]
+    pub stdin: bool,
+    /// Send the validated event to the local clawhip daemon.
+    #[arg(long, default_value_t = false)]
+    pub send: bool,
+    /// Override the destination channel when sending to the daemon.
+    #[arg(long)]
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum GajaeMutationPlanCommands {
+    /// Plan a GitHub follow-up action without executing it.
+    Plan(GajaeMutationPlanArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GajaeMutationPlanArgs {
+    /// GitHub repository in owner/name form.
+    #[arg(long)]
+    pub repo: String,
+    /// Candidate GitHub action kind: comment, label, review-request, close-issue, draft-pr, branch-push, release, retag, or merge.
+    #[arg(long)]
+    pub kind: String,
+    /// Public target identifier, such as issue number, PR number, branch, or tag.
+    #[arg(long)]
+    pub target: String,
+    /// Optional low-risk action body. The plan stores only a bounded digest, never raw text.
+    #[arg(long)]
+    pub body: Option<String>,
+    /// Optional label name for label actions.
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Optional public actor/login to include in the plan.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Existing idempotency key. Repeat to mark matching plans as duplicates.
+    #[arg(long = "existing-key", action = ArgAction::Append)]
+    pub existing_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum GajaeCheckpointCommands {
+    /// Build a compact zero-backlog follow-up checkpoint with a deterministic stop decision.
+    ZeroBacklog(GajaeZeroBacklogCheckpointArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GajaeZeroBacklogCheckpointArgs {
+    /// GitHub repository in owner/name form.
+    #[arg(long)]
+    pub repo: String,
+    /// Observed count of open issues.
+    #[arg(long, default_value_t = 0)]
+    pub open_issues: u64,
+    /// Observed count of open PRs.
+    #[arg(long, default_value_t = 0)]
+    pub open_prs: u64,
+    /// Observed count of sessions still needing action.
+    #[arg(long, default_value_t = 0)]
+    pub action_needed_sessions: u64,
+    /// Public-safe observation source label, e.g. github-api.
+    #[arg(long, default_value = "github-api")]
+    pub source: String,
+    /// Mark an approval hold as present, which forces follow-up emission.
+    #[arg(long, default_value_t = false)]
+    pub approval_hold: bool,
+    /// Mark a release hold as present, which forces follow-up emission.
+    #[arg(long, default_value_t = false)]
+    pub release_hold: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
 pub enum ReleaseCommands {
     /// Verify version/Cargo.lock/CHANGELOG consistency before tagging a release.
     ///
@@ -605,6 +803,8 @@ pub enum MemoryCommands {
     Init(MemoryInitArgs),
     /// Inspect whether a filesystem-offloaded memory scaffold is present.
     Status(MemoryStatusArgs),
+    /// Propose or create public-safe channel profiles for routed repository channels.
+    ScaffoldChannels(MemoryScaffoldChannelsArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -710,6 +910,12 @@ pub enum ConfigCommand {
     /// then queries the Discord API to confirm each channel exists and (optionally)
     /// matches the `channel_name` hint set alongside the ID.
     VerifyBindings(VerifyBindingsArgs),
+    /// Verify clawhip channel destinations are allowed by the local Clawdbot gateway config.
+    ///
+    /// Reads only the public-safe gateway channel allowlist shape and reports
+    /// channel IDs plus clawhip source labels; never dumps gateway tokens,
+    /// webhooks, payloads, or unrelated config fields.
+    VerifyGatewayAllowlist(VerifyGatewayAllowlistArgs),
 }
 
 #[cfg(test)]
@@ -1031,6 +1237,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_verify_gateway_allowlist_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "config",
+            "verify-gateway-allowlist",
+            "--gateway-config",
+            "/tmp/clawdbot.json",
+            "--json",
+        ]);
+        let Some(Commands::Config {
+            command: Some(ConfigCommand::VerifyGatewayAllowlist(args)),
+        }) = cli.command
+        else {
+            panic!("expected verify-gateway-allowlist");
+        };
+        assert_eq!(
+            args.gateway_config.as_deref(),
+            Some(std::path::Path::new("/tmp/clawdbot.json"))
+        );
+        assert!(args.json);
+    }
+
+    #[test]
     fn parses_setup_webhook_subcommand() {
         let cli = Cli::parse_from([
             "clawhip",
@@ -1214,6 +1443,112 @@ mod tests {
     }
 
     #[test]
+    fn parses_gajae_status_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "gajae", "status"]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+
+        assert!(matches!(command, GajaeCommands::Status));
+    }
+
+    #[test]
+    fn parses_gajae_preflight_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "gajae", "preflight"]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+
+        assert!(matches!(command, GajaeCommands::Preflight));
+    }
+
+    #[test]
+    fn parses_gajae_profile_install_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "gajae", "profile", "install"]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+
+        let GajaeCommands::Profile { command } = command else {
+            panic!("expected gajae profile command");
+        };
+
+        assert!(matches!(command, GajaeProfileCommands::Install));
+    }
+
+    #[test]
+    fn parses_gajae_profile_inspect_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "gajae",
+            "profile",
+            "inspect",
+            "--file",
+            "routes.yml",
+        ]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+        let GajaeCommands::Profile { command } = command else {
+            panic!("expected gajae profile command");
+        };
+        let GajaeProfileCommands::Inspect(args) = command else {
+            panic!("expected gajae profile inspect command");
+        };
+
+        assert_eq!(args.file, Some(PathBuf::from("routes.yml")));
+    }
+
+    #[test]
+    fn parses_gajae_profile_explain_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "gajae",
+            "profile",
+            "explain",
+            "--event",
+            "github.pr-status-changed",
+            "--repo",
+            "clawhip",
+        ]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+        let GajaeCommands::Profile { command } = command else {
+            panic!("expected gajae profile command");
+        };
+        let GajaeProfileCommands::Explain(args) = command else {
+            panic!("expected gajae profile explain command");
+        };
+
+        assert_eq!(args.event, "github.pr-status-changed");
+        assert_eq!(args.repo.as_deref(), Some("clawhip"));
+    }
+
+    #[test]
+    fn parses_gajae_profile_apply_dry_run_subcommand() {
+        let cli = Cli::parse_from(["clawhip", "gajae", "profile", "apply", "--dry-run"]);
+
+        let Commands::Gajae { command } = cli.command.expect("gajae command") else {
+            panic!("expected gajae command");
+        };
+        let GajaeCommands::Profile { command } = command else {
+            panic!("expected gajae profile command");
+        };
+        let GajaeProfileCommands::Apply(args) = command else {
+            panic!("expected gajae profile apply command");
+        };
+
+        assert!(args.dry_run);
+        assert!(!args.approve);
+    }
+
+    #[test]
     fn parses_plugin_list_subcommand() {
         let cli = Cli::parse_from(["clawhip", "plugin", "list"]);
 
@@ -1259,6 +1594,35 @@ mod tests {
         let CronCommands::Run { id } = command;
 
         assert_eq!(id, "dev-followup");
+    }
+
+    #[test]
+    fn parses_gajae_zero_backlog_checkpoint_subcommand() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "gajae",
+            "checkpoint",
+            "zero-backlog",
+            "--repo",
+            "Yeachan-Heo/clawhip",
+            "--open-prs",
+            "0",
+            "--source",
+            "github-api",
+        ]);
+
+        let Some(Commands::Gajae {
+            command: GajaeCommands::Checkpoint { command },
+        }) = cli.command
+        else {
+            panic!("expected gajae checkpoint command");
+        };
+        let GajaeCheckpointCommands::ZeroBacklog(args) = command;
+        assert_eq!(args.repo, "Yeachan-Heo/clawhip");
+        assert_eq!(args.open_issues, 0);
+        assert_eq!(args.open_prs, 0);
+        assert_eq!(args.source, "github-api");
+        assert!(!args.approval_hold);
     }
 
     #[test]
@@ -1513,4 +1877,71 @@ mod tests {
 
         assert!(matches!(command, Some(UpdateCommands::Status)));
     }
+
+    #[test]
+    fn parses_memory_scaffold_channels_default_dry_run() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "memory",
+            "scaffold-channels",
+            "--root",
+            "/tmp/workspace",
+        ]);
+
+        let Commands::Memory { command } = cli.command.expect("memory command") else {
+            panic!("expected memory command");
+        };
+
+        let MemoryCommands::ScaffoldChannels(args) = command else {
+            panic!("expected memory scaffold-channels command");
+        };
+
+        assert_eq!(args.root, Some(PathBuf::from("/tmp/workspace")));
+        assert!(!args.write);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn parses_memory_scaffold_channels_write_force() {
+        let cli = Cli::parse_from([
+            "clawhip",
+            "memory",
+            "scaffold-channels",
+            "--project",
+            "clawhip",
+            "--write",
+            "--force",
+        ]);
+
+        let Commands::Memory { command } = cli.command.expect("memory command") else {
+            panic!("expected memory command");
+        };
+
+        let MemoryCommands::ScaffoldChannels(args) = command else {
+            panic!("expected memory scaffold-channels command");
+        };
+
+        assert_eq!(args.project.as_deref(), Some("clawhip"));
+        assert!(args.write);
+        assert!(args.force);
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MemoryScaffoldChannelsArgs {
+    /// Root directory where MEMORY.md and memory/ should live.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Stable project slug used in related shard links; defaults to the root directory name.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Daily shard name used in related shard links (YYYY-MM-DD).
+    #[arg(long)]
+    pub date: Option<String>,
+    /// Write missing channel profile files instead of only printing proposed actions.
+    #[arg(long, default_value_t = false)]
+    pub write: bool,
+    /// Overwrite existing channel profile files when writing.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }

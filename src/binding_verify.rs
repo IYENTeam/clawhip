@@ -42,6 +42,7 @@ pub enum BindingSource {
     GitMonitor { index: usize },
     TmuxMonitor { index: usize },
     DiscordThreadMonitor { index: usize },
+    WorkspaceMonitor { index: usize },
 }
 
 impl fmt::Display for BindingSource {
@@ -54,6 +55,7 @@ impl fmt::Display for BindingSource {
             Self::DiscordThreadMonitor { index } => {
                 write!(f, "monitors.discord_threads[{}]", index + 1)
             }
+            Self::WorkspaceMonitor { index } => write!(f, "monitors.workspace[{}]", index + 1),
         }
     }
 }
@@ -90,7 +92,8 @@ pub fn collect_bindings(config: &AppConfig) -> Vec<ChannelBinding> {
 
     // routes
     for (index, route) in config.routes.iter().enumerate() {
-        if let Some(channel) = route.channel.as_deref()
+        if route.effective_sink() == "discord"
+            && let Some(channel) = route.channel.as_deref()
             && !channel.is_empty()
         {
             let label = if route.filter.is_empty() {
@@ -110,6 +113,11 @@ pub fn collect_bindings(config: &AppConfig) -> Vec<ChannelBinding> {
                 label,
             });
         }
+
+        // Discord threads are intentionally excluded from channel-binding
+        // verification. The public verify-bindings output is a channel audit;
+        // treating thread IDs as channel IDs would expose private thread
+        // identifiers and live thread names through text/JSON diagnostics.
     }
 
     // git monitors
@@ -152,6 +160,20 @@ pub fn collect_bindings(config: &AppConfig) -> Vec<ChannelBinding> {
                 expected_name: monitor.parent_channel_name.clone(),
                 source: BindingSource::DiscordThreadMonitor { index },
                 label: "discord thread monitor parent".to_string(),
+            });
+        }
+    }
+
+    // workspace monitors
+    for (index, workspace) in config.monitors.workspace.iter().enumerate() {
+        if let Some(channel) = workspace.channel.as_deref()
+            && !channel.is_empty()
+        {
+            bindings.push(ChannelBinding {
+                channel_id: channel.to_string(),
+                expected_name: None,
+                source: BindingSource::WorkspaceMonitor { index },
+                label: format!("workspace:{}", workspace.path),
             });
         }
     }
@@ -332,7 +354,7 @@ mod tests {
 
     use crate::config::{
         DefaultsConfig, GitMonitorConfig, GitRepoMonitor, MonitorConfig, RouteRule,
-        TmuxMonitorConfig, TmuxSessionMonitor,
+        TmuxMonitorConfig, TmuxSessionMonitor, WorkspaceMonitor,
     };
 
     fn config_with_routes(routes: Vec<RouteRule>) -> AppConfig {
@@ -367,6 +389,7 @@ mod tests {
             event: "*".into(),
             filter,
             channel: Some("222".into()),
+            thread: None,
             channel_name: Some("clawhip-dev".into()),
             ..RouteRule::default()
         }]);
@@ -375,6 +398,47 @@ mod tests {
         assert_eq!(bindings[0].channel_id, "222");
         assert_eq!(bindings[0].expected_name.as_deref(), Some("clawhip-dev"));
         assert!(bindings[0].label.contains("repo=clawhip"));
+    }
+
+    #[test]
+    fn skips_route_thread_binding_to_keep_diagnostics_public_safe() {
+        let config = config_with_routes(vec![RouteRule {
+            event: "session.*".into(),
+            thread: Some("123456789012345678".into()),
+            channel_name: Some("private-thread-name".into()),
+            ..RouteRule::default()
+        }]);
+
+        let bindings = collect_bindings(&config);
+
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn audit_text_and_json_do_not_expose_thread_id_or_name() {
+        let config = config_with_routes(vec![RouteRule {
+            event: "session.*".into(),
+            thread: Some("123456789012345678".into()),
+            channel_name: Some("private-thread-name".into()),
+            ..RouteRule::default()
+        }]);
+        let audit = BindingAudit {
+            verdicts: collect_bindings(&config)
+                .into_iter()
+                .map(|binding| BindingVerdict {
+                    binding,
+                    verdict: VerdictKind::NoToken,
+                })
+                .collect(),
+        };
+
+        let text = audit.to_string();
+        let json = serde_json::to_string(&audit).unwrap();
+
+        for rendered in [text, json] {
+            assert!(!rendered.contains("123456789012345678"));
+            assert!(!rendered.contains("private-thread-name"));
+        }
     }
 
     #[test]
@@ -418,6 +482,29 @@ mod tests {
         let bindings = collect_bindings(&config);
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].label, "tmux:issue-42");
+    }
+
+    #[test]
+    fn collects_workspace_monitor_binding() {
+        let config = AppConfig {
+            monitors: MonitorConfig {
+                workspace: vec![WorkspaceMonitor {
+                    path: "/workspace".into(),
+                    channel: Some("555".into()),
+                    ..WorkspaceMonitor::default()
+                }],
+                ..MonitorConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        let bindings = collect_bindings(&config);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].channel_id, "555");
+        assert_eq!(
+            bindings[0].source,
+            BindingSource::WorkspaceMonitor { index: 0 }
+        );
+        assert_eq!(bindings[0].label, "workspace:/workspace");
     }
 
     #[test]

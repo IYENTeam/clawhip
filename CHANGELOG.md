@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.6.11 - 2026-06-16
+
+### Highlights
+
+- keep `clawhip tmux new` sessions alive after launched child commands exit so operators can inspect exit status and scrollback instead of losing the tmux pane.
+
+### Upgrade notes
+
+- crate version is now `0.6.11`
+- existing route/config schema remains compatible; no migration required
+
+## 0.6.10 - 2026-06-11
+
+### Highlights
+
+- add GAJAE receipt ingestion, profile inspection, safe handler execution, integration preflight, doctor diagnostics, mutation plans, and approval hold events so clawhip can route operator decisions through public-safe receipts instead of ad-hoc followups
+- suppress zero-backlog GAJAE followups while still emitting explicit public-safe checkpoint/notice events for auditability
+- auto-scaffold public-safe channel repository profiles from memory context to reduce routing drift
+- make GitHub API rate-limit fallback explicit in cron follow-up observations
+- warn operators when an environment Discord token shadows the configured token, preventing confusing production token precedence surprises
+
+### Upgrade notes
+
+- crate version is now `0.6.10`
+- existing route/config schema remains compatible; no migration required
+- this release is tagged from the verified `dev` line; `main` still needs a separate sync conflict cleanup before it can mirror the release line
+
+## 0.6.9 - 2026-06-04
+
+### Highlights
+
+- add local file sinks and skip idle tmux polling so operators can archive routing output without noisy dead-pane sweeps
+- move CI/release execution onto the self-hosted GAJAE runner path and keep runner prerequisite failures actionable
+- prevent terminal tmux watches from dispatching stale alerts after sessions complete or panes disappear
+- add a recipe-first documentation front door for faster operator setup
+- surface operator questions from native ask tools without losing route context
+- support explicit Discord thread routing targets with redacted diagnostics and telemetry
+- add gateway allowlist verification so route/channel drift is caught before dispatch
+- expose the GAJAE CLI bridge for local profile/status dogfooding
+- add a disabled-by-default Discord watch sidecar that persists local nudge intents without live dispatch
+
+### Upgrade notes
+
+- crate version is now `0.6.9`
+- existing route/config schema remains compatible; no migration required
+- release and CI workflows expect a self-hosted runner labelled `gajae-layofflabs-2`
+
+## 0.6.8 - 2026-05-08
+
+### Highlights
+
+- harden tmux keyword monitoring so stale scrollback and wrapper/audit noise no longer re-trigger false alerts
+- add native hook ingress observability and routing telemetry so dropped, deferred, default-routed, and explicitly-routed hook events are diagnosable without log archaeology
+- make replay/restart handling safer by deferring stale native hook replays before they spray into live channels
+- allow configuring clawhip daemon Tokio worker threads at startup for constrained hosts
+
+### Upgrade notes
+
+- crate version is now `0.6.8`
+- existing route/config schema remains compatible; no migration required
+
 ## 0.6.7 - 2026-04-12
 
 ### Highlights

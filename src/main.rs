@@ -6,11 +6,15 @@ mod core;
 mod cron;
 mod daemon;
 mod discord;
+mod discord_watch;
 mod dispatch;
 mod dynamic_tokens;
 mod event;
 mod events;
+mod gajae;
+mod gateway_allowlist;
 mod hooks;
+mod intake;
 mod keyword_window;
 mod lifecycle;
 mod memory;
@@ -34,9 +38,11 @@ use clap::Parser;
 use tokio::runtime::Builder;
 
 use crate::cli::{
-    AgentCommands, Cli, Commands, ConfigCommand, CronCommands, ExplainArgs, GitCommands,
-    GithubCommands, HooksCommands, MemoryCommands, NativeCommands, PluginCommands, ReleaseCommands,
-    SetupArgs, TmuxCommands, UpdateCommands, VerifyBindingsArgs,
+    AgentCommands, Cli, Commands, ConfigCommand, CronCommands, ExplainArgs,
+    GajaeCheckpointCommands, GajaeCommands, GajaeMutationPlanCommands, GajaeProfileCommands,
+    GajaeReceiptCommands, GitCommands, GithubCommands, HooksCommands, MemoryCommands,
+    NativeCommands, PluginCommands, ReleaseCommands, SetupArgs, TmuxCommands, UpdateCommands,
+    VerifyBindingsArgs, VerifyGatewayAllowlistArgs,
 };
 use crate::client::DaemonClient;
 use crate::config::{AppConfig, SetupEdits};
@@ -317,6 +323,9 @@ async fn real_main(cli: Cli) -> Result<()> {
                 Ok(())
             }
             ConfigCommand::VerifyBindings(args) => run_verify_bindings(config, args).await,
+            ConfigCommand::VerifyGatewayAllowlist(args) => {
+                run_verify_gateway_allowlist(config, args)
+            }
         },
         Commands::Plugin { command } => match command {
             PluginCommands::List => {
@@ -343,9 +352,116 @@ async fn real_main(cli: Cli) -> Result<()> {
         Commands::Memory { command } => match command {
             MemoryCommands::Init(args) => memory::init(args),
             MemoryCommands::Status(args) => memory::status(args),
+            MemoryCommands::ScaffoldChannels(args) => {
+                memory::scaffold_channels(args, config.as_ref())
+            }
         },
         Commands::Hooks { command } => match command {
             HooksCommands::Install(args) => hooks::install(args),
+        },
+        Commands::Gajae { command } => match command {
+            GajaeCommands::Status => Ok(gajae::run(gajae::GajaeCommand::Status)?),
+            GajaeCommands::Preflight => Ok(gajae::run_preflight()?),
+            GajaeCommands::Doctor(args) => Ok(gajae::run_doctor(gajae::DoctorOptions {
+                repo: args.repo,
+                file: args.file,
+            })?),
+            GajaeCommands::Profile { command } => match command {
+                GajaeProfileCommands::Install => {
+                    let status = gajae::run_profile_install()?;
+                    if status.success {
+                        Ok(())
+                    } else {
+                        eprintln!(
+                            "clawhip error: {}",
+                            gajae::profile_install_failure_message(status)
+                        );
+                        std::process::exit(status.code.unwrap_or(1));
+                    }
+                }
+                GajaeProfileCommands::Verify(args) => {
+                    Ok(gajae::run_profile_verify(gajae::ProfileVerifyOptions {
+                        file: args.file,
+                    })?)
+                }
+                GajaeProfileCommands::Inspect(args) => {
+                    Ok(gajae::run_profile_inspect(gajae::ProfileInspectOptions {
+                        file: args.file,
+                    })?)
+                }
+                GajaeProfileCommands::Explain(args) => {
+                    Ok(gajae::run_profile_explain(gajae::ProfileExplainOptions {
+                        file: args.file,
+                        event: args.event,
+                        repo: args.repo,
+                    })?)
+                }
+                GajaeProfileCommands::Apply(args) => {
+                    Ok(gajae::run_profile_apply(gajae::ProfileApplyOptions {
+                        file: args.file,
+                        dry_run: args.dry_run,
+                        approve: args.approve,
+                    })?)
+                }
+            },
+            GajaeCommands::Receipt { command } => match command {
+                GajaeReceiptCommands::Ingest(args) => {
+                    let source = if let Some(file) = args.file {
+                        gajae::ReceiptSource::File(file)
+                    } else if args.stdin {
+                        let input = gajae::read_receipt_stdin(&mut std::io::stdin())?;
+                        gajae::ReceiptSource::Stdin(input)
+                    } else {
+                        return Err("receipt ingest requires --file or --stdin".into());
+                    };
+                    let send = args.send;
+                    let result = gajae::ingest_receipt(gajae::ReceiptIngestRequest {
+                        family: args.family,
+                        source,
+                        channel: args.channel,
+                    })?;
+                    if send {
+                        let client = DaemonClient::from_config(config.as_ref());
+                        send_incoming_event(&client, result.event).await?;
+                        println!("{{\"status\":\"sent\"}}");
+                    } else {
+                        println!("{}", serde_json::to_string(&result.event)?);
+                    }
+                    Ok(())
+                }
+            },
+            GajaeCommands::MutationPlan { command } => match command {
+                GajaeMutationPlanCommands::Plan(args) => {
+                    let plan = gajae::github_mutation_plan(gajae::GithubMutationPlanRequest {
+                        repo: args.repo,
+                        kind: args.kind,
+                        target: args.target,
+                        body: args.body,
+                        label: args.label,
+                        actor: args.actor,
+                        existing_keys: args.existing_keys,
+                    })?;
+                    println!("{}", serde_json::to_string(&plan)?);
+                    Ok(())
+                }
+            },
+            GajaeCommands::Checkpoint { command } => match command {
+                GajaeCheckpointCommands::ZeroBacklog(args) => {
+                    let checkpoint = gajae::zero_backlog_followup_checkpoint(
+                        gajae::ZeroBacklogCheckpointRequest {
+                            repo: args.repo,
+                            open_issues: args.open_issues,
+                            open_prs: args.open_prs,
+                            action_needed_sessions: args.action_needed_sessions,
+                            observation_source: args.source,
+                            approval_hold: args.approval_hold,
+                            release_hold: args.release_hold,
+                        },
+                    )?;
+                    println!("{}", serde_json::to_string(&checkpoint)?);
+                    Ok(())
+                }
+            },
         },
         Commands::Release { command } => match command {
             ReleaseCommands::Preflight { version, repo } => release_preflight::run(repo, version),
@@ -504,6 +620,31 @@ async fn run_verify_bindings(config: Arc<AppConfig>, args: VerifyBindingsArgs) -
     }
 
     if !audit.all_ok() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_verify_gateway_allowlist(
+    config: Arc<AppConfig>,
+    args: VerifyGatewayAllowlistArgs,
+) -> Result<()> {
+    let gateway_config_path = match args.gateway_config {
+        Some(path) => path,
+        None => gateway_allowlist::default_gateway_config_path().ok_or_else(|| {
+            "could not resolve default gateway config path; pass --gateway-config <path>"
+                .to_string()
+        })?,
+    };
+    let report = gateway_allowlist::verify_from_path(&config, &gateway_config_path)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{report}");
+    }
+
+    if !report.all_ok() {
         std::process::exit(1);
     }
     Ok(())

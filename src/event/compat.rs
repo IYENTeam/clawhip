@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::Result;
 use crate::event::{
-    AgentEvent, CustomEvent, EventBody, EventEnvelope, EventMetadata, EventPriority,
-    GitBranchChangedEvent, GitCommitAggregatedEvent, GitCommitEvent, GitHubCIEvent,
+    AgentEvent, CustomEvent, DiscordNudgeIntentEvent, EventBody, EventEnvelope, EventMetadata,
+    EventPriority, GitBranchChangedEvent, GitCommitAggregatedEvent, GitCommitEvent, GitHubCIEvent,
     GitHubIssueEvent, GitHubPREvent, GitHubPRStatusEvent, GitHubReleaseEvent,
     TmuxKeywordAggregatedEvent, TmuxKeywordEvent, TmuxStaleEvent, WorkspaceEvent,
 };
@@ -65,6 +65,36 @@ fn body_for(kind: &str, payload: &Value) -> Result<EventBody> {
         "github.release-edited" => Ok(EventBody::GitHubReleaseEdited(github_release_event(
             payload,
         )?)),
+        "gajae.release.hold" | "gajae.merge.hold" => Ok(EventBody::Custom(CustomEvent {
+            kind: kind.to_string(),
+            message: optional_string_field(payload, "disallowed_action")
+                .unwrap_or_else(|| kind.to_string()),
+            payload: Some(payload.clone()),
+        })),
+        "discord.message-create" => Ok(EventBody::DiscordMessageCreate(serde_json::from_value(
+            payload.clone(),
+        )?)),
+        "discord-watch.nudge-intent" => Ok(EventBody::DiscordWatchNudgeIntent(
+            DiscordNudgeIntentEvent {
+                intent_id: string_field(payload, "id")?,
+                reasons: payload
+                    .get("reasons")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                content: string_field(payload, "content")?,
+                local_only: payload
+                    .get("local_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+        )),
         "github.ci-failed" => Ok(EventBody::GitHubCIFailed(GitHubCIEvent {
             repo: string_field(payload, "repo")?,
             number: payload.get("number").and_then(Value::as_u64),
@@ -392,7 +422,10 @@ fn priority_for(kind: &str, payload: &Value) -> EventPriority {
         | "session.stopped"
         | "tmux.stale"
         | "workspace.session.blocked" => EventPriority::High,
-        "github.release-published" | "github.release-prereleased" => EventPriority::High,
+        "github.release-published"
+        | "github.release-prereleased"
+        | "gajae.release.hold"
+        | "gajae.merge.hold" => EventPriority::High,
         "github.pr-status-changed"
             if optional_string_field(payload, "new_status")
                 .map(|status| status == "merged" || status == "closed")
@@ -846,5 +879,34 @@ mod tests {
         let envelope = from_incoming_event(&event).unwrap();
         assert_eq!(envelope.metadata.priority, EventPriority::Normal);
         assert!(matches!(envelope.body, EventBody::GitHubReleaseEdited(_)));
+    }
+
+    #[test]
+    fn maps_gajae_hold_event_as_high_priority_custom_event() {
+        let event = IncomingEvent::gajae_release_hold(
+            "Yeachan-Heo/clawhip".into(),
+            "owner-maintainer".into(),
+            "edited".into(),
+            "v0.6.9".into(),
+            "publish or retag release edited".into(),
+            "release boundaries require approval".into(),
+            Some("maintainer".into()),
+        );
+
+        let envelope = from_incoming_event(&event).unwrap();
+        assert_eq!(envelope.source, "gajae");
+        assert_eq!(
+            envelope.metadata.channel_hint.as_deref(),
+            Some("owner-maintainer")
+        );
+        assert_eq!(envelope.metadata.priority, EventPriority::High);
+        match envelope.body {
+            EventBody::Custom(body) => {
+                assert_eq!(body.kind, "gajae.release.hold");
+                assert_eq!(body.message, "publish or retag release edited");
+                assert_eq!(body.payload.unwrap()["held_action_executed"], json!(false));
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
     }
 }

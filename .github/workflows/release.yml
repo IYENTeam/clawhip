@@ -47,7 +47,7 @@ on:
 jobs:
   # Fail fast if tag/Cargo.toml/Cargo.lock/CHANGELOG are out of sync.
   preflight:
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     if: ${{ !github.event.pull_request }}
     steps:
       - uses: actions/checkout@v6
@@ -55,6 +55,45 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Ensure native build tools
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for tool in cc make xz; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              missing+=("$tool")
+            fi
+          done
+
+          if (( ${#missing[@]} == 0 )); then
+            echo "Native build tools already available"
+            exit 0
+          fi
+
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "::error::Missing required native build tools (${missing[*]}) and apt-get is unavailable. Install build-essential and xz-utils on the self-hosted runner."
+            exit 1
+          fi
+
+          if [[ "$(id -u)" == "0" ]]; then
+            apt_get=(apt-get)
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            apt_get=(sudo apt-get)
+          else
+            echo "::error::Missing required native build tools (${missing[*]}) and apt-get cannot run with root privileges. Install build-essential and xz-utils on the self-hosted runner or configure passwordless sudo."
+            exit 1
+          fi
+
+          "${apt_get[@]}" update
+          "${apt_get[@]}" install -y --no-install-recommends build-essential xz-utils
+
+          for tool in cc make xz; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Required tool '$tool' is still missing after apt install."
+              exit 1
+            fi
+          done
       - name: Build clawhip (release preflight needs the binary)
         run: cargo build --release
       - name: Release consistency preflight
@@ -64,8 +103,8 @@ jobs:
   plan:
     needs:
       - preflight
-    if: ${{ always() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
-    runs-on: "ubuntu-22.04"
+    if: ${{ always() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -78,6 +117,46 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Ensure native build tools
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for tool in cc make xz; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              missing+=("$tool")
+            fi
+          done
+
+          if (( ${#missing[@]} == 0 )); then
+            echo "Native build tools already available"
+            exit 0
+          fi
+
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "::error::Missing required native build tools (${missing[*]}) and apt-get is unavailable. Install build-essential and xz-utils on the self-hosted runner."
+            exit 1
+          fi
+
+          if [[ "$(id -u)" == "0" ]]; then
+            apt_get=(apt-get)
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            apt_get=(sudo apt-get)
+          else
+            echo "::error::Missing required native build tools (${missing[*]}) and apt-get cannot run with root privileges. Install build-essential and xz-utils on the self-hosted runner or configure passwordless sudo."
+            exit 1
+          fi
+
+          "${apt_get[@]}" update
+          "${apt_get[@]}" install -y --no-install-recommends build-essential xz-utils
+
+          for tool in cc make xz; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Required tool '$tool' is still missing after apt install."
+              exit 1
+            fi
+          done
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -182,7 +261,8 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    runs-on: "ubuntu-22.04"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -191,6 +271,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
@@ -233,14 +314,13 @@ jobs:
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    runs-on: "ubuntu-22.04"
-    outputs:
-      val: ${{ steps.host.outputs.manifest }}
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
@@ -280,15 +360,31 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+        shell: bash
         run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          set -euo pipefail
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          manifest_values="$RUNNER_TEMP/dist-manifest-values"
+          python3 - <<'PY' > "$manifest_values"
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("dist-manifest.json").read_text())
+          print("true" if manifest.get("announcement_is_prerelease") is True else "false")
+          print(manifest["announcement_title"])
+          Path(os.environ["RUNNER_TEMP"], "notes.txt").write_text(manifest["announcement_github_body"])
+          PY
+
+          mapfile -t manifest_lines < "$manifest_values"
+          prerelease_flag=()
+          if [[ "${manifest_lines[0]}" == "true" ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+          announcement_title="${manifest_lines[1]}"
+
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" "${prerelease_flag[@]}" --title "$announcement_title" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   # Publish to crates.io
   publish-crates:
@@ -296,7 +392,7 @@ jobs:
       - plan
       - host
     if: ${{ always() && needs.host.result == 'success' && needs.plan.outputs.publishing == 'true' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
@@ -320,7 +416,7 @@ jobs:
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, Linux, X64, gajae-layofflabs-2]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
