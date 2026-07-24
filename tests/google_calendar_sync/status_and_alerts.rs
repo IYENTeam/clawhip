@@ -31,9 +31,8 @@ async fn status_reports_calendar_cursor_channel_expiration_and_last_notification
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await

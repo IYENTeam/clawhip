@@ -13,8 +13,10 @@ Google requires the callback to use HTTPS with a valid public certificate.
 ## Configure synchronization
 
 Authorize Google Calendar with the read-only
-`https://www.googleapis.com/auth/calendar.events.readonly` scope. The broader
-`calendar.readonly` scope and every writable Calendar scope are rejected.
+`https://www.googleapis.com/auth/calendar.events.readonly` scope. Every other
+Google Calendar scope, including `calendar.readonly` and writable scopes, is
+rejected. Only `openid`, `email`, and `userinfo.email` identity scopes are
+allowed alongside the required Calendar scope.
 Store the resulting authorized-user JSON outside the TOML file and restrict it
 to the daemon user:
 
@@ -35,14 +37,24 @@ renewal_margin_secs = 86400
 ```
 
 `credentials_file`, `state_file`, `callback_url`, and `channel_token` are
-required together. Credential files readable by group or other users are
-rejected. OAuth client secrets and refresh tokens are never serialized into
-the op_pi config or status output. Because the channel token is a secret, the
-config file must also be a regular file accessible only by its owner:
+required together. A durable-sync `channel_token` must contain at least 32
+bytes. Credential files readable by group or other users are rejected. OAuth
+client secrets and refresh tokens are never serialized into the op_pi config or
+status output. Because an inline channel token is a secret, its config file
+must also be a regular file accessible only by its owner:
 
 ```bash
 chmod 600 ~/.op_pi/config.toml
 ```
+
+### Webhook-only migration
+
+PR #17 webhook-only configurations that set only `channel_token` remain
+compatible, including existing tokens shorter than 32 bytes. Before adding
+`credentials_file`, `state_file`, and `callback_url` to enable durable sync,
+replace a short token with a new random value of at least 32 bytes, then ensure
+the config is mode `0600`. Configurations without an inline channel token may
+remain mode `0644`; loading never changes their permissions.
 
 Release builds accept only the official Google Calendar API and OAuth token
 origins. The callback must be HTTPS and cannot contain userinfo, a query, or a

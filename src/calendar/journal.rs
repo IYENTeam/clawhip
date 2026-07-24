@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -17,7 +18,7 @@ use crate::config::AppConfig;
 const MAX_DEFERRED_NOTIFICATIONS: usize = 32;
 static JOURNAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct DeferredCalendarNotification {
     pub channel_id: String,
     pub resource_id: String,
@@ -31,16 +32,13 @@ pub(crate) fn append_deferred_notification(
     notification: &DeferredCalendarNotification,
 ) -> Result<()> {
     with_journal_lock(|| {
-        let mut notifications = read_deferred_notifications_locked(state_path)?;
-        if notifications
-            .iter()
-            .any(|existing| same_notification(existing, notification))
-        {
-            return Ok(());
-        }
-        notifications.push(notification.clone());
+        let notifications = coalesce_deferred_notifications(
+            read_deferred_notifications_locked(state_path)?
+                .into_iter()
+                .chain(std::iter::once(notification.clone())),
+        );
         if notifications.len() > MAX_DEFERRED_NOTIFICATIONS {
-            notifications.drain(..notifications.len() - MAX_DEFERRED_NOTIFICATIONS);
+            return Err(anyhow!("Google Calendar deferred notification journal is full").into());
         }
         write_deferred_notifications_locked(state_path, &notifications)
     })
@@ -56,17 +54,21 @@ pub(crate) fn read_deferred_notifications(
 pub(crate) fn remove_deferred_notification(
     state_path: &Path,
     channel_id: &str,
+    resource_id: &str,
+    resource_uri: &str,
     message_number: u64,
 ) -> Result<()> {
     with_journal_lock(|| {
-        let notifications = read_deferred_notifications_locked(state_path)?;
-        let retained = notifications
-            .into_iter()
-            .filter(|notification| {
-                notification.channel_id != channel_id
-                    || notification.message_number != message_number
-            })
-            .collect::<Vec<_>>();
+        let retained = coalesce_deferred_notifications(
+            read_deferred_notifications_locked(state_path)?
+                .into_iter()
+                .filter(|notification| {
+                    notification.channel_id != channel_id
+                        || notification.resource_id != resource_id
+                        || notification.resource_uri != resource_uri
+                        || notification.message_number != message_number
+                }),
+        );
         write_deferred_notifications_locked(state_path, &retained)
     })
 }
@@ -89,7 +91,8 @@ pub(crate) fn replay_deferred_notifications(
     calendar_id: &str,
 ) -> Result<()> {
     with_journal_lock(|| {
-        let notifications = read_deferred_notifications_locked(state_path)?;
+        let notifications =
+            coalesce_deferred_notifications(read_deferred_notifications_locked(state_path)?);
         for deferred in notifications {
             let (persisted, _ack) = oneshot::channel();
             let notification = CalendarNotification {
@@ -112,15 +115,32 @@ fn with_journal_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     operation()
 }
 
-fn same_notification(
-    left: &DeferredCalendarNotification,
-    right: &DeferredCalendarNotification,
-) -> bool {
-    left.channel_id == right.channel_id
-        && left.resource_id == right.resource_id
-        && left.resource_uri == right.resource_uri
-        && left.message_number == right.message_number
-        && left.resource_state == right.resource_state
+// Keep the highest activation and ordinary callback per complete watch identity. The
+// leading key flag gives replay a stable order with all activations first.
+fn coalesce_deferred_notifications(
+    notifications: impl IntoIterator<Item = DeferredCalendarNotification>,
+) -> Vec<DeferredCalendarNotification> {
+    let mut by_identity = BTreeMap::new();
+    for notification in notifications {
+        let identity = (
+            notification.resource_state != "sync",
+            notification.channel_id.clone(),
+            notification.resource_id.clone(),
+            notification.resource_uri.clone(),
+        );
+        match by_identity.entry(identity) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(notification);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let existing = entry.get();
+                if notification.message_number > existing.message_number {
+                    entry.insert(notification);
+                }
+            }
+        }
+    }
+    by_identity.into_values().collect()
 }
 
 fn read_deferred_notifications_locked(

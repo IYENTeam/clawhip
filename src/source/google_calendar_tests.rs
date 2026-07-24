@@ -2,7 +2,53 @@ use crate::calendar::journal::{
     DeferredCalendarNotification, append_deferred_notification, read_deferred_notifications,
     replay_deferred_notifications,
 };
+use std::time::Duration;
+
+use crate::calendar::operations::retry_delay;
 use crate::calendar::state::{CalendarState, WatchChannel};
+
+use super::next_watch_wait;
+
+#[test]
+fn watch_retry_attempts_increase_until_all_watch_failures_recover() {
+    let mut attempts = 0;
+    let successful_wait = Duration::from_secs(300);
+    let mut state = CalendarState::default();
+    state.record_watch_failure("calendar_watch_renewal_failed");
+
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(1)
+    );
+    assert_eq!(attempts, 1);
+    state.record_watch_failure("calendar_watch_stop_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(2)
+    );
+    assert_eq!(attempts, 2);
+
+    state.clear_watch_failure("calendar_watch_renewal_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(3)
+    );
+    assert_eq!(attempts, 3);
+
+    attempts = u32::MAX;
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(u32::MAX)
+    );
+    assert_eq!(attempts, u32::MAX);
+
+    state.clear_watch_failure("calendar_watch_stop_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        successful_wait
+    );
+    assert_eq!(attempts, 0);
+}
 
 #[test]
 fn replayed_journal_survives_a_stale_state_save_and_restores_pending_sync() {

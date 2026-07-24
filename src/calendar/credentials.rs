@@ -74,9 +74,10 @@ impl AuthorizedUserCredentials {
             .json::<TokenResponse>()
             .await?;
         if !has_calendar_read_scope(&response.scope) {
-            return Err(
-                anyhow!("Google OAuth token is missing a Calendar events read scope").into(),
-            );
+            return Err(anyhow!(
+                "Google OAuth token must grant only the Calendar events read scope"
+            )
+            .into());
         }
         Ok(response.access_token)
     }
@@ -120,16 +121,8 @@ fn has_calendar_read_scope(scopes: &str) -> bool {
     for scope in scopes.split_ascii_whitespace() {
         match scope {
             READONLY_SCOPE => has_required_read_scope = true,
-            // Non-Calendar identity and cloud-platform scopes are permitted to
-            // preserve deployed gcloud ADC credentials. Any additional Google
-            // Calendar scope is rejected: it may grant write access and is not
-            // needed for this read-only integration.
-            _ if scope == "https://www.googleapis.com/auth/calendar"
-                || scope.starts_with("https://www.googleapis.com/auth/calendar.") =>
-            {
-                return false;
-            }
-            _ => {}
+            "openid" | "email" | "https://www.googleapis.com/auth/userinfo.email" => {}
+            _ => return false,
         }
     }
     has_required_read_scope

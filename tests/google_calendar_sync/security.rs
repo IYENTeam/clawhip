@@ -31,9 +31,8 @@ async fn general_event_endpoint_cannot_trigger_calendar_synchronization() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
@@ -61,7 +60,7 @@ async fn general_event_endpoint_cannot_trigger_calendar_synchronization() {
         .send()
         .await
         .expect("post forged general event");
-    assert_eq!(forged.status(), StatusCode::ACCEPTED);
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
     let barrier = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{daemon_port}/google/calendar"))
         .headers(calendar_headers())
@@ -87,7 +86,6 @@ async fn watch_creation_accepts_sync_callback_before_watch_response() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let (mut state, _delivery_rx) = fake_state(false);
     state.callback_during_watch = Some(format!("http://127.0.0.1:{daemon_port}/google/calendar"));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -113,7 +111,7 @@ async fn watch_creation_accepts_sync_callback_before_watch_response() {
     });
     seed_active_watch(&temp, current_time_millis() - 1);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, _listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, _listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.callback_completed.notified())
         .await
@@ -162,9 +160,8 @@ async fn authenticated_untracked_channel_cannot_poison_sync_progress() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await

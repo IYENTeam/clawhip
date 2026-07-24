@@ -1,7 +1,9 @@
 use crate::Result;
 use crate::calendar::CalendarNotification;
 use crate::calendar::api::{CalendarApi, CalendarEvent};
-use crate::calendar::operations::{CalendarFailure, FailureDomain, retire_active_watch};
+use crate::calendar::operations::{
+    CalendarFailure, FailureDomain, WATCH_ACTIVATION_TIMED_OUT, retire_active_watch,
+};
 use crate::calendar::resource;
 use crate::calendar::state::CalendarState;
 use crate::events::IncomingEvent;
@@ -58,22 +60,48 @@ pub enum SyncResult {
     Recover(SyncJob),
 }
 
+/// The outcome of authenticating a Calendar callback against persisted watch state.
+///
+/// Only `Accepted` callbacks are safe to expose as trusted webhook events.
+pub enum NotificationAcceptance {
+    Accepted(Option<SyncJob>),
+    Rejected(NotificationRejection),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationRejection {
+    UnsupportedResourceState,
+    UntrackedWatch,
+    StaleOrReplayed,
+}
+
 pub fn accept_notification(
     state: &mut CalendarState,
     path: &std::path::Path,
     notification: &CalendarNotification,
     calendar_id: &str,
-) -> Result<Option<SyncJob>> {
-    if !matches!(notification.resource_state.as_str(), "sync" | "exists")
-        || !matches_watch(state, notification, calendar_id)
-        || !state.is_new_message(&notification.channel_id, notification.message_number)
+) -> Result<NotificationAcceptance> {
+    if !matches!(notification.resource_state.as_str(), "sync" | "exists") {
+        return Ok(NotificationAcceptance::Rejected(
+            NotificationRejection::UnsupportedResourceState,
+        ));
+    }
+    if !matches_watch(state, notification, calendar_id) {
+        return Ok(NotificationAcceptance::Rejected(
+            NotificationRejection::UntrackedWatch,
+        ));
+    }
+    if !state.is_new_message(&notification.channel_id, notification.message_number)
         || state.pending_sync.as_ref().is_some_and(|pending| {
             pending.channel == notification.channel_id
                 && pending.message >= notification.message_number
         })
     {
-        return Ok(None);
+        return Ok(NotificationAcceptance::Rejected(
+            NotificationRejection::StaleOrReplayed,
+        ));
     }
+
     state.last_notification_at = Some(now_rfc3339());
     state.last_message_number = Some(notification.message_number);
     if notification.resource_state == "sync"
@@ -84,16 +112,19 @@ pub fn accept_notification(
     {
         retire_active_watch(state);
         state.active_watch = state.pending_watch.take();
+        state.clear_watch_failure(WATCH_ACTIVATION_TIMED_OUT);
     }
     state.pending_sync = Some(crate::calendar::state::PendingSyncTrigger {
         channel: notification.channel_id.clone(),
         message: notification.message_number,
     });
     state.save(path)?;
-    Ok(Some(SyncJob::Incremental {
-        channel: notification.channel_id.clone(),
-        message: notification.message_number,
-    }))
+    Ok(NotificationAcceptance::Accepted(Some(
+        SyncJob::Incremental {
+            channel: notification.channel_id.clone(),
+            message: notification.message_number,
+        },
+    )))
 }
 
 pub async fn run_sync(

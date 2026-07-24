@@ -3,7 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::Result;
 use crate::calendar::state::WatchChannel;
 
-const WATCH_LIFETIME_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+pub const REQUESTED_WATCH_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
+const WATCH_LIFETIME_MILLIS: i64 = (REQUESTED_WATCH_LIFETIME_SECS as i64) * 1000;
 
 pub fn now_millis() -> Result<i64> {
     Ok(i64::try_from(
@@ -56,9 +57,20 @@ pub fn renewal_delay(
 
 #[cfg(test)]
 mod tests {
-    use super::{renewal_delay, renewal_due};
+    use super::{
+        REQUESTED_WATCH_LIFETIME_SECS, renewal_delay, renewal_due, requested_expiration_ms,
+    };
     use crate::calendar::state::WatchChannel;
     use std::time::Duration;
+
+    #[test]
+    fn requested_expiration_uses_the_fixed_seven_day_lifetime() {
+        assert_eq!(
+            requested_expiration_ms(1_000),
+            1_000 + (REQUESTED_WATCH_LIFETIME_SECS as i64 * 1_000)
+        );
+        assert_eq!(REQUESTED_WATCH_LIFETIME_SECS, 7 * 24 * 60 * 60);
+    }
 
     #[test]
     fn pending_activation_deadline_drives_replacement() {

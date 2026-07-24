@@ -71,9 +71,8 @@ async fn accepted_calendar_change_triggers_incremental_sync_with_saved_token() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
@@ -132,9 +131,8 @@ async fn expired_incremental_cursor_triggers_fresh_full_sync() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await

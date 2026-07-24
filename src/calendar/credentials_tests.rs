@@ -1,25 +1,43 @@
 use super::{AuthorizedUserCredentials, READONLY_SCOPE, has_calendar_read_scope};
 
 #[test]
-fn accepts_only_read_only_calendar_scopes() {
-    assert!(has_calendar_read_scope(READONLY_SCOPE));
-    // Identity and cloud-platform scopes are intentionally allowed so the
-    // gcloud ADC deployed alongside this service remains compatible.
-    assert!(has_calendar_read_scope(&format!(
-        "openid email https://www.googleapis.com/auth/cloud-platform {READONLY_SCOPE}"
-    )));
-    assert!(!has_calendar_read_scope(
-        "https://www.googleapis.com/auth/calendar.readonly"
-    ));
-    assert!(!has_calendar_read_scope(&format!(
-        "{READONLY_SCOPE} https://www.googleapis.com/auth/calendar.events"
-    )));
-    assert!(!has_calendar_read_scope(
-        "https://www.googleapis.com/auth/calendar.events"
-    ));
-    assert!(!has_calendar_read_scope(
-        "https://www.googleapis.com/auth/calendar"
-    ));
+fn requires_readonly_calendar_scope_and_allows_harmless_identity_scopes() {
+    for scopes in [
+        READONLY_SCOPE.to_string(),
+        format!("  {READONLY_SCOPE}\t\n"),
+        format!("{READONLY_SCOPE} {READONLY_SCOPE}"),
+        format!("openid email https://www.googleapis.com/auth/userinfo.email {READONLY_SCOPE}"),
+    ] {
+        assert!(
+            has_calendar_read_scope(&scopes),
+            "required scope set should be accepted: {scopes:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_missing_or_non_readonly_calendar_scopes() {
+    for scopes in [
+        "",
+        " \t\n",
+        "openid",
+        "https://www.googleapis.com/auth/cloud-platform",
+        &format!("{READONLY_SCOPE} https://www.googleapis.com/auth/cloud-platform"),
+        &format!("{READONLY_SCOPE} https://www.googleapis.com/auth/drive"),
+        &format!("{READONLY_SCOPE} https://mail.google.com/"),
+        &format!("{READONLY_SCOPE} profile"),
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events.readonly-other",
+        &format!("{READONLY_SCOPE} https://www.googleapis.com/auth/calendar.events"),
+        &format!("openid {READONLY_SCOPE} https://www.googleapis.com/auth/calendar.readonly"),
+    ] {
+        assert!(
+            !has_calendar_read_scope(scopes),
+            "missing or over-broad Calendar scope should be rejected: {scopes:?}"
+        );
+    }
 }
 
 #[cfg(unix)]

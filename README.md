@@ -238,6 +238,7 @@ local_path = "/var/log/op_pi/cloudflare-audit.jsonl"
 bot_token = "xoxb-your-slack-bot-token"
 
 [google_calendar]
+# At least 32 bytes when credentials_file/state_file enable durable sync.
 channel_token = "replace-with-a-random-channel-token"
 credentials_file = "/Users/you/.op_pi/google-calendar-oauth.json"
 state_file = "/Users/you/.op_pi/google-calendar-state.json"
@@ -347,7 +348,10 @@ verification.
 - binds accepted notifications to tracked channel/resource identities while
   supporting Google's `primary`/canonical-account URI alias
 - prevents general `/event` traffic from triggering Calendar API synchronization
-- uses external mode-0600 OAuth credentials with Calendar read-only scope
+- uses external mode-0600 OAuth credentials with the required Calendar events
+  read-only scope (`openid`, `email`, and `userinfo.email` are also accepted)
+- requires a private mode-0600 config for an inline channel token; legacy
+  webhook-only short tokens remain valid until durable sync is enabled
 - performs retrying full/incremental sync with durable webhook triggers,
   sink-confirmed outbox delivery, and HTTP 410 recovery
 - renews expiring watch channels, bounds pending activation, and durably retires old channels

@@ -86,9 +86,8 @@ async fn failed_incremental_sync_degrades_health_and_delivers_alert() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
@@ -123,7 +122,10 @@ async fn failed_incremental_sync_degrades_health_and_delivers_alert() {
     state
         .incremental_failures_remaining
         .store(0, Ordering::SeqCst);
-    let (restarted, restarted_listening) = spawn_daemon(&config_path, daemon_port);
+    let daemon_listener = TcpListener::bind(("127.0.0.1", daemon_port))
+        .await
+        .expect("rebind daemon proxy port");
+    let (restarted, restarted_listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
     timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");

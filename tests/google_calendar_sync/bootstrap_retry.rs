@@ -30,7 +30,6 @@ async fn repaired_oauth_credentials_recover_without_daemon_restart() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let credentials_path = temp.path().join("oauth.json");
     let valid_credentials =
@@ -39,7 +38,7 @@ async fn repaired_oauth_credentials_recover_without_daemon_restart() {
     #[cfg(unix)]
     std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o600))
         .expect("secure invalid credential fixture");
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
@@ -89,9 +88,8 @@ async fn failed_initial_calendar_sync_retries_without_daemon_restart() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
-    let (daemon, _listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, _listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(Duration::from_secs(10), async {
         while state.initial_requests.load(Ordering::SeqCst) < 2 {

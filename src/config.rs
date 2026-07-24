@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,6 +9,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::calendar::watch::REQUESTED_WATCH_LIFETIME_SECS;
 use crate::events::MessageFormat;
 use crate::source::workspace::{default_workspace_debounce_ms, default_workspace_watch_dirs};
 
@@ -869,14 +870,15 @@ where
 
 impl AppConfig {
     pub fn load_or_default(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let raw = fs::read_to_string(path)?;
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error.into()),
+        };
         let mut config: Self = toml::from_str(&raw)?;
         config.normalize();
         if config.google_calendar.channel_token.is_some() {
-            ensure_private_regular_config_file(path)?;
+            validate_private_regular_config_file(path)?;
         }
         Ok(config)
     }
@@ -886,17 +888,19 @@ impl AppConfig {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if self.google_calendar.channel_token.is_some() && fs::symlink_metadata(path).is_ok() {
-            require_regular_config_file(path)?;
-        }
-        fs::write(path, self.to_pretty_toml()?)?;
+        let contents = self.to_pretty_toml()?;
         if self.google_calendar.channel_token.is_some() {
-            ensure_private_regular_config_file(path)?;
+            write_private_config(path, contents.as_bytes())
+        } else {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, contents)?;
+            Ok(())
         }
-        Ok(())
     }
 
     pub fn effective_slack_token(&self) -> Option<String> {
@@ -1067,6 +1071,21 @@ impl AppConfig {
                 )
                 .into());
             }
+        }
+        if self.google_calendar.sync_enabled()
+            && let Some(channel_token) = self.google_calendar.channel_token.as_deref()
+            && channel_token.len() < 32
+        {
+            return Err(
+                "google_calendar.channel_token must be at least 32 bytes when durable sync is enabled"
+                    .into(),
+            );
+        }
+        if self.google_calendar.renewal_margin_secs >= REQUESTED_WATCH_LIFETIME_SECS {
+            return Err(format!(
+                "google_calendar.renewal_margin_secs must be less than the requested watch lifetime of {REQUESTED_WATCH_LIFETIME_SECS} seconds"
+            )
+            .into());
         }
         if let Some(callback_url) = self.google_calendar.callback_url.as_deref() {
             validate_google_calendar_callback_url(callback_url)?;
@@ -1823,7 +1842,7 @@ fn is_debug_loopback_http_url(url: &Url, path: &str) -> bool {
 fn require_regular_config_file(path: &Path) -> Result<()> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(format!(
-            "config file {} with google_calendar.channel_token must be a regular file",
+            "config file {} must be a regular file before loading secrets",
             path.display()
         )
         .into());
@@ -1831,7 +1850,7 @@ fn require_regular_config_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_private_regular_config_file(path: &Path) -> Result<()> {
+fn validate_private_regular_config_file(path: &Path) -> Result<()> {
     require_regular_config_file(path)?;
 
     #[cfg(unix)]
@@ -1840,10 +1859,55 @@ fn ensure_private_regular_config_file(path: &Path) -> Result<()> {
 
         let mode = fs::metadata(path)?.permissions().mode();
         if mode & 0o077 != 0 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            return Err(format!(
+                "config file {} must not grant group or other permissions; set mode 0600 before loading secrets",
+                path.display()
+            )
+            .into());
         }
     }
     Ok(())
+}
+
+fn write_private_config(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => require_regular_config_file(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("config path {} must have a valid file name", path.display()))?,
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn normalize_text(value: Option<String>) -> Option<String> {
@@ -1860,6 +1924,17 @@ fn normalize_text(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_private_config_fixture(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+        fs::write(path, contents)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn discord_token_source_prefers_env_over_config() {
@@ -1938,7 +2013,7 @@ mod tests {
     fn load_or_default_parses_discord_thread_route_target() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             r#"
 [providers.discord]
@@ -2372,7 +2447,7 @@ thread = "123456789012345678"
     fn load_or_default_parses_dispatch_ci_batch_window_secs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nci_batch_window_secs = 90\n",
         )
@@ -2388,7 +2463,7 @@ thread = "123456789012345678"
     fn load_or_default_parses_dispatch_routine_batch_window_secs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nroutine_batch_window_secs = 9\n",
         )
@@ -2408,7 +2483,8 @@ thread = "123456789012345678"
     fn load_or_default_defaults_dispatch_ci_batch_window_when_omitted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "[providers.discord]\ntoken = \"abc\"\n").unwrap();
+        write_private_config_fixture(&path, "[providers.discord]\ntoken = \"abc\"\n")
+            .expect("write config fixture");
 
         let config = AppConfig::load_or_default(&path).unwrap();
 
@@ -2420,7 +2496,8 @@ thread = "123456789012345678"
     fn load_or_default_defaults_routine_batch_window_when_omitted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "[providers.discord]\ntoken = \"abc\"\n").unwrap();
+        write_private_config_fixture(&path, "[providers.discord]\ntoken = \"abc\"\n")
+            .expect("write config fixture");
 
         let config = AppConfig::load_or_default(&path).unwrap();
 
@@ -2436,7 +2513,7 @@ thread = "123456789012345678"
     fn load_or_default_preserves_zero_dispatch_ci_batch_window_secs_until_validation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nci_batch_window_secs = 0\n",
         )
@@ -2452,7 +2529,7 @@ thread = "123456789012345678"
     fn load_or_default_allows_zero_dispatch_routine_batch_window_secs_to_disable_batching() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             "[providers.discord]\ntoken = \"abc\"\n[dispatch]\nroutine_batch_window_secs = 0\n",
         )
@@ -2468,7 +2545,7 @@ thread = "123456789012345678"
     fn load_or_default_parses_cron_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(
+        write_private_config_fixture(
             &path,
             r#"[providers.discord]
 token = "abc"
@@ -2604,7 +2681,7 @@ path = '/tmp/repo'
     fn workspace_monitor_config_parses_and_normalizes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(
+        write_private_config_fixture(
             &path,
             format!(
                 r#"[providers.discord]
@@ -2641,7 +2718,8 @@ poll_interval_secs = 9
     fn config_without_workspace_monitor_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[providers.discord]\ntoken = \"abc\"\n").unwrap();
+        write_private_config_fixture(&path, "[providers.discord]\ntoken = \"abc\"\n")
+            .expect("write config fixture");
 
         let config = AppConfig::load_or_default(&path).unwrap();
         assert!(config.monitors.workspace.is_empty());
@@ -2652,7 +2730,7 @@ poll_interval_secs = 9
     fn discord_thread_monitor_config_parses_and_normalizes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(
+        write_private_config_fixture(
             &path,
             r#"[providers.discord]
 token = "abc"
@@ -2795,7 +2873,7 @@ name = "general"
     fn google_calendar_rejects_unsafe_callback_urls_and_api_bases() {
         let mut config = AppConfig {
             google_calendar: GoogleCalendarConfig {
-                channel_token: Some("calendar-secret".into()),
+                channel_token: Some("calendar-channel-token-secret-1234".into()),
                 credentials_file: Some("/tmp/calendar-oauth.json".into()),
                 state_file: Some("/tmp/calendar-state.json".into()),
                 callback_url: Some("http://calendar.example.test/google/calendar".into()),
@@ -2844,7 +2922,7 @@ name = "general"
     fn google_calendar_allows_loopback_api_base_only_in_debug_builds() {
         let config = AppConfig {
             google_calendar: GoogleCalendarConfig {
-                channel_token: Some("calendar-secret".into()),
+                channel_token: Some("calendar-channel-token-secret-1234".into()),
                 credentials_file: Some("/tmp/calendar-oauth.json".into()),
                 state_file: Some("/tmp/calendar-state.json".into()),
                 callback_url: Some("https://calendar.example.test/google/calendar".into()),
@@ -2868,7 +2946,7 @@ name = "general"
     fn google_calendar_rejects_loopback_api_base_in_release_builds() {
         let config = AppConfig {
             google_calendar: GoogleCalendarConfig {
-                channel_token: Some("calendar-secret".into()),
+                channel_token: Some("calendar-channel-token-secret-1234".into()),
                 credentials_file: Some("/tmp/calendar-oauth.json".into()),
                 state_file: Some("/tmp/calendar-state.json".into()),
                 callback_url: Some("https://calendar.example.test/google/calendar".into()),
@@ -2892,29 +2970,52 @@ name = "general"
 
     #[cfg(unix)]
     #[test]
-    fn google_calendar_channel_token_requires_a_private_regular_config_file() {
+    fn google_calendar_channel_token_requires_private_permissions_before_load() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = tempfile::tempdir().expect("temporary config directory");
         let path = temp.path().join("config.toml");
         std::fs::write(
             &path,
-            "[google_calendar]\nchannel_token = \"calendar-secret\"\n",
+            "[google_calendar]\nchannel_token = \"calendar-channel-token-secret-1234\"\n",
         )
         .expect("write config fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("set unsafe config permissions");
 
-        AppConfig::load_or_default(&path)
-            .expect("Calendar channel token config must be secured on load");
+        let error = AppConfig::load_or_default(&path)
+            .expect_err("Calendar channel token config with unsafe permissions must fail");
+        assert!(error.to_string().contains("set mode 0600"));
         assert_eq!(
             std::fs::metadata(&path)
-                .expect("read secured config metadata")
+                .expect("read config metadata")
                 .permissions()
                 .mode()
-                & 0o077,
-            0,
-            "Calendar channel token config must not remain accessible by group or others"
+                & 0o777,
+            0o644,
+            "loading must not chmod a deployed config"
+        );
+
+        let invalid_path = temp.path().join("invalid-config.toml");
+        std::fs::write(&invalid_path, "[").expect("write invalid config fixture");
+        std::fs::set_permissions(&invalid_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set invalid fixture permissions");
+        let error = AppConfig::load_or_default(&invalid_path)
+            .expect_err("invalid non-secret config must report its parse error");
+        assert!(!error.to_string().contains("set mode 0600"));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .expect("make config read-only and private");
+        AppConfig::load_or_default(&path)
+            .expect("private read-only Calendar config must remain loadable");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("read config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400,
+            "loading must preserve read-only deployment permissions"
         );
 
         let symlink_path = temp.path().join("config-link.toml");
@@ -2922,6 +3023,118 @@ name = "general"
         let error = AppConfig::load_or_default(&symlink_path)
             .expect_err("Calendar channel token config symlink must fail");
         assert!(error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn google_calendar_webhook_only_config_keeps_short_token_compatibility() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("legacy-webhook-token".into());
+        config.routes.push(RouteRule {
+            event: "google.calendar.*".into(),
+            webhook: Some("https://discord.com/api/webhooks/123/token".into()),
+            ..RouteRule::default()
+        });
+
+        config
+            .validate()
+            .expect("PR #17 webhook-only Calendar tokens remain compatible");
+    }
+
+    #[test]
+    fn google_calendar_durable_sync_channel_token_must_be_at_least_32_bytes() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("a".repeat(31));
+        config.google_calendar.credentials_file = Some("/tmp/calendar-oauth.json".into());
+        config.google_calendar.state_file = Some("/tmp/calendar-state.json".into());
+        config.google_calendar.callback_url =
+            Some("https://calendar.example.test/google/calendar".into());
+        config.routes.push(RouteRule {
+            event: "calendar.*".into(),
+            sink: "localfile".into(),
+            local_path: Some("/tmp/calendar-events.jsonl".into()),
+            ..RouteRule::default()
+        });
+
+        let error = config
+            .validate()
+            .expect_err("short durable-sync Calendar channel token must fail validation");
+        assert!(error.to_string().contains(
+            "google_calendar.channel_token must be at least 32 bytes when durable sync is enabled"
+        ));
+
+        config.google_calendar.channel_token = Some("a".repeat(32));
+        config
+            .validate()
+            .expect("32-byte durable-sync Calendar channel token must validate");
+    }
+
+    #[test]
+    fn google_calendar_renewal_margin_must_be_shorter_than_requested_watch_lifetime() {
+        let mut config = AppConfig::default();
+        config.google_calendar.renewal_margin_secs = REQUESTED_WATCH_LIFETIME_SECS;
+
+        let error = config
+            .validate()
+            .expect_err("a full watch lifetime renewal margin must fail");
+        assert!(error.to_string().contains(
+            "google_calendar.renewal_margin_secs must be less than the requested watch lifetime"
+        ));
+
+        config.google_calendar.renewal_margin_secs = REQUESTED_WATCH_LIFETIME_SECS - 1;
+        let error = config
+            .validate()
+            .expect_err("unconfigured delivery should be the next validation error");
+        assert!(!error.to_string().contains("renewal_margin_secs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_secret_mode_0644_config_loads_and_saves_without_permission_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[daemon]\nport = 25295\n").expect("write config");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make non-secret config readable");
+
+        let config = AppConfig::load_or_default(&path).expect("load non-secret config");
+        assert_eq!(config.daemon.port, 25295);
+        config.save(&path).expect("save non-secret config");
+
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("read saved config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_calendar_channel_token_uses_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "old config").expect("write existing config");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make existing config public");
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-channel-token-secret-1234".into());
+
+        config.save(&path).expect("save private Calendar config");
+
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("read saved config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]

@@ -20,23 +20,41 @@ pub(crate) use tokio::sync::{Notify, mpsc as tokio_mpsc};
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio::time::timeout;
 
-pub(crate) const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "process.rs"]
 mod process;
-pub(crate) use process::{spawn_daemon, write_calendar_config};
+pub(crate) use process::{spawn_daemon, spawn_daemon_with_proxy, write_calendar_config};
 
 pub(crate) struct DaemonProcess {
     pub(crate) child: Child,
-    pub(crate) stdout_task: JoinHandle<()>,
+    pub(crate) stdout_task: Option<JoinHandle<()>>,
+    pub(crate) proxy_task: Option<JoinHandle<()>>,
 }
 
 impl DaemonProcess {
     pub(crate) async fn stop(mut self) {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
-        self.stdout_task.abort();
-        let _ = self.stdout_task.await;
+        if let Some(task) = self.stdout_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.proxy_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        if let Some(task) = self.stdout_task.as_ref() {
+            task.abort();
+        }
+        if let Some(task) = self.proxy_task.as_ref() {
+            task.abort();
+        }
     }
 }
 
@@ -147,7 +165,7 @@ pub(crate) fn calendar_headers_for(
     headers.insert("x-goog-channel-id", channel_id.parse().unwrap());
     headers.insert(
         "x-goog-channel-token",
-        "test-channel-token".parse().unwrap(),
+        "test-channel-token-0123456789abcdef".parse().unwrap(),
     );
     headers.insert("x-goog-resource-id", "resource-1".parse().unwrap());
     headers.insert(

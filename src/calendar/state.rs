@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -40,6 +40,8 @@ pub struct CalendarState {
     pub sync_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_error: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    watch_failure_codes: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -115,6 +117,36 @@ impl CalendarState {
         changed
     }
 
+    pub fn record_watch_failure(&mut self, code: &str) -> bool {
+        self.restore_legacy_watch_failure();
+        let is_new_failure = self.watch_failure_codes.insert(code.to_string());
+        if is_new_failure || self.watch_error.is_none() {
+            self.watch_error = Some(code.to_string());
+        }
+        is_new_failure
+    }
+
+    pub fn clear_watch_failure(&mut self, code: &str) -> bool {
+        self.restore_legacy_watch_failure();
+        let removed = self.watch_failure_codes.remove(code);
+        if self.watch_error.as_deref() == Some(code) {
+            self.watch_error = self.watch_failure_codes.iter().next().cloned();
+        }
+        removed
+    }
+
+    pub fn has_watch_failures(&self) -> bool {
+        !self.watch_failure_codes.is_empty() || self.watch_error.is_some()
+    }
+
+    fn restore_legacy_watch_failure(&mut self) {
+        if self.watch_failure_codes.is_empty()
+            && let Some(error) = self.watch_error.as_ref()
+        {
+            self.watch_failure_codes.insert(error.clone());
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         if std::fs::symlink_metadata(parent)
@@ -127,8 +159,10 @@ impl CalendarState {
             Ok(metadata) => {
                 validate_file(&metadata, path)?;
                 let bytes = std::fs::read(path)?;
-                Ok(serde_json::from_slice(&bytes)
-                    .with_context(|| format!("parse Calendar state {}", path.display()))?)
+                let mut state: Self = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("parse Calendar state {}", path.display()))?;
+                state.restore_legacy_watch_failure();
+                Ok(state)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error.into()),

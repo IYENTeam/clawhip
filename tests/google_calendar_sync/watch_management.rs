@@ -47,7 +47,7 @@ async fn configured_source_creates_watch_with_callback_and_channel_token() {
         watch["address"],
         "https://calendar.example.test/google/calendar"
     );
-    assert_eq!(watch["token"], "test-channel-token");
+    assert_eq!(watch["token"], "test-channel-token-0123456789abcdef");
     assert!(
         watch["id"].as_str().is_some_and(|id| !id.is_empty()),
         "watch channel ID must be generated"
@@ -131,9 +131,8 @@ async fn new_watch_sync_activates_channel_and_stops_previous_watch() {
         .await
         .expect("reserve daemon port");
     let daemon_port = daemon_listener.local_addr().expect("daemon address").port();
-    drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 0);
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
 
     timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
@@ -188,7 +187,10 @@ async fn new_watch_sync_activates_channel_and_stops_previous_watch() {
     .expect("parse persisted Calendar state");
     assert_eq!(persisted["retiring_watches"][0]["id"], "old-channel");
 
-    let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
+    let daemon_listener = TcpListener::bind(("127.0.0.1", daemon_port))
+        .await
+        .expect("rebind daemon proxy port");
+    let (daemon, listening) = spawn_daemon_with_proxy(&config_path, daemon_listener);
     timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");

@@ -13,7 +13,8 @@ use crate::calendar::operations::{
 };
 use crate::calendar::state::{CalendarState, delivery_receipt};
 use crate::calendar::sync::{
-    SyncJob, SyncResult, accept_notification, remove_outbox_receipt, run_sync, sync_failure,
+    NotificationAcceptance, SyncJob, SyncResult, accept_notification, remove_outbox_receipt,
+    run_sync, sync_failure,
 };
 use crate::calendar::{CalendarDeliveryReceipt, CalendarNotification};
 use crate::config::AppConfig;
@@ -125,6 +126,7 @@ impl Source for GoogleCalendarSource {
         } else {
             Duration::ZERO
         };
+        let mut watch_attempts: u32 = 0;
         loop {
             if in_flight_delivery.is_none()
                 && delivery_retry_wait.is_zero()
@@ -159,10 +161,12 @@ impl Source for GoogleCalendarSource {
                         &notification,
                         &calendar.calendar_id,
                     ) {
-                        Ok(next) => {
+                        Ok(NotificationAcceptance::Accepted(next)) => {
                             remove_deferred_notification(
                                 state_path,
                                 &notification.channel_id,
+                                &notification.resource_id,
+                                &notification.resource_uri,
                                 notification.message_number,
                             )?;
                             let _ = notification.persisted.send(true);
@@ -175,10 +179,20 @@ impl Source for GoogleCalendarSource {
                             }
                             watch_wait = Duration::ZERO;
                         }
-                        Err(error) => {
+                        Ok(NotificationAcceptance::Rejected(rejection)) => {
+                            eprintln!(
+                                "op_pi Google Calendar callback ignored: {rejection:?}"
+                            );
+                            remove_deferred_notification(
+                                state_path,
+                                &notification.channel_id,
+                                &notification.resource_id,
+                                &notification.resource_uri,
+                                notification.message_number,
+                            )?;
                             let _ = notification.persisted.send(false);
-                            return Err(error);
                         }
+                        Err(error) => return Err(error),
                     }
                 }
                 receipt = delivery_receipts.recv(), if in_flight_delivery.is_some() => {
@@ -214,11 +228,26 @@ impl Source for GoogleCalendarSource {
                     }
                 }
                 _ = tokio::time::sleep(renewal_wait), if calendar.callback_url.is_some() && calendar.channel_token.is_some() => {
-                    watch_wait = watch_cycle(&api, calendar, &mut state, state_path, &self.health, self.name()).await?;
+                    let successful_wait = watch_cycle(&api, calendar, &mut state, state_path, &self.health, self.name()).await?;
+                    watch_wait = next_watch_wait(&mut watch_attempts, &state, successful_wait);
                 }
             }
             publish_status(&self.health, self.name(), &state).await;
         }
+    }
+}
+
+fn next_watch_wait(
+    attempts: &mut u32,
+    state: &CalendarState,
+    successful_wait: Duration,
+) -> Duration {
+    if state.has_watch_failures() {
+        *attempts = attempts.saturating_add(1);
+        retry_delay(*attempts)
+    } else {
+        *attempts = 0;
+        successful_wait
     }
 }
 

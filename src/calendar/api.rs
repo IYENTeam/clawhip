@@ -170,7 +170,8 @@ impl CalendarApi {
 
     pub async fn stop_watch(&self, channel: &WatchChannel) -> Result<()> {
         let access_token = self.credentials.access_token(&self.client).await?;
-        self.client
+        let response = self
+            .client
             .post(self.stop_url.clone())
             .bearer_auth(access_token)
             .json(&StopRequest {
@@ -178,8 +179,14 @@ impl CalendarApi {
                 resource_id: &channel.resource_id,
             })
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+        ) {
+            return Ok(());
+        }
+        response.error_for_status()?;
         Ok(())
     }
 

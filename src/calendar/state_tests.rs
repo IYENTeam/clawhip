@@ -53,6 +53,30 @@ fn queues_a_persisted_opaque_delivery_receipt() {
 }
 
 #[test]
+fn restores_legacy_watch_errors_as_active_failure_codes() {
+    let temp = tempfile::tempdir().expect("temporary state directory");
+    let path = temp.path().join("state.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"watch_error": "calendar_watch_renewal_failed"}))
+            .expect("serialize legacy state"),
+    )
+    .expect("write legacy state");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("secure legacy state");
+
+    let mut state = CalendarState::load(&path).expect("load legacy state");
+    assert!(state.has_watch_failures());
+    assert!(!state.record_watch_failure("calendar_watch_renewal_failed"));
+    assert!(state.record_watch_failure("calendar_watch_stop_failed"));
+    assert!(state.clear_watch_failure("calendar_watch_renewal_failed"));
+    assert_eq!(
+        state.watch_error.as_deref(),
+        Some("calendar_watch_stop_failed")
+    );
+}
+
+#[test]
 fn rejects_insecure_and_symlinked_state_files() {
     let temp = tempfile::tempdir().expect("temporary state directory");
     let path = temp.path().join("state.json");

@@ -15,7 +15,15 @@ use serde_json::json;
 const ACTIVATION_WINDOW_MS: i64 = 5 * 60 * 1000;
 const RETRY_BASE_SECS: u64 = 1;
 const RETRY_MAX_SECS: u64 = 60;
+const WATCH_RENEWAL_FAILED: &str = "calendar_watch_renewal_failed";
+const WATCH_STOP_FAILED: &str = "calendar_watch_stop_failed";
+pub(crate) const WATCH_ACTIVATION_TIMED_OUT: &str = "calendar_watch_activation_timed_out";
 
+#[cfg(test)]
+#[path = "operations_tests.rs"]
+mod tests;
+
+#[derive(Clone, Copy)]
 pub struct CalendarFailure<'a> {
     pub domain: FailureDomain,
     pub kind: &'a str,
@@ -73,18 +81,24 @@ pub async fn record_failure(
     path: &Path,
     failure: CalendarFailure<'_>,
 ) -> Result<()> {
-    match failure.domain {
-        FailureDomain::Sync => state.sync_error = Some(failure.code.to_string()),
-        FailureDomain::Watch => state.watch_error = Some(failure.code.to_string()),
+    let is_new_failure = match failure.domain {
+        FailureDomain::Sync => {
+            let is_new_failure = state.sync_error.as_deref() != Some(failure.code);
+            state.sync_error = Some(failure.code.to_string());
+            is_new_failure
+        }
+        FailureDomain::Watch => state.record_watch_failure(failure.code),
+    };
+    if is_new_failure {
+        state.queue(vec![IncomingEvent {
+            kind: failure.kind.to_string(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"summary": failure.summary, "error": failure.code}),
+        }]);
     }
-    state.queue(vec![IncomingEvent {
-        kind: failure.kind.to_string(),
-        channel: None,
-        mention: None,
-        format: None,
-        template: None,
-        payload: json!({"summary": failure.summary, "error": failure.code}),
-    }]);
     state.save(path)?;
     refresh_health(health, source, state).await;
     Ok(())
@@ -129,7 +143,7 @@ pub async fn renew_watch_if_due(
                 .min(now.saturating_add(ACTIVATION_WINDOW_MS)),
         );
         state.pending_watch = Some(watch);
-        state.watch_error = None;
+        clear_watch_error(state, WATCH_RENEWAL_FAILED);
         state.save(path)?;
     }
     Ok(if timed_out {
@@ -144,14 +158,33 @@ pub async fn stop_retiring_watches(
     state: &mut CalendarState,
     path: &Path,
 ) -> Result<()> {
-    while let Some(watch) = state.retiring_watches.first().cloned() {
-        api.stop_watch(&watch).await?;
-        state.retiring_watches.remove(0);
+    let mut index = 0;
+    let mut retired_any = false;
+    let mut first_error = None;
+    while let Some(watch) = state.retiring_watches.get(index).cloned() {
+        match api.stop_watch(&watch).await {
+            Ok(()) => {
+                state.retiring_watches.remove(index);
+                retired_any = true;
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                index += 1;
+            }
+        }
+    }
+    if retired_any {
+        if first_error.is_none() {
+            clear_watch_error(state, WATCH_STOP_FAILED);
+        }
         state.save(path)?;
     }
-    state.watch_error = None;
-    state.save(path)?;
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 pub fn retire_active_watch(state: &mut CalendarState) {
@@ -168,7 +201,6 @@ pub async fn watch_cycle(
     health: &SharedSourceHealth,
     source: &str,
 ) -> Result<Duration> {
-    let mut failed = false;
     match renew_watch_if_due(api, calendar, state, path).await {
         Ok(Renewal::ActivationTimedOut) => {
             record_failure(
@@ -179,14 +211,13 @@ pub async fn watch_cycle(
                 watch_failure(
                     "calendar.watch.activation-timed-out",
                     "Calendar watch activation timed out",
-                    "calendar_watch_activation_timed_out",
+                    WATCH_ACTIVATION_TIMED_OUT,
                 ),
             )
             .await?
         }
         Ok(Renewal::None) => {}
         Err(_) => {
-            failed = true;
             record_failure(
                 health,
                 source,
@@ -195,7 +226,7 @@ pub async fn watch_cycle(
                 watch_failure(
                     "calendar.watch.renewal-failed",
                     "Calendar watch renewal failed",
-                    "calendar_watch_renewal_failed",
+                    WATCH_RENEWAL_FAILED,
                 ),
             )
             .await?;
@@ -211,22 +242,22 @@ pub async fn watch_cycle(
             watch_failure(
                 "calendar.watch.stop-failed",
                 "Calendar watch stop failed",
-                "calendar_watch_stop_failed",
+                WATCH_STOP_FAILED,
             ),
         )
         .await?;
-        return Ok(retry_delay(1));
     }
     refresh_health(health, source, state).await;
-    if failed {
-        return Ok(retry_delay(1));
-    }
     Ok(renewal_delay(
         state.active_watch.as_ref(),
         state.pending_watch.as_ref(),
         now_millis()?,
         calendar.renewal_margin_secs,
     ))
+}
+
+fn clear_watch_error(state: &mut CalendarState, error: &str) {
+    state.clear_watch_failure(error);
 }
 
 fn watch_failure(
