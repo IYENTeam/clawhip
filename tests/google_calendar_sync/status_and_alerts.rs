@@ -35,14 +35,14 @@ async fn status_reports_calendar_cursor_channel_expiration_and_last_notification
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
     state.release_initial.notify_one();
-    timeout(Duration::from_secs(2), state.watch_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
         .expect("Calendar watch was not created");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     let channel_id = state
@@ -62,12 +62,9 @@ async fn status_reports_calendar_cursor_channel_expiration_and_last_notification
         .await
         .expect("post channel sync");
     assert_eq!(sync.status(), StatusCode::ACCEPTED);
-    timeout(
-        Duration::from_secs(2),
-        state.incremental_requested.notified(),
-    )
-    .await
-    .expect("channel sync never reached Calendar worker");
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+        .await
+        .expect("channel sync never reached Calendar worker");
 
     let status = client
         .get(format!("http://127.0.0.1:{daemon_port}/api/status"))

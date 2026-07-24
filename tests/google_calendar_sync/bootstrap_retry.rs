@@ -41,7 +41,7 @@ async fn repaired_oauth_credentials_recover_without_daemon_restart() {
         .expect("secure invalid credential fixture");
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     std::fs::write(&credentials_path, valid_credentials).expect("repair OAuth credentials");
@@ -101,7 +101,7 @@ async fn failed_initial_calendar_sync_retries_without_daemon_restart() {
     .await
     .expect("initial Calendar sync was not retried");
     state.release_initial.notify_one();
-    timeout(Duration::from_secs(2), state.watch_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
         .expect("recovered initial sync never reached watch creation");
 

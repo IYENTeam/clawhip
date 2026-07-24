@@ -35,10 +35,10 @@ async fn failed_sink_delivery_survives_daemon_restart_and_retries_same_outbox_ev
     drop(daemon_listener);
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     state.release_initial.notify_one();
@@ -70,7 +70,7 @@ async fn failed_sink_delivery_survives_daemon_restart_and_retries_same_outbox_ev
     );
 
     let (restarted, restarted_listening) = spawn_daemon(&config_path, daemon_port);
-    timeout(Duration::from_secs(2), restarted_listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
     let recovered_payload = timeout(Duration::from_secs(8), delivery_rx.recv())

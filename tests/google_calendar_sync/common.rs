@@ -20,6 +20,8 @@ pub(crate) use tokio::sync::{Notify, mpsc as tokio_mpsc};
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio::time::timeout;
 
+pub(crate) const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[path = "process.rs"]
 mod process;
 pub(crate) use process::{spawn_daemon, write_calendar_config};

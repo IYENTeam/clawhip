@@ -30,7 +30,7 @@ async fn configured_daemon_establishes_initial_calendar_sync_cursor() {
     let config_path = write_calendar_config(&temp, api_addr, 0, 86_400);
     let (daemon, _listening) = spawn_daemon(&config_path, 0);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("configured daemon never requested the initial Calendar events page");
     state.release_initial.notify_one();
@@ -75,10 +75,10 @@ async fn accepted_calendar_change_triggers_incremental_sync_with_saved_token() {
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     state.release_initial.notify_one();
@@ -91,12 +91,9 @@ async fn accepted_calendar_change_triggers_incremental_sync_with_saved_token() {
         .expect("post Calendar notification");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    timeout(
-        Duration::from_secs(2),
-        state.incremental_requested.notified(),
-    )
-    .await
-    .expect("accepted Calendar notification never triggered incremental sync");
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+        .await
+        .expect("accepted Calendar notification never triggered incremental sync");
 
     daemon.stop().await;
     server.abort();
@@ -139,10 +136,10 @@ async fn expired_incremental_cursor_triggers_fresh_full_sync() {
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     state.release_initial.notify_one();

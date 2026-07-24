@@ -38,7 +38,7 @@ async fn incremental_calendar_changes_emit_created_updated_and_cancelled_deliver
     timeout(Duration::from_secs(10), state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     state.release_initial.notify_one();
@@ -117,10 +117,10 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     state.release_initial.notify_one();
@@ -134,12 +134,9 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
         .await
         .expect("post first Calendar notification");
     assert_eq!(first.status(), StatusCode::ACCEPTED);
-    timeout(
-        Duration::from_secs(2),
-        state.incremental_requested.notified(),
-    )
-    .await
-    .expect("first Calendar notification never triggered sync");
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+        .await
+        .expect("first Calendar notification never triggered sync");
     timeout(Duration::from_secs(8), delivery_rx.recv())
         .await
         .expect("first Calendar change never reached the sink")
@@ -159,12 +156,9 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
         .await
         .expect("post Calendar synchronization barrier");
     assert_eq!(barrier.status(), StatusCode::ACCEPTED);
-    timeout(
-        Duration::from_secs(2),
-        state.incremental_requested.notified(),
-    )
-    .await
-    .expect("barrier Calendar notification never triggered sync");
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+        .await
+        .expect("barrier Calendar notification never triggered sync");
     assert_eq!(
         state.incremental_requests.load(Ordering::SeqCst),
         2,
@@ -173,7 +167,7 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
 
     daemon.stop().await;
     let (restarted, restarted_listening) = spawn_daemon(&config_path, daemon_port);
-    timeout(Duration::from_secs(2), restarted_listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
     let after_restart = client
@@ -190,12 +184,9 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
         .await
         .expect("post restart Calendar synchronization barrier");
     assert_eq!(restart_barrier.status(), StatusCode::ACCEPTED);
-    timeout(
-        Duration::from_secs(2),
-        state.incremental_requested.notified(),
-    )
-    .await
-    .expect("restart barrier Calendar notification never triggered sync");
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+        .await
+        .expect("restart barrier Calendar notification never triggered sync");
     assert_eq!(
         state.incremental_requests.load(Ordering::SeqCst),
         3,

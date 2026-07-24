@@ -90,11 +90,11 @@ async fn failed_incremental_sync_degrades_health_and_delivers_alert() {
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 86_400);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
     state.release_initial.notify_one();
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     let client = reqwest::Client::new();
@@ -124,7 +124,7 @@ async fn failed_incremental_sync_degrades_health_and_delivers_alert() {
         .incremental_failures_remaining
         .store(0, Ordering::SeqCst);
     let (restarted, restarted_listening) = spawn_daemon(&config_path, daemon_port);
-    timeout(Duration::from_secs(2), restarted_listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
     timeout(

@@ -29,11 +29,11 @@ async fn configured_source_creates_watch_with_callback_and_channel_token() {
     let config_path = write_calendar_config(&temp, api_addr, 0, 86_400);
     let (daemon, _listening) = spawn_daemon(&config_path, 0);
 
-    timeout(Duration::from_secs(2), state.initial_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.initial_requested.notified())
         .await
         .expect("initial Calendar sync never started");
     state.release_initial.notify_one();
-    timeout(Duration::from_secs(2), state.watch_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
         .expect("configured Calendar source never created a watch channel");
     let watch = state
@@ -89,7 +89,7 @@ async fn past_expiration_renews_the_active_watch_immediately() {
     let config_path = write_calendar_config(&temp, api_addr, 0, 0);
     let (daemon, _listening) = spawn_daemon(&config_path, 0);
 
-    timeout(Duration::from_secs(2), state.watch_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
         .expect("expired active Calendar watch was not renewed");
 
@@ -135,10 +135,10 @@ async fn new_watch_sync_activates_channel_and_stops_previous_watch() {
     let config_path = write_calendar_config(&temp, api_addr, daemon_port, 0);
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
 
-    timeout(Duration::from_secs(2), state.watch_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.watch_requested.notified())
         .await
         .expect("replacement Calendar watch was not created");
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("op_pi daemon never announced its listener");
     let channel_id = state
@@ -157,7 +157,7 @@ async fn new_watch_sync_activates_channel_and_stops_previous_watch() {
         .expect("post replacement channel sync");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    timeout(Duration::from_secs(2), state.stop_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.stop_requested.notified())
         .await
         .expect("replacement sync never stopped the previous Calendar watch");
     let alert = timeout(Duration::from_secs(8), async {
@@ -189,7 +189,7 @@ async fn new_watch_sync_activates_channel_and_stops_previous_watch() {
     assert_eq!(persisted["retiring_watches"][0]["id"], "old-channel");
 
     let (daemon, listening) = spawn_daemon(&config_path, daemon_port);
-    timeout(Duration::from_secs(2), listening.notified())
+    timeout(TEST_EVENT_TIMEOUT, listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
     timeout(Duration::from_secs(4), state.stop_succeeded.notified())
