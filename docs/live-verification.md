@@ -141,3 +141,22 @@ On March 11, 2026, a real validation was run for the custom send path:
 - `cargo run -q -- send --message "🧪 op_pi live verification (...)"` exited successfully
 - guild-wide search confirmed actual Discord delivery by the `op_pi` webhook bot
 - delivery landed in the configured test channel, confirming the configured wildcard webhook route was active
+
+On July 24, 2026, a real Victor Google Calendar validation was run through the
+production `https://op-pi.iyendev.com/google/calendar` callback:
+
+- Victor created `[op_pi QA hardened] Calendar sync 20260724-qa2` in the Google
+  Calendar web UI; the deployed macmini emitted `calendar.event.created`
+- Victor renamed it to `[op_pi QA hardened] Calendar sync FINAL
+  20260724-qa2` and added a Google Meet conference; op_pi emitted
+  `calendar.event.updated` with the final title, time range, and Meet URL
+- Victor deleted the event in the web UI; op_pi emitted
+  `calendar.event.cancelled` with the same final title, time, and Meet URL
+- a Calendar API `showDeleted=false` query returned zero active op_pi QA
+  events after cleanup
+- deployed Calendar health reported `status=running`, cursor present,
+  `outbox_depth=0`, no pending/retiring channels, and null sync/watch errors
+
+This run used the real Victor account, Google watch channel, Cloudflare public
+route, op_pi daemon, incremental Calendar API query, typed renderer, and
+configured localfile destination. It was not a synthetic webhook-only test.

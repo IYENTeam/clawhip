@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -136,15 +137,48 @@ pub struct OpenClawConfig {
     pub gateway_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleCalendarConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_file: Option<PathBuf>,
+    #[serde(default = "default_google_calendar_id")]
+    pub calendar_id: String,
+    #[serde(default = "default_google_calendar_api_base")]
+    pub api_base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    #[serde(default = "default_google_calendar_renewal_margin_secs")]
+    pub renewal_margin_secs: u64,
 }
 
 impl GoogleCalendarConfig {
     fn is_empty(&self) -> bool {
         self.channel_token.is_none()
+            && self.credentials_file.is_none()
+            && self.state_file.is_none()
+            && self.callback_url.is_none()
+    }
+
+    pub fn sync_enabled(&self) -> bool {
+        self.credentials_file.is_some() && self.state_file.is_some()
+    }
+}
+
+impl Default for GoogleCalendarConfig {
+    fn default() -> Self {
+        Self {
+            channel_token: None,
+            credentials_file: None,
+            state_file: None,
+            calendar_id: default_google_calendar_id(),
+            api_base_url: default_google_calendar_api_base(),
+            callback_url: None,
+            renewal_margin_secs: default_google_calendar_renewal_margin_secs(),
+        }
     }
 }
 
@@ -674,6 +708,15 @@ fn default_port() -> u16 {
 fn default_base_url() -> String {
     format!("http://127.0.0.1:{}", default_port())
 }
+fn default_google_calendar_id() -> String {
+    "primary".to_string()
+}
+fn default_google_calendar_api_base() -> String {
+    "https://www.googleapis.com/calendar/v3".to_string()
+}
+fn default_google_calendar_renewal_margin_secs() -> u64 {
+    24 * 60 * 60
+}
 fn default_poll_interval() -> u64 {
     5
 }
@@ -832,6 +875,9 @@ impl AppConfig {
         let raw = fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&raw)?;
         config.normalize();
+        if config.google_calendar.channel_token.is_some() {
+            ensure_private_regular_config_file(path)?;
+        }
         Ok(config)
     }
 
@@ -843,7 +889,13 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        if self.google_calendar.channel_token.is_some() && fs::symlink_metadata(path).is_ok() {
+            require_regular_config_file(path)?;
+        }
         fs::write(path, self.to_pretty_toml()?)?;
+        if self.google_calendar.channel_token.is_some() {
+            ensure_private_regular_config_file(path)?;
+        }
         Ok(())
     }
 
@@ -991,6 +1043,36 @@ impl AppConfig {
         if self.dispatch.ci_batch_window_secs == 0 {
             return Err("dispatch.ci_batch_window_secs must be at least 1".into());
         }
+        if self.google_calendar.credentials_file.is_some()
+            || self.google_calendar.state_file.is_some()
+            || self.google_calendar.callback_url.is_some()
+        {
+            let mut missing = Vec::new();
+            if self.google_calendar.credentials_file.is_none() {
+                missing.push("credentials_file");
+            }
+            if self.google_calendar.state_file.is_none() {
+                missing.push("state_file");
+            }
+            if self.google_calendar.callback_url.is_none() {
+                missing.push("callback_url");
+            }
+            if self.google_calendar.channel_token.is_none() {
+                missing.push("channel_token");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "google_calendar sync configuration requires: {}",
+                    missing.join(", ")
+                )
+                .into());
+            }
+        }
+        if let Some(callback_url) = self.google_calendar.callback_url.as_deref() {
+            validate_google_calendar_callback_url(callback_url)?;
+        }
+        validate_google_calendar_api_base_url(&self.google_calendar.api_base_url)?;
+
         if self.cron.poll_interval_secs == 0 {
             return Err("cron.poll_interval_secs must be at least 1".into());
         }
@@ -1495,6 +1577,14 @@ impl AppConfig {
     fn normalize(&mut self) {
         self.google_calendar.channel_token =
             normalize_secret(self.google_calendar.channel_token.take());
+        self.google_calendar.calendar_id =
+            normalize_text(Some(self.google_calendar.calendar_id.clone()))
+                .unwrap_or_else(default_google_calendar_id);
+        self.google_calendar.api_base_url =
+            normalize_text(Some(self.google_calendar.api_base_url.clone()))
+                .unwrap_or_else(default_google_calendar_api_base);
+        self.google_calendar.callback_url =
+            normalize_text(self.google_calendar.callback_url.take());
         self.providers.discord.bot_token =
             normalize_secret(self.providers.discord.bot_token.clone());
         self.defaults.channel = normalize_text(self.defaults.channel.clone());
@@ -1665,6 +1755,95 @@ fn prompt_format(default: Option<MessageFormat>) -> Result<MessageFormat> {
         return Ok(default_value);
     }
     MessageFormat::from_label(input.trim())
+}
+
+const GOOGLE_CALENDAR_API_BASE_URL: &str = "https://www.googleapis.com/calendar/v3";
+
+fn validate_google_calendar_callback_url(callback_url: &str) -> Result<()> {
+    let url = Url::parse(callback_url)
+        .map_err(|_| "google_calendar.callback_url must be a valid HTTPS URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "google_calendar.callback_url must use HTTPS and must not contain userinfo, a query, or a fragment"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_google_calendar_api_base_url(api_base_url: &str) -> Result<()> {
+    let url = Url::parse(api_base_url)
+        .map_err(|_| "google_calendar.api_base_url must be a valid Google Calendar API URL")?;
+    if is_official_google_calendar_api_url(&url) || is_debug_loopback_http_url(&url, "/calendar/v3")
+    {
+        return Ok(());
+    }
+    Err("google_calendar.api_base_url must be https://www.googleapis.com/calendar/v3 (loopback HTTP is allowed only in debug builds)".into())
+}
+
+fn is_official_google_calendar_api_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("www.googleapis.com")
+        && url.path() == "/calendar/v3"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.port().is_none()
+        && url.as_str() == GOOGLE_CALENDAR_API_BASE_URL
+}
+
+fn is_debug_loopback_http_url(url: &Url, path: &str) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        url.scheme() == "http"
+            && url.path() == path
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.host_str().is_some_and(|host| {
+                host.parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+            })
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (url, path);
+        false
+    }
+}
+
+fn require_regular_config_file(path: &Path) -> Result<()> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(format!(
+            "config file {} with google_calendar.channel_token must be a regular file",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_private_regular_config_file(path: &Path) -> Result<()> {
+    require_regular_config_file(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
 }
 
 fn normalize_text(value: Option<String>) -> Option<String> {
@@ -2610,6 +2789,158 @@ name = "general"
         config.google_calendar.channel_token = Some(" \n ".into());
         config.normalize();
         assert_eq!(config.google_calendar.channel_token, None);
+    }
+
+    #[test]
+    fn google_calendar_rejects_unsafe_callback_urls_and_api_bases() {
+        let mut config = AppConfig {
+            google_calendar: GoogleCalendarConfig {
+                channel_token: Some("calendar-secret".into()),
+                credentials_file: Some("/tmp/calendar-oauth.json".into()),
+                state_file: Some("/tmp/calendar-state.json".into()),
+                callback_url: Some("http://calendar.example.test/google/calendar".into()),
+                ..GoogleCalendarConfig::default()
+            },
+            routes: vec![RouteRule {
+                event: "calendar.*".into(),
+                sink: "localfile".into(),
+                local_path: Some("/tmp/calendar-events.jsonl".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        for callback_url in [
+            "http://calendar.example.test/google/calendar",
+            "https://user@calendar.example.test/google/calendar",
+            "https://calendar.example.test/google/calendar?token=leak",
+            "https://calendar.example.test/google/calendar#fragment",
+        ] {
+            config.google_calendar.callback_url = Some(callback_url.into());
+            let error = config
+                .validate()
+                .expect_err("unsafe Calendar callback URL must fail");
+            assert!(error.to_string().contains("callback_url"));
+        }
+
+        config.google_calendar.callback_url =
+            Some("https://calendar.example.test/google/calendar".into());
+        for api_base_url in [
+            "https://www.googleapis.com/calendar/v3/other",
+            "https://attacker.example/calendar/v3",
+            "https://www.googleapis.com/calendar/v3?redirect=attacker",
+            "https://user@www.googleapis.com/calendar/v3",
+        ] {
+            config.google_calendar.api_base_url = api_base_url.into();
+            let error = config
+                .validate()
+                .expect_err("unsafe Calendar API base URL must fail");
+            assert!(error.to_string().contains("api_base_url"));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn google_calendar_allows_loopback_api_base_only_in_debug_builds() {
+        let config = AppConfig {
+            google_calendar: GoogleCalendarConfig {
+                channel_token: Some("calendar-secret".into()),
+                credentials_file: Some("/tmp/calendar-oauth.json".into()),
+                state_file: Some("/tmp/calendar-state.json".into()),
+                callback_url: Some("https://calendar.example.test/google/calendar".into()),
+                api_base_url: "http://127.0.0.1:3000/calendar/v3".into(),
+                ..GoogleCalendarConfig::default()
+            },
+            routes: vec![RouteRule {
+                event: "calendar.*".into(),
+                sink: "localfile".into(),
+                local_path: Some("/tmp/calendar-events.jsonl".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn google_calendar_rejects_loopback_api_base_in_release_builds() {
+        let config = AppConfig {
+            google_calendar: GoogleCalendarConfig {
+                channel_token: Some("calendar-secret".into()),
+                credentials_file: Some("/tmp/calendar-oauth.json".into()),
+                state_file: Some("/tmp/calendar-state.json".into()),
+                callback_url: Some("https://calendar.example.test/google/calendar".into()),
+                api_base_url: "http://127.0.0.1:3000/calendar/v3".into(),
+                ..GoogleCalendarConfig::default()
+            },
+            routes: vec![RouteRule {
+                event: "calendar.*".into(),
+                sink: "localfile".into(),
+                local_path: Some("/tmp/calendar-events.jsonl".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("release builds must reject loopback Calendar API URLs");
+        assert!(error.to_string().contains("api_base_url"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn google_calendar_channel_token_requires_a_private_regular_config_file() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[google_calendar]\nchannel_token = \"calendar-secret\"\n",
+        )
+        .expect("write config fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("set unsafe config permissions");
+
+        AppConfig::load_or_default(&path)
+            .expect("Calendar channel token config must be secured on load");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("read secured config metadata")
+                .permissions()
+                .mode()
+                & 0o077,
+            0,
+            "Calendar channel token config must not remain accessible by group or others"
+        );
+
+        let symlink_path = temp.path().join("config-link.toml");
+        symlink(&path, &symlink_path).expect("create config symlink");
+        let error = AppConfig::load_or_default(&symlink_path)
+            .expect_err("Calendar channel token config symlink must fail");
+        assert!(error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn google_calendar_sync_requires_complete_external_credentials_configuration() {
+        let mut config = AppConfig::default();
+        config.google_calendar.credentials_file = Some("/tmp/calendar-oauth.json".into());
+        config.routes.push(RouteRule {
+            event: "calendar.*".into(),
+            sink: "localfile".into(),
+            local_path: Some("/tmp/calendar-events.jsonl".into()),
+            ..RouteRule::default()
+        });
+
+        let error = config
+            .validate()
+            .expect_err("incomplete Calendar source config must fail");
+        assert!(error.to_string().contains("state_file"));
+        assert!(error.to_string().contains("callback_url"));
+        assert!(error.to_string().contains("channel_token"));
     }
 
     fn slack_channel_route(event: &str, channel: Option<&str>) -> RouteRule {

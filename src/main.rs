@@ -1,4 +1,5 @@
 mod binding_verify;
+mod calendar;
 mod cli;
 mod client;
 mod config;

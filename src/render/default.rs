@@ -10,6 +10,8 @@ use super::Renderer;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultRenderer;
 
+const CALENDAR_RENDER_LIMIT: usize = 1900;
+
 impl Renderer for DefaultRenderer {
     fn render(&self, event: &IncomingEvent, format: &MessageFormat) -> Result<String> {
         let payload = &event.payload;
@@ -46,6 +48,32 @@ impl Renderer for DefaultRenderer {
             }
             ("google.calendar.sync" | "google.calendar.changed", MessageFormat::Alert) => {
                 render_google_calendar(payload, true, false)?
+            }
+            (
+                "calendar.event.created" | "calendar.event.updated" | "calendar.event.cancelled",
+                MessageFormat::Compact,
+            ) => render_calendar_event(event.canonical_kind(), payload, false, false)?,
+            (
+                "calendar.event.created" | "calendar.event.updated" | "calendar.event.cancelled",
+                MessageFormat::Inline,
+            ) => render_calendar_event(event.canonical_kind(), payload, false, true)?,
+            (
+                "calendar.event.created" | "calendar.event.updated" | "calendar.event.cancelled",
+                MessageFormat::Alert,
+            ) => render_calendar_event(event.canonical_kind(), payload, true, false)?,
+            (
+                "calendar.event.created" | "calendar.event.updated" | "calendar.event.cancelled",
+                MessageFormat::Raw,
+            ) => serde_json::to_string_pretty(payload)?,
+            (
+                "calendar.watch.renewal-failed" | "calendar.sync.failed",
+                MessageFormat::Compact | MessageFormat::Inline,
+            ) => render_calendar_failure(payload, false)?,
+            ("calendar.watch.renewal-failed" | "calendar.sync.failed", MessageFormat::Alert) => {
+                render_calendar_failure(payload, true)?
+            }
+            ("calendar.watch.renewal-failed" | "calendar.sync.failed", MessageFormat::Raw) => {
+                serde_json::to_string_pretty(payload)?
             }
 
             ("agent.started", MessageFormat::Compact)
@@ -460,6 +488,177 @@ fn render_google_calendar(payload: &Value, alert: bool, inline: bool) -> Result<
     Ok(format!(
         "{prefix}{summary} · message {message_number}\n{resource_uri}"
     ))
+}
+
+fn render_calendar_event(kind: &str, payload: &Value, alert: bool, inline: bool) -> Result<String> {
+    let action = match kind {
+        "calendar.event.created" => "Created",
+        "calendar.event.updated" => "Updated",
+        "calendar.event.cancelled" => "Cancelled",
+        _ => "Changed",
+    };
+    let prefix = if alert { "🚨 " } else { "" };
+    let summary = string_field(payload, "summary")?;
+    let start = optional_string_field(payload, "start");
+    let end = optional_string_field(payload, "end");
+    let time = match (start, end) {
+        (Some(start), Some(end)) => format!("{start} – {end}"),
+        (Some(start), None) => start,
+        _ => "time unavailable".to_string(),
+    };
+    let meet_link = optional_string_field(payload, "meeting_link")
+        .or_else(|| optional_string_field(payload, "html_link"));
+    let attendees = payload
+        .get("attendees")
+        .and_then(Value::as_array)
+        .map(|attendees| {
+            attendees
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if inline {
+        let mut rendered = format!("{prefix}{action}: {summary} · {time}");
+        if let Some(link) = meet_link {
+            rendered.push_str(" · Meet: ");
+            rendered.push_str(&link);
+        }
+        return Ok(truncate_to_chars(&rendered, CALENDAR_RENDER_LIMIT));
+    }
+
+    let mut rendered = String::new();
+    let mut used = 0;
+    append_bounded_line(
+        &mut rendered,
+        &mut used,
+        CALENDAR_RENDER_LIMIT,
+        &format!("{prefix}📅 {action}: {summary}"),
+    );
+    append_bounded_line(&mut rendered, &mut used, CALENDAR_RENDER_LIMIT, &time);
+    if let Some(link) = meet_link {
+        append_bounded_line(
+            &mut rendered,
+            &mut used,
+            CALENDAR_RENDER_LIMIT,
+            &format!("Meet: {link}"),
+        );
+    }
+    if !attendees.is_empty() {
+        let remaining = CALENDAR_RENDER_LIMIT.saturating_sub(used.saturating_add(1));
+        if remaining > 0
+            && let Some(attendee_line) = render_calendar_attendees(&attendees, remaining)
+        {
+            append_bounded_line(
+                &mut rendered,
+                &mut used,
+                CALENDAR_RENDER_LIMIT,
+                &attendee_line,
+            );
+        }
+    }
+
+    Ok(rendered)
+}
+
+fn render_calendar_failure(payload: &Value, alert: bool) -> Result<String> {
+    let prefix = if alert { "🚨 " } else { "" };
+    let summary = string_field(payload, "summary")?;
+    let error = string_field(payload, "error")?;
+    let active = optional_string_field(payload, "active_channel_id")
+        .map(|channel| format!("Active channel preserved: {channel}"));
+    let active_budget = active
+        .as_ref()
+        .map(|line| line.chars().count() + 1)
+        .unwrap_or_default();
+    let main_budget = CALENDAR_RENDER_LIMIT.saturating_sub(active_budget);
+    let mut rendered = truncate_to_chars(&format!("{prefix}{summary}: {error}"), main_budget);
+
+    if let Some(active) = active {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(&truncate_to_chars(
+            &active,
+            CALENDAR_RENDER_LIMIT.saturating_sub(rendered.chars().count()),
+        ));
+    }
+
+    Ok(rendered)
+}
+
+fn truncate_to_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn append_bounded_text(output: &mut String, used: &mut usize, limit: usize, text: &str) {
+    if *used >= limit {
+        return;
+    }
+
+    let chunk = truncate_to_chars(text, limit - *used);
+    *used += chunk.chars().count();
+    output.push_str(&chunk);
+}
+
+fn append_bounded_line(output: &mut String, used: &mut usize, limit: usize, text: &str) {
+    if *used >= limit {
+        return;
+    }
+
+    if *used > 0 {
+        if limit - *used <= 1 {
+            return;
+        }
+        output.push('\n');
+        *used += 1;
+    }
+
+    append_bounded_text(output, used, limit, text);
+}
+
+fn render_calendar_attendees(attendees: &[String], limit: usize) -> Option<String> {
+    let label = "Attendees: ";
+    let label_len = label.chars().count();
+    if limit <= label_len {
+        return None;
+    }
+
+    let mut rendered = String::new();
+    let mut used = 0;
+    append_bounded_text(&mut rendered, &mut used, limit, label);
+
+    for (index, attendee) in attendees.iter().enumerate() {
+        if used >= limit {
+            break;
+        }
+
+        let separator = if index == 0 { "" } else { ", " };
+        let separator_len = separator.chars().count();
+        if limit - used <= separator_len {
+            break;
+        }
+
+        let candidate = format!("{separator}{attendee}");
+        let before = used;
+        append_bounded_text(&mut rendered, &mut used, limit, &candidate);
+        if used == before {
+            break;
+        }
+        if used - before < candidate.chars().count() {
+            break;
+        }
+    }
+
+    if used == label_len {
+        None
+    } else {
+        Some(rendered)
+    }
 }
 
 fn string_field(payload: &Value, key: &str) -> Result<String> {
@@ -1165,6 +1364,155 @@ mod tests {
         assert!(rendered.contains("Google Calendar watch channel synchronized"));
         assert!(rendered.contains("message 1"));
         assert!(!rendered.starts_with('{'));
+    }
+
+    #[test]
+    fn renders_calendar_event_details_for_slack_and_discord_sinks() {
+        let event = IncomingEvent {
+            kind: "calendar.event.updated".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": "Planning",
+                "start": "2026-07-24T10:00:00+09:00",
+                "end": "2026-07-24T11:00:00+09:00",
+                "attendees": ["Owner <owner@example.com>", "guest@example.com"],
+                "meeting_link": "https://meet.google.com/abc-defg-hij"
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Compact)
+            .expect("render Calendar event");
+        assert!(rendered.contains("Updated: Planning"));
+        assert!(rendered.contains("2026-07-24T10:00:00+09:00"));
+        assert!(rendered.contains("Owner <owner@example.com>"));
+        assert!(rendered.contains("guest@example.com"));
+        assert!(rendered.contains("https://meet.google.com/abc-defg-hij"));
+    }
+
+    #[test]
+    fn renders_cancelled_calendar_event_inline() {
+        let event = IncomingEvent {
+            kind: "calendar.event.cancelled".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": "Cancelled review",
+                "start": "2026-07-25"
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Inline)
+            .expect("render cancelled Calendar event");
+        assert_eq!(rendered, "Cancelled: Cancelled review · 2026-07-25");
+    }
+
+    #[test]
+    fn renders_calendar_events_within_sink_limit_for_long_multibyte_payloads() {
+        let attendees = (0..120)
+            .map(|index| format!("참석자{index}-{}", "🚀회의".repeat(8)))
+            .collect::<Vec<_>>();
+        let payload = json!({
+            "summary": format!("회의 일정 {}", "🧑‍💻資料".repeat(260)),
+            "start": "2026-07-24T10:00:00+09:00",
+            "end": "2026-07-24T11:00:00+09:00",
+            "meeting_link": "https://meet.google.com/abc-defg-hij",
+            "attendees": attendees,
+        });
+
+        for kind in [
+            "calendar.event.created",
+            "calendar.event.updated",
+            "calendar.event.cancelled",
+        ] {
+            let event = IncomingEvent {
+                kind: kind.into(),
+                channel: None,
+                mention: None,
+                format: None,
+                template: None,
+                payload: payload.clone(),
+            };
+
+            let rendered = DefaultRenderer
+                .render(&event, &MessageFormat::Alert)
+                .unwrap();
+
+            assert!(rendered.chars().count() <= 1900, "{kind} rendered too long");
+            assert!(
+                !rendered.contains('\u{FFFD}'),
+                "{kind} truncated into invalid text"
+            );
+            assert!(rendered.contains(match kind {
+                "calendar.event.created" => "Created: ",
+                "calendar.event.updated" => "Updated: ",
+                "calendar.event.cancelled" => "Cancelled: ",
+                _ => unreachable!(),
+            }));
+            assert!(rendered.contains("2026-07-24T10:00:00+09:00"));
+            assert!(rendered.contains("2026-07-24T11:00:00+09:00"));
+            assert!(rendered.contains("Meet: https://meet.google.com/abc-defg-hij"));
+            assert!(rendered.contains("참석자0-🚀회의"));
+        }
+    }
+
+    #[test]
+    fn renders_calendar_event_inline_within_sink_limit_for_long_multibyte_summary() {
+        let event = IncomingEvent {
+            kind: "calendar.event.cancelled".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": format!("회의 취소 {}", "🧪確認".repeat(320)),
+                "start": "2026-07-25T09:30:00+09:00",
+                "meeting_link": "https://meet.google.com/xyz-uvwx-yz1",
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Inline)
+            .unwrap();
+
+        assert!(rendered.chars().count() <= 1900);
+        assert!(!rendered.contains('\u{FFFD}'));
+        assert!(rendered.contains("Cancelled: "));
+        assert!(rendered.contains("2026-07-25T09:30:00+09:00"));
+        assert!(rendered.contains("Meet: https://meet.google.com/xyz-uvwx-yz1"));
+        assert!(rendered.contains("회의 취소"));
+    }
+
+    #[test]
+    fn renders_calendar_failure_within_sink_limit_for_long_multibyte_error() {
+        let event = IncomingEvent {
+            kind: "calendar.sync.failed".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "summary": format!("calendar sync failed {}", "실패🚨".repeat(220)),
+                "error": format!("권한 오류 {}", "데이터를읽을수없음🧭".repeat(220)),
+                "active_channel_id": format!("채널-{}", "붙여넣기".repeat(100)),
+            }),
+        };
+
+        let rendered = DefaultRenderer
+            .render(&event, &MessageFormat::Alert)
+            .unwrap();
+
+        assert!(rendered.chars().count() <= 1900);
+        assert!(!rendered.contains('\u{FFFD}'));
+        assert!(rendered.contains("calendar sync failed"));
+        assert!(rendered.contains("권한 오류"));
+        assert!(rendered.contains("Active channel preserved:"));
     }
 
     #[test]

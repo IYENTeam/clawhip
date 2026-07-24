@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Highlights
+
+- synchronize Google Calendar changes through durable full/incremental cursors,
+  typed created/updated/cancelled events, and HTTP 410 baseline recovery
+- renew Calendar watch channels at their expiration margin, activate
+  replacements after `sync`, and stop superseded channels
+- persist bounded notification deduplication across daemon restarts
+- persist a delivery outbox atomically with Calendar cursor and event state
+- acknowledge Calendar webhooks only after durable trigger persistence and
+  retain outbox entries until every resolved sink reports success
+- retry bootstrap, initial, incremental, and HTTP 410 recovery failures without
+  requiring another notification or daemon restart
+- retain superseded watches until `channels.stop` succeeds and replace pending
+  watches that do not acknowledge `sync` before their activation deadline
+- require external mode-0600 OAuth credentials with Calendar read-only scope
+- require the exact `calendar.events.readonly` OAuth scope and bound every
+  OAuth/Calendar HTTP request with connect and whole-request timeouts
+- require private regular config/state files and pin release API/OAuth origins
+- expose Calendar cursor, channel, expiration, notification, success, and error
+  status with separate sync/watch health while keeping credentials and tokens private
+
+### Upgrade notes
+
+- webhook-only `[google_calendar].channel_token` remains supported
+- enabling Calendar API synchronization additionally requires
+  `credentials_file`, `state_file`, and `callback_url`
+- route `calendar.*` to Slack or Discord for typed event and failure delivery
+
 ## 0.6.11 - 2026-06-16
 
 ### Highlights

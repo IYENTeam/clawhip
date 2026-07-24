@@ -4,17 +4,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router as AxumRouter};
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 use crate::Result;
 use crate::VERSION;
+use crate::calendar::journal::persist_deferred_notification;
+use crate::calendar::{CalendarNotification, DeferredCalendarNotification};
 use crate::config::{AppConfig, GajaeRouteAction, RouteRule};
 use crate::cron::CronSource;
 use crate::dispatch::Dispatcher;
@@ -33,14 +35,16 @@ use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
 use crate::sink::{DiscordSink, LocalFileSink, Sink, SlackSink};
 use crate::source::{
-    DiscordThreadSource, GitHubSource, GitSource, RegisteredTmuxSession, SharedSourceHealth,
-    SharedTmuxRegistry, Source, TmuxSource, WorkspaceSource, list_active_tmux_registrations,
-    mark_source_completed, mark_source_started, mark_source_stopped, new_shared_source_health,
+    DiscordThreadSource, GitHubSource, GitSource, GoogleCalendarSource, RegisteredTmuxSession,
+    SharedSourceHealth, SharedTmuxRegistry, Source, TmuxSource, WorkspaceSource,
+    list_active_tmux_registrations, mark_source_completed, mark_source_started,
+    mark_source_stopped, new_shared_source_health,
 };
 use crate::telemetry;
 use crate::update::{self, SharedPendingUpdate};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
+const CALENDAR_PERSIST_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const STALE_NATIVE_REPLAY_GRACE: Duration = Duration::from_secs(5 * 60);
 const STALE_NATIVE_REPLAY_REASON: &str = "stale_replay";
 const NATIVE_REPLAY_TIMESTAMP_POINTERS: &[&str] = &[
@@ -93,7 +97,10 @@ pub async fn run(
             json!({"env_var": env_var, "token_source": token_source, "warning": warning}),
         ));
     }
-
+    let port = port_override.unwrap_or(config.daemon.port);
+    let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
     let mut sinks: HashMap<String, Box<dyn Sink>> = HashMap::new();
     sinks.insert(
         "discord".into(),
@@ -108,6 +115,8 @@ pub async fn run(
     let router = Router::new(config.clone());
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));
     let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+    let (calendar_notification_tx, calendar_notification_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+    let (calendar_receipt_tx, calendar_receipt_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
     let native_observability = new_shared_native_hook_observability();
     let source_health = new_shared_source_health();
 
@@ -123,7 +132,8 @@ pub async fn run(
             ci_batch_window,
             routine_batch_window,
             dispatcher_native_observability,
-        );
+        )
+        .with_calendar_receipts(calendar_receipt_tx);
         if let Err(error) = dispatcher.run().await {
             eprintln!("op_pi dispatcher stopped: {error}");
         }
@@ -158,6 +168,16 @@ pub async fn run(
         tx.clone(),
         source_health.clone(),
     );
+    spawn_source(
+        GoogleCalendarSource::new(
+            config.clone(),
+            source_health.clone(),
+            calendar_notification_rx,
+            calendar_receipt_rx,
+        ),
+        tx.clone(),
+        source_health.clone(),
+    );
 
     let pending_update = update::new_shared_pending_update();
     {
@@ -189,12 +209,13 @@ pub async fn run(
                 crate::intake::LOGPUSH_MAX_BODY_BYTES,
             )),
         )
-        .route("/google/calendar", post(post_google_calendar))
+        .route(
+            "/google/calendar",
+            post(post_google_calendar_with_source).layer(Extension(calendar_notification_tx)),
+        )
         .route("/api/update/status", get(update_status))
         .route("/api/update/approve", post(approve_update))
         .route("/api/update/dismiss", post(dismiss_update));
-    let port = port_override.unwrap_or(config.daemon.port);
-
     let app = app.with_state(AppState {
         config: config.clone(),
         port,
@@ -207,9 +228,6 @@ pub async fn run(
         discord_watch_lock: Arc::new(Mutex::new(())),
         sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
     });
-    let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
     println!(
         "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
         local_addr
@@ -335,6 +353,16 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
     let Some(map) = sources.as_object() else {
         return false;
     };
+    if config.google_calendar.sync_enabled()
+        && map
+            .get("google-calendar")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("status"))
+            .and_then(Value::as_str)
+            != Some("running")
+    {
+        return false;
+    }
     if config
         .monitors
         .git
@@ -1188,9 +1216,26 @@ async fn post_cloudflare_logpush(
     }
 }
 
+#[cfg(test)]
 async fn post_google_calendar(
     State(state): State<AppState>,
     headers: HeaderMap,
+) -> axum::response::Response {
+    process_google_calendar_notification(&state, &headers, None).await
+}
+
+async fn post_google_calendar_with_source(
+    State(state): State<AppState>,
+    Extension(notifications): Extension<mpsc::Sender<CalendarNotification>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    process_google_calendar_notification(&state, &headers, Some(&notifications)).await
+}
+
+async fn process_google_calendar_notification(
+    state: &AppState,
+    headers: &HeaderMap,
+    notifications: Option<&mpsc::Sender<CalendarNotification>>,
 ) -> axum::response::Response {
     let Some(expected_token) = state
         .config
@@ -1213,23 +1258,23 @@ async fn post_google_calendar(
         return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
     }
 
-    let channel_id = match google_calendar_header(&headers, "x-goog-channel-id") {
+    let channel_id = match google_calendar_header(headers, "x-goog-channel-id") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_id = match google_calendar_header(&headers, "x-goog-resource-id") {
+    let resource_id = match google_calendar_header(headers, "x-goog-resource-id") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_uri = match google_calendar_header(&headers, "x-goog-resource-uri") {
+    let resource_uri = match google_calendar_header(headers, "x-goog-resource-uri") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_state = match google_calendar_header(&headers, "x-goog-resource-state") {
+    let resource_state = match google_calendar_header(headers, "x-goog-resource-state") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let message_number = match google_calendar_header(&headers, "x-goog-message-number") {
+    let message_number = match google_calendar_header(headers, "x-goog-message-number") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
@@ -1244,7 +1289,59 @@ async fn post_google_calendar(
             .get("x-goog-channel-expiration")
             .and_then(|value| value.to_str().ok()),
     ) {
-        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Ok(event) => {
+            if state.config.google_calendar.sync_enabled()
+                && let Some(notifications) = notifications
+            {
+                let Some(parsed_message_number) =
+                    event.payload.get("message_number").and_then(Value::as_u64)
+                else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "invalid Google Calendar message number",
+                    )
+                        .into_response();
+                };
+                let deferred = DeferredCalendarNotification {
+                    channel_id: channel_id.to_string(),
+                    resource_id: resource_id.to_string(),
+                    resource_uri: resource_uri.to_string(),
+                    message_number: parsed_message_number,
+                    resource_state: resource_state.to_string(),
+                };
+                let (persisted, persisted_ack) = oneshot::channel();
+                let notification = CalendarNotification {
+                    channel_id: channel_id.to_string(),
+                    resource_id: resource_id.to_string(),
+                    resource_uri: resource_uri.to_string(),
+                    message_number: parsed_message_number,
+                    resource_state: resource_state.to_string(),
+                    persisted,
+                };
+                let queued = tokio::time::timeout(
+                    CALENDAR_PERSIST_ACK_TIMEOUT,
+                    notifications.send(notification),
+                )
+                .await;
+                let persisted = match queued {
+                    Ok(Ok(())) => {
+                        matches!(
+                            tokio::time::timeout(CALENDAR_PERSIST_ACK_TIMEOUT, persisted_ack).await,
+                            Ok(Ok(true))
+                        ) || persist_deferred_notification(&state.config, deferred).is_ok()
+                    }
+                    _ => false,
+                };
+                if !persisted {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Google Calendar synchronization is temporarily unavailable",
+                    )
+                        .into_response();
+                }
+            }
+            enqueue_accepted_event(state, normalize_event(event)).await
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
