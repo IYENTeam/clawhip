@@ -4,18 +4,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router as AxumRouter};
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 use crate::Result;
 use crate::VERSION;
+use crate::calendar::journal::persist_deferred_notification;
+use crate::calendar::{CalendarNotification, DeferredCalendarNotification};
 use crate::config::{AppConfig, GajaeRouteAction, RouteRule};
+use crate::core::rate_limit::RateLimiter;
 use crate::cron::CronSource;
 use crate::dispatch::Dispatcher;
 use crate::event::compat::from_incoming_event;
@@ -33,14 +36,19 @@ use crate::render::{DefaultRenderer, Renderer};
 use crate::router::Router;
 use crate::sink::{DiscordSink, LocalFileSink, Sink, SlackSink};
 use crate::source::{
-    DiscordThreadSource, GitHubSource, GitSource, RegisteredTmuxSession, SharedSourceHealth,
-    SharedTmuxRegistry, Source, TmuxSource, WorkspaceSource, list_active_tmux_registrations,
-    mark_source_completed, mark_source_started, mark_source_stopped, new_shared_source_health,
+    DiscordThreadSource, GitHubSource, GitSource, GoogleCalendarSource, RegisteredTmuxSession,
+    SharedSourceHealth, SharedTmuxRegistry, Source, TmuxSource, WorkspaceSource,
+    list_active_tmux_registrations, mark_source_completed, mark_source_started,
+    mark_source_stopped, new_shared_source_health,
 };
 use crate::telemetry;
 use crate::update::{self, SharedPendingUpdate};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
+const CALENDAR_PERSIST_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+const CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY: u32 = 32;
+const CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC: f64 = 8.0;
+const CALENDAR_WEBHOOK_RATE_LIMIT_KEY: &str = "google-calendar";
 const STALE_NATIVE_REPLAY_GRACE: Duration = Duration::from_secs(5 * 60);
 const STALE_NATIVE_REPLAY_REASON: &str = "stale_replay";
 const NATIVE_REPLAY_TIMESTAMP_POINTERS: &[&str] = &[
@@ -71,6 +79,7 @@ struct AppState {
     cron_state_path: PathBuf,
     discord_watch_lock: Arc<Mutex<()>>,
     sns_cert_cache: Arc<crate::intake::SnsCertCache>,
+    calendar_webhook_rate_limit: Arc<Mutex<RateLimiter>>,
 }
 
 pub async fn run(
@@ -93,7 +102,10 @@ pub async fn run(
             json!({"env_var": env_var, "token_source": token_source, "warning": warning}),
         ));
     }
-
+    let port = port_override.unwrap_or(config.daemon.port);
+    let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
     let mut sinks: HashMap<String, Box<dyn Sink>> = HashMap::new();
     sinks.insert(
         "discord".into(),
@@ -108,6 +120,8 @@ pub async fn run(
     let router = Router::new(config.clone());
     let tmux_registry: SharedTmuxRegistry = Arc::new(RwLock::new(HashMap::new()));
     let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+    let (calendar_notification_tx, calendar_notification_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+    let (calendar_receipt_tx, calendar_receipt_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
     let native_observability = new_shared_native_hook_observability();
     let source_health = new_shared_source_health();
 
@@ -123,7 +137,8 @@ pub async fn run(
             ci_batch_window,
             routine_batch_window,
             dispatcher_native_observability,
-        );
+        )
+        .with_calendar_receipts(calendar_receipt_tx);
         if let Err(error) = dispatcher.run().await {
             eprintln!("op_pi dispatcher stopped: {error}");
         }
@@ -158,6 +173,16 @@ pub async fn run(
         tx.clone(),
         source_health.clone(),
     );
+    spawn_source(
+        GoogleCalendarSource::new(
+            config.clone(),
+            source_health.clone(),
+            calendar_notification_rx,
+            calendar_receipt_rx,
+        ),
+        tx.clone(),
+        source_health.clone(),
+    );
 
     let pending_update = update::new_shared_pending_update();
     {
@@ -189,12 +214,13 @@ pub async fn run(
                 crate::intake::LOGPUSH_MAX_BODY_BYTES,
             )),
         )
-        .route("/google/calendar", post(post_google_calendar))
+        .route(
+            "/google/calendar",
+            post(post_google_calendar_with_source).layer(Extension(calendar_notification_tx)),
+        )
         .route("/api/update/status", get(update_status))
         .route("/api/update/approve", post(approve_update))
         .route("/api/update/dismiss", post(dismiss_update));
-    let port = port_override.unwrap_or(config.daemon.port);
-
     let app = app.with_state(AppState {
         config: config.clone(),
         port,
@@ -206,10 +232,11 @@ pub async fn run(
         cron_state_path,
         discord_watch_lock: Arc::new(Mutex::new(())),
         sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+        calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+            CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+            CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+        ))),
     });
-    let addr: SocketAddr = format!("{}:{}", config.daemon.bind_host, port).parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
     println!(
         "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
         local_addr
@@ -335,6 +362,16 @@ fn source_health_is_ok(config: &AppConfig, sources: &Value) -> bool {
     let Some(map) = sources.as_object() else {
         return false;
     };
+    if config.google_calendar.sync_enabled()
+        && map
+            .get("google-calendar")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("status"))
+            .and_then(Value::as_str)
+            != Some("running")
+    {
+        return false;
+    }
     if config
         .monitors
         .git
@@ -412,6 +449,19 @@ async fn post_event(
     Json(event): Json<IncomingEvent>,
 ) -> impl IntoResponse {
     let canonical_kind = event.canonical_kind();
+    if matches!(
+        canonical_kind,
+        "google.calendar.changed" | "google.calendar.sync"
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "Google Calendar callbacks must use /google/calendar",
+            })),
+        )
+            .into_response();
+    }
     if let Some(defer) = stale_replay_defer(
         canonical_kind,
         &event.payload,
@@ -1188,9 +1238,26 @@ async fn post_cloudflare_logpush(
     }
 }
 
+#[cfg(test)]
 async fn post_google_calendar(
     State(state): State<AppState>,
     headers: HeaderMap,
+) -> axum::response::Response {
+    process_google_calendar_notification(&state, &headers, None).await
+}
+
+async fn post_google_calendar_with_source(
+    State(state): State<AppState>,
+    Extension(notifications): Extension<mpsc::Sender<CalendarNotification>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    process_google_calendar_notification(&state, &headers, Some(&notifications)).await
+}
+
+async fn process_google_calendar_notification(
+    state: &AppState,
+    headers: &HeaderMap,
+    notifications: Option<&mpsc::Sender<CalendarNotification>>,
 ) -> axum::response::Response {
     let Some(expected_token) = state
         .config
@@ -1212,24 +1279,36 @@ async fn post_google_calendar(
     if let Err(error) = crate::intake::verify_secret(provided_token, Some(expected_token)) {
         return (StatusCode::UNAUTHORIZED, error.to_string()).into_response();
     }
+    if !state
+        .calendar_webhook_rate_limit
+        .lock()
+        .await
+        .try_consume(CALENDAR_WEBHOOK_RATE_LIMIT_KEY)
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Google Calendar notification rate limit exceeded",
+        )
+            .into_response();
+    }
 
-    let channel_id = match google_calendar_header(&headers, "x-goog-channel-id") {
+    let channel_id = match google_calendar_header(headers, "x-goog-channel-id") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_id = match google_calendar_header(&headers, "x-goog-resource-id") {
+    let resource_id = match google_calendar_header(headers, "x-goog-resource-id") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_uri = match google_calendar_header(&headers, "x-goog-resource-uri") {
+    let resource_uri = match google_calendar_header(headers, "x-goog-resource-uri") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let resource_state = match google_calendar_header(&headers, "x-goog-resource-state") {
+    let resource_state = match google_calendar_header(headers, "x-goog-resource-state") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let message_number = match google_calendar_header(&headers, "x-goog-message-number") {
+    let message_number = match google_calendar_header(headers, "x-goog-message-number") {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
@@ -1244,9 +1323,101 @@ async fn post_google_calendar(
             .get("x-goog-channel-expiration")
             .and_then(|value| value.to_str().ok()),
     ) {
-        Ok(event) => enqueue_accepted_event(&state, normalize_event(event)).await,
+        Ok(event) => {
+            if !state.config.google_calendar.sync_enabled() {
+                return enqueue_accepted_event(state, normalize_event(event)).await;
+            }
+            let Some(notifications) = notifications else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Google Calendar synchronization is temporarily unavailable",
+                )
+                    .into_response();
+            };
+            let Some(parsed_message_number) =
+                event.payload.get("message_number").and_then(Value::as_u64)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "invalid Google Calendar message number",
+                )
+                    .into_response();
+            };
+            let deferred = DeferredCalendarNotification {
+                channel_id: channel_id.to_string(),
+                resource_id: resource_id.to_string(),
+                resource_uri: resource_uri.to_string(),
+                message_number: parsed_message_number,
+                resource_state: resource_state.to_string(),
+            };
+            let (persisted, persisted_ack) = oneshot::channel();
+            let notification = CalendarNotification {
+                channel_id: channel_id.to_string(),
+                resource_id: resource_id.to_string(),
+                resource_uri: resource_uri.to_string(),
+                message_number: parsed_message_number,
+                resource_state: resource_state.to_string(),
+                persisted,
+            };
+            match tokio::time::timeout(
+                CALENDAR_PERSIST_ACK_TIMEOUT,
+                notifications.send(notification),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    match tokio::time::timeout(CALENDAR_PERSIST_ACK_TIMEOUT, persisted_ack).await {
+                        Ok(Ok(true)) => enqueue_accepted_event(state, normalize_event(event)).await,
+                        Ok(Ok(false)) => google_calendar_acknowledgement("untracked_or_replayed"),
+                        Ok(Err(_)) | Err(_) => {
+                            persist_deferred_calendar_notification(state.config.clone(), deferred)
+                                .await
+                        }
+                    }
+                }
+                Ok(Err(_)) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Google Calendar synchronization is temporarily unavailable",
+                )
+                    .into_response(),
+                Err(_) => {
+                    persist_deferred_calendar_notification(state.config.clone(), deferred).await
+                }
+            }
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
+}
+
+async fn persist_deferred_calendar_notification(
+    config: Arc<AppConfig>,
+    deferred: DeferredCalendarNotification,
+) -> axum::response::Response {
+    match tokio::task::spawn_blocking(move || {
+        persist_deferred_notification(config.as_ref(), deferred)
+    })
+    .await
+    {
+        Ok(Ok(())) => google_calendar_acknowledgement("deferred"),
+        Ok(Err(_)) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Google Calendar synchronization is temporarily unavailable",
+        )
+            .into_response(),
+    }
+}
+
+fn google_calendar_acknowledgement(reason: &'static str) -> axum::response::Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "ok": true,
+            "type": "google.calendar.changed",
+            "trusted": false,
+            "reason": reason,
+        })),
+    )
+        .into_response()
 }
 
 fn google_calendar_header<'a>(
@@ -1562,6 +1733,10 @@ mod tests {
                 cron_state_path: PathBuf::from("cron-state.json"),
                 discord_watch_lock: Arc::new(Mutex::new(())),
                 sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+                calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                    CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                    CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+                ))),
                 source_health: new_shared_source_health(),
             },
             rx,
@@ -1581,6 +1756,10 @@ mod tests {
                 source_health: new_shared_source_health(),
                 cron_state_path: PathBuf::from("cron-state.json"),
                 sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+                calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                    CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                    CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+                ))),
                 discord_watch_lock: Arc::new(Mutex::new(())),
             },
             rx,
@@ -1915,6 +2094,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = accept_event(
@@ -1964,6 +2147,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = accept_event(
@@ -2187,6 +2374,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -2228,6 +2419,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let event = IncomingEvent {
             kind: "tool.post".into(),
@@ -2262,6 +2457,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let event = IncomingEvent::agent_started(
             "worker-1".into(),
@@ -2308,6 +2507,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = accept_event(
@@ -2365,6 +2568,10 @@ mod tests {
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = accept_event(
@@ -2427,6 +2634,10 @@ mod tests {
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = accept_event(
@@ -2487,6 +2698,10 @@ mod tests {
             cron_state_path: dir.path().join("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let event = |id: &str| IncomingEvent {
@@ -2545,6 +2760,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -2575,6 +2794,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let payload = json!({"provider": "codex", "event_name": "Bogus"});
 
@@ -2604,6 +2827,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -2647,6 +2874,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = post_native_hook(State(state), Json(payload))
@@ -2689,6 +2920,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let payload = json!({
             "provider": "codex",
@@ -2760,6 +2995,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let payload = json!({
             "provider": "claude-code",
@@ -2928,6 +3167,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
         let dir = tempdir().expect("tempdir");
         let payload = json!({
@@ -2986,6 +3229,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = list_tmux(State(state)).await.into_response();
@@ -3025,6 +3272,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -3058,6 +3309,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = update_status(State(state)).await.into_response();
@@ -3084,6 +3339,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = approve_update(State(state)).await.into_response();
@@ -3122,6 +3381,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
@@ -3148,6 +3411,10 @@ mod tests {
             cron_state_path: PathBuf::from("cron-state.json"),
             discord_watch_lock: Arc::new(Mutex::new(())),
             sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
         };
 
         let response = dismiss_update(State(state)).await.into_response();
@@ -3265,6 +3532,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn general_event_endpoint_cannot_dispatch_google_calendar_callbacks() {
+        let (state, mut rx) = app_state_with_config(AppConfig::default());
+        let response = post_event(
+            State(state),
+            Json(IncomingEvent {
+                kind: "google.calendar.changed".into(),
+                channel: None,
+                mention: None,
+                format: None,
+                template: None,
+                payload: json!({"message_number": 42}),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(rx.try_recv().is_err(), "forged callback must not dispatch");
+    }
+
+    #[tokio::test]
     async fn google_calendar_unconfigured_returns_503() {
         let (state, _rx) = app_state_with_config(AppConfig::default());
 
@@ -3274,9 +3561,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn google_calendar_rejects_wrong_token_and_accepts_valid_notification() {
-        let mut config = AppConfig::default();
-        config.google_calendar.channel_token = Some("calendar-secret".into());
+    async fn google_calendar_webhook_only_mode_authenticates_and_dispatches_normalized_callbacks() {
+        let config = AppConfig {
+            google_calendar: crate::config::GoogleCalendarConfig {
+                channel_token: Some("calendar-secret".into()),
+                ..crate::config::GoogleCalendarConfig::default()
+            },
+            ..AppConfig::default()
+        };
 
         let mut missing_token_headers = google_calendar_headers("unused", "exists");
         missing_token_headers.remove("x-goog-channel-token");
@@ -3284,9 +3576,9 @@ mod tests {
         let response = post_google_calendar(State(state), missing_token_headers).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let mut wrong_headers = google_calendar_headers("wrong", "exists");
         let (state, _rx) = app_state_with_config(config.clone());
-        let response = post_google_calendar(State(state), wrong_headers.clone()).await;
+        let response =
+            post_google_calendar(State(state), google_calendar_headers("wrong", "exists")).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let mut missing_required_header = google_calendar_headers("calendar-secret", "exists");
@@ -3295,15 +3587,210 @@ mod tests {
         let response = post_google_calendar(State(state), missing_required_header).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        wrong_headers.insert("x-goog-channel-token", "calendar-secret".parse().unwrap());
         let (state, mut rx) = app_state_with_config(config);
-        let response = post_google_calendar(State(state), wrong_headers).await;
-        assert!(response.status().is_success());
+        let response = post_google_calendar(
+            State(state),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-        let event = rx.recv().await.expect("event should be enqueued");
+        let event = rx
+            .recv()
+            .await
+            .expect("authenticated webhook-only callback should be dispatched");
         assert_eq!(event.kind, "google.calendar.changed");
         assert_eq!(event.payload["channel_id"], "channel-1");
         assert_eq!(event.payload["message_number"], 42);
+    }
+
+    #[tokio::test]
+    async fn google_calendar_durable_sync_dispatches_only_source_accepted_callbacks() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+        config.google_calendar.credentials_file = Some("oauth.json".into());
+        config.google_calendar.state_file = Some("calendar-state.json".into());
+        let (state, mut rx) = app_state_with_config(config);
+        let (notifications, mut notification_rx) = mpsc::channel::<CalendarNotification>(1);
+        tokio::spawn(async move {
+            let notification = notification_rx.recv().await.expect("notification received");
+            notification
+                .persisted
+                .send(true)
+                .expect("send accepted validation");
+        });
+
+        let response = post_google_calendar_with_source(
+            State(state),
+            Extension(notifications),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let event = rx
+            .recv()
+            .await
+            .expect("source-accepted callback should be dispatched");
+        assert_eq!(event.kind, "google.calendar.changed");
+    }
+
+    #[tokio::test]
+    async fn google_calendar_untracked_or_replayed_callback_is_acknowledged_without_dispatch() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+        config.google_calendar.credentials_file = Some("oauth.json".into());
+        config.google_calendar.state_file = Some("calendar-state.json".into());
+        let (state, mut rx) = app_state_with_config(config);
+        let (notifications, mut notification_rx) = mpsc::channel::<CalendarNotification>(1);
+        tokio::spawn(async move {
+            let notification = notification_rx.recv().await.expect("notification received");
+            notification
+                .persisted
+                .send(false)
+                .expect("send rejected validation");
+        });
+
+        let response = post_google_calendar_with_source(
+            State(state),
+            Extension(notifications),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let acknowledgement: Value = serde_json::from_slice(&body).expect("acknowledgement JSON");
+        assert_eq!(acknowledgement["trusted"], false);
+        assert_eq!(acknowledgement["reason"], "untracked_or_replayed");
+        assert!(
+            rx.try_recv().is_err(),
+            "untrusted callback must not dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_calendar_closed_notification_receiver_returns_503_without_journaling() {
+        let directory = tempdir().expect("temporary calendar directory");
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+        config.google_calendar.credentials_file = Some(directory.path().join("oauth.json"));
+        config.google_calendar.state_file = Some(directory.path().join("calendar-state.json"));
+        let (state, mut rx) = app_state_with_config(config);
+        let (notifications, notification_rx) = mpsc::channel::<CalendarNotification>(1);
+        drop(notification_rx);
+
+        let response = post_google_calendar_with_source(
+            State(state),
+            Extension(notifications),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(rx.try_recv().is_err(), "closed receiver must not dispatch");
+        assert!(
+            fs::read_dir(directory.path())
+                .expect("read temporary calendar directory")
+                .next()
+                .is_none(),
+            "closed receiver must not journal"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_calendar_timed_out_notification_delivery_is_durably_deferred() {
+        let directory = tempdir().expect("temporary calendar directory");
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+        config.google_calendar.credentials_file = Some(directory.path().join("oauth.json"));
+        config.google_calendar.state_file = Some(directory.path().join("calendar-state.json"));
+        let (state, mut rx) = app_state_with_config(config);
+        let (notifications, _notification_rx) = mpsc::channel::<CalendarNotification>(1);
+        let (persisted, _persisted_ack) = oneshot::channel();
+        notifications
+            .try_send(CalendarNotification {
+                channel_id: "queued-channel".into(),
+                resource_id: "queued-resource".into(),
+                resource_uri: "https://www.googleapis.com/calendar/v3/calendars/team/events".into(),
+                message_number: 1,
+                resource_state: "exists".into(),
+                persisted,
+            })
+            .expect("fill notification queue");
+
+        let response = post_google_calendar_with_source(
+            State(state),
+            Extension(notifications),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let acknowledgement: Value = serde_json::from_slice(&body).expect("acknowledgement JSON");
+        assert_eq!(acknowledgement["reason"], "deferred");
+        assert!(
+            rx.try_recv().is_err(),
+            "deferred callback must not dispatch"
+        );
+        assert!(
+            fs::read_dir(directory.path())
+                .expect("read temporary calendar directory")
+                .next()
+                .is_some(),
+            "timed out delivery must journal the callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_calendar_rate_limit_retries_authenticated_callbacks_without_dispatch() {
+        let mut config = AppConfig::default();
+        config.google_calendar.channel_token = Some("calendar-secret".into());
+        config.google_calendar.credentials_file = Some("oauth.json".into());
+        config.google_calendar.state_file = Some("calendar-state.json".into());
+        let (mut state, mut rx) = app_state_with_config(config);
+        state.calendar_webhook_rate_limit = Arc::new(Mutex::new(RateLimiter::new(1, 0.0)));
+        let (notifications, mut notification_rx) = mpsc::channel::<CalendarNotification>(1);
+        tokio::spawn(async move {
+            let notification = notification_rx.recv().await.expect("notification received");
+            notification
+                .persisted
+                .send(true)
+                .expect("send accepted validation");
+        });
+
+        let first = post_google_calendar_with_source(
+            State(state.clone()),
+            Extension(notifications.clone()),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let _ = rx
+            .recv()
+            .await
+            .expect("accepted callback should be dispatched");
+
+        let second = post_google_calendar_with_source(
+            State(state),
+            Extension(notifications),
+            google_calendar_headers("calendar-secret", "exists"),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(second.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert_eq!(
+            body.as_ref(),
+            b"Google Calendar notification rate limit exceeded"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "rate-limited callback must not dispatch"
+        );
     }
 
     fn google_calendar_headers(token: &str, resource_state: &str) -> HeaderMap {

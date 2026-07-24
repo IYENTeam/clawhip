@@ -1,0 +1,99 @@
+use crate::calendar::journal::{
+    DeferredCalendarNotification, append_deferred_notification, read_deferred_notifications,
+    replay_deferred_notifications,
+};
+use std::time::Duration;
+
+use crate::calendar::operations::retry_delay;
+use crate::calendar::state::{CalendarState, WatchChannel};
+
+use super::next_watch_wait;
+
+#[test]
+fn watch_retry_attempts_increase_until_all_watch_failures_recover() {
+    let mut attempts = 0;
+    let successful_wait = Duration::from_secs(300);
+    let mut state = CalendarState::default();
+    state.record_watch_failure("calendar_watch_renewal_failed");
+
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(1)
+    );
+    assert_eq!(attempts, 1);
+    state.record_watch_failure("calendar_watch_stop_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(2)
+    );
+    assert_eq!(attempts, 2);
+
+    state.clear_watch_failure("calendar_watch_renewal_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(3)
+    );
+    assert_eq!(attempts, 3);
+
+    attempts = u32::MAX;
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        retry_delay(u32::MAX)
+    );
+    assert_eq!(attempts, u32::MAX);
+
+    state.clear_watch_failure("calendar_watch_stop_failed");
+    assert_eq!(
+        next_watch_wait(&mut attempts, &state, successful_wait),
+        successful_wait
+    );
+    assert_eq!(attempts, 0);
+}
+
+#[test]
+fn replayed_journal_survives_a_stale_state_save_and_restores_pending_sync() {
+    let temp = tempfile::tempdir().expect("temporary state directory");
+    let path = temp.path().join("calendar-state.json");
+    let mut state = CalendarState::default();
+    state.next_sync_token = Some("cursor".into());
+    state.active_watch = Some(WatchChannel {
+        id: "channel-1".into(),
+        resource_id: "resource-1".into(),
+        resource_uri: "https://www.googleapis.com/calendar/v3/calendars/primary/events".into(),
+        expiration_ms: 1,
+        activation_deadline_ms: None,
+    });
+    state.save(&path).expect("save initial state");
+
+    let mut stale = CalendarState::load(&path).expect("load stale state");
+    append_deferred_notification(
+        &path,
+        &DeferredCalendarNotification {
+            channel_id: "channel-1".into(),
+            resource_id: "resource-1".into(),
+            resource_uri: "https://www.googleapis.com/calendar/v3/calendars/primary/events".into(),
+            message_number: 2,
+            resource_state: "exists".into(),
+        },
+    )
+    .expect("append durable callback journal entry");
+    stale.watch_error = Some("stale writer".into());
+    stale.save(&path).expect("stale state save");
+
+    let mut restarted = CalendarState::load(&path).expect("reload state");
+    replay_deferred_notifications(&mut restarted, &path, "primary")
+        .expect("replay durable callback journal");
+
+    assert_eq!(
+        restarted
+            .pending_sync
+            .as_ref()
+            .map(|pending| pending.message),
+        Some(2)
+    );
+    assert!(
+        read_deferred_notifications(&path)
+            .expect("read cleared journal")
+            .is_empty()
+    );
+}

@@ -238,10 +238,16 @@ local_path = "/var/log/op_pi/cloudflare-audit.jsonl"
 bot_token = "xoxb-your-slack-bot-token"
 
 [google_calendar]
+# At least 32 bytes when credentials_file/state_file enable durable sync.
 channel_token = "replace-with-a-random-channel-token"
+credentials_file = "/Users/you/.op_pi/google-calendar-oauth.json"
+state_file = "/Users/you/.op_pi/google-calendar-state.json"
+calendar_id = "primary"
+callback_url = "https://ops.example.com/google/calendar"
+renewal_margin_secs = 86400
 
 [[routes]]
-event = "google.calendar.changed"
+event = "calendar.*"
 sink = "slack"
 channel = "C_CALENDAR_OPERATIONS"
 format = "compact"
@@ -339,8 +345,19 @@ verification.
 - returns `503` until `[google_calendar].channel_token` is configured
 - compares `X-Goog-Channel-Token` in constant time
 - validates all required `X-Goog-*` notification headers
-- emits `google.calendar.sync` or `google.calendar.changed`
-- preserves notification metadata without pretending the body contains event details
+- binds accepted notifications to tracked channel/resource identities while
+  supporting Google's `primary`/canonical-account URI alias
+- prevents general `/event` traffic from triggering Calendar API synchronization
+- uses external mode-0600 OAuth credentials with the required Calendar events
+  read-only scope (`openid`, `email`, and `userinfo.email` are also accepted)
+- requires a private mode-0600 config for an inline channel token; legacy
+  webhook-only short tokens remain valid until durable sync is enabled
+- performs retrying full/incremental sync with durable webhook triggers,
+  sink-confirmed outbox delivery, and HTTP 410 recovery
+- renews expiring watch channels, bounds pending activation, and durably retires old channels
+- deduplicates notification message numbers across daemon restarts
+- emits typed created, updated, cancelled, and failure events
+- exposes separate public-safe sync/watch health without credential or token values
 
 </details>
 

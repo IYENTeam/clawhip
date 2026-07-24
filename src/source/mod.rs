@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::{RwLock, mpsc};
 
@@ -11,12 +12,14 @@ use crate::events::IncomingEvent;
 pub mod discord_threads;
 pub mod git;
 pub mod github;
+pub mod google_calendar;
 pub mod tmux;
 pub mod workspace;
 
 pub use discord_threads::DiscordThreadSource;
 pub use git::GitSource;
 pub use github::GitHubSource;
+pub use google_calendar::GoogleCalendarSource;
 pub use tmux::{
     RegisteredTmuxSession, SharedTmuxRegistry, TmuxSource, list_active_tmux_registrations,
 };
@@ -39,13 +42,15 @@ pub struct SourceHealth {
     pub last_success_at: Option<String>,
     pub last_error_at: Option<String>,
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 pub fn new_shared_source_health() -> SharedSourceHealth {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-fn now_rfc3339() -> String {
+pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
@@ -63,6 +68,7 @@ pub async fn mark_source_started(health: &SharedSourceHealth, source: &str) {
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            details: None,
         });
     entry.status = "running".to_string();
     entry.started_at = Some(now.clone());
@@ -82,6 +88,7 @@ pub async fn mark_source_success(health: &SharedSourceHealth, source: &str) {
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            details: None,
         });
     entry.status = "running".to_string();
     entry.last_heartbeat_at = Some(now.clone());
@@ -101,11 +108,19 @@ pub async fn mark_source_error(health: &SharedSourceHealth, source: &str, error:
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            details: None,
         });
     entry.status = "degraded".to_string();
     entry.last_heartbeat_at = Some(now.clone());
     entry.last_error_at = Some(now);
     entry.last_error = Some(error.to_string());
+}
+
+pub async fn mark_source_details(health: &SharedSourceHealth, source: &str, details: Value) {
+    let mut guard = health.write().await;
+    if let Some(entry) = guard.get_mut(source) {
+        entry.details = Some(details);
+    }
 }
 
 pub async fn mark_source_stopped(health: &SharedSourceHealth, source: &str, error: impl ToString) {
@@ -120,6 +135,7 @@ pub async fn mark_source_stopped(health: &SharedSourceHealth, source: &str, erro
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            details: None,
         });
     entry.status = "stopped".to_string();
     entry.last_heartbeat_at = Some(now.clone());
@@ -139,6 +155,7 @@ pub async fn mark_source_completed(health: &SharedSourceHealth, source: &str) {
             last_success_at: None,
             last_error_at: None,
             last_error: None,
+            details: None,
         });
     entry.status = "completed".to_string();
     entry.last_heartbeat_at = Some(now);

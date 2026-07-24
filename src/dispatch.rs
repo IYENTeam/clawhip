@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::Result;
+use crate::calendar::CalendarDeliveryReceipt;
+use crate::calendar::state::DELIVERY_RECEIPT_FIELD;
 use crate::core::timer_wheel::{DelayedEntry, TimerWheel};
 use crate::events::{IncomingEvent, normalize_event};
 use crate::native_observability::{
@@ -28,6 +30,7 @@ pub struct Dispatcher {
     routine_batcher: Option<RoutineDeliveryBatcher>,
     batch_tick: Duration,
     native_observability: SharedNativeHookObservability,
+    calendar_receipts: mpsc::Sender<CalendarDeliveryReceipt>,
 }
 
 impl Dispatcher {
@@ -49,7 +52,16 @@ impl Dispatcher {
             routine_batcher: routine_batch_window.map(RoutineDeliveryBatcher::new),
             batch_tick: DEFAULT_BATCH_TICK,
             native_observability,
+            calendar_receipts: mpsc::channel(1).0,
         }
+    }
+
+    pub fn with_calendar_receipts(
+        mut self,
+        calendar_receipts: mpsc::Sender<CalendarDeliveryReceipt>,
+    ) -> Self {
+        self.calendar_receipts = calendar_receipts;
+        self
     }
 
     #[cfg(test)]
@@ -77,10 +89,14 @@ impl Dispatcher {
                 maybe_event = self.rx.recv() => {
                     match maybe_event {
                         Some(event) => {
+                            let (event, receipt_id) = take_calendar_delivery_receipt(event);
                             let event = normalize_event(event);
                             let now_ms = now_ms();
                             self.flush_due_batches(now_ms).await?;
-                            if self.is_ci_event(&event) {
+                            if let Some(id) = receipt_id {
+                                let delivered = self.deliver_event(event).await;
+                                self.send_calendar_receipt(id, delivered);
+                            } else if self.is_ci_event(&event) {
                                 for flushed in self.ci_batcher.observe(event, now_ms) {
                                     self.deliver_event(flushed).await;
                                 }
@@ -121,7 +137,7 @@ impl Dispatcher {
         )
     }
 
-    async fn deliver_event(&self, event: IncomingEvent) {
+    async fn deliver_event(&self, event: IncomingEvent) -> bool {
         let provenance = is_native_hook_event(&event).then(|| self.router.explain(&event));
         let deliveries = match self.router.resolve(&event).await {
             Ok(deliveries) => {
@@ -151,17 +167,24 @@ impl Dispatcher {
                     "op_pi dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
                 );
-                return;
+                return self
+                    .router
+                    .explain(&event)
+                    .routes
+                    .iter()
+                    .all(|route| !route.matched);
             }
         };
 
+        let mut delivered = true;
         for delivery in deliveries {
             self.emit_route_trace(&event, &delivery);
-            self.send_delivery(&event, &delivery).await;
+            delivered &= self.send_delivery(&event, &delivery).await;
         }
+        delivered
     }
 
-    async fn resolve_and_dispatch(&mut self, event: IncomingEvent, now_ms: u64) {
+    async fn resolve_and_dispatch(&mut self, event: IncomingEvent, now_ms: u64) -> bool {
         let provenance = is_native_hook_event(&event).then(|| self.router.explain(&event));
         let deliveries = match self.router.resolve(&event).await {
             Ok(deliveries) => {
@@ -191,16 +214,17 @@ impl Dispatcher {
                     "op_pi dispatcher failed to resolve {}: {error}",
                     event.canonical_kind()
                 );
-                return;
+                return false;
             }
         };
 
+        let mut delivered = true;
         for delivery in deliveries {
             self.emit_route_trace(&event, &delivery);
             if self.should_batch_routine_delivery(&event, &delivery) {
                 self.emit_routine_deferred(&event, &delivery);
                 let Some(routine_batcher) = self.routine_batcher.as_mut() else {
-                    self.send_delivery(&event, &delivery).await;
+                    delivered &= self.send_delivery(&event, &delivery).await;
                     continue;
                 };
                 routine_batcher.observe(
@@ -213,8 +237,15 @@ impl Dispatcher {
                 continue;
             }
 
-            self.send_delivery(&event, &delivery).await;
+            delivered &= self.send_delivery(&event, &delivery).await;
         }
+        delivered
+    }
+
+    fn send_calendar_receipt(&self, id: String, delivered: bool) {
+        let _ = self
+            .calendar_receipts
+            .try_send(CalendarDeliveryReceipt { id, delivered });
     }
 
     fn observe_native_route_outcome(
@@ -255,7 +286,7 @@ impl Dispatcher {
         );
     }
 
-    async fn send_delivery(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) {
+    async fn send_delivery(&self, event: &IncomingEvent, delivery: &ResolvedDelivery) -> bool {
         let Some(sink) = self.sinks.get(delivery.sink.as_str()) else {
             self.emit_dispatch_failure(
                 event,
@@ -268,7 +299,7 @@ impl Dispatcher {
                 delivery.sink,
                 safe_target_for_log(&delivery.target)
             );
-            return;
+            return false;
         };
 
         let content = match self
@@ -290,7 +321,7 @@ impl Dispatcher {
                     delivery.sink,
                     safe_target_for_log(&delivery.target)
                 );
-                return;
+                return false;
             }
         };
 
@@ -305,7 +336,7 @@ impl Dispatcher {
                 telemetry: Some(sink_telemetry_for(event, delivery, None)),
             },
         )
-        .await;
+        .await
     }
 
     async fn send_routine_batch(&self, batch: FlushedRoutineDeliveryBatch) {
@@ -389,7 +420,12 @@ impl Dispatcher {
         .await;
     }
 
-    async fn send_sink_message(&self, sink: &dyn Sink, target: &SinkTarget, message: SinkMessage) {
+    async fn send_sink_message(
+        &self,
+        sink: &dyn Sink,
+        target: &SinkTarget,
+        message: SinkMessage,
+    ) -> bool {
         if let Err(error) = sink.send(target, &message).await {
             let mut record = telemetry::record(
                 telemetry::event_name::DISPATCH_FAILURE,
@@ -402,6 +438,9 @@ impl Dispatcher {
             record.insert("error".to_string(), json!(error.to_string()));
             telemetry::emit(record);
             eprintln!("op_pi dispatcher delivery failed to {safe_target}: {error}");
+            false
+        } else {
+            true
         }
     }
 
@@ -893,6 +932,15 @@ fn ci_run_job_count(payload: &Value) -> usize {
         .unwrap_or(1)
 }
 
+fn take_calendar_delivery_receipt(mut event: IncomingEvent) -> (IncomingEvent, Option<String>) {
+    let receipt = event
+        .payload
+        .as_object_mut()
+        .and_then(|payload| payload.remove(DELIVERY_RECEIPT_FIELD))
+        .and_then(|value| value.as_str().map(ToString::to_string));
+    (event, receipt)
+}
+
 fn should_bypass_routine_batch(event: &IncomingEvent) -> bool {
     let kind = event.canonical_kind();
     kind.ends_with(".failed")
@@ -992,6 +1040,109 @@ mod tests {
                 "session_id": "sess-route"
             }),
         }
+    }
+
+    #[test]
+    fn calendar_delivery_receipt_is_removed_before_routing() {
+        let (event, receipt) = take_calendar_delivery_receipt(IncomingEvent {
+            kind: "calendar.event.created".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({
+                "event_id": "event-1",
+                "_calendar_delivery_receipt": "opaque-receipt"
+            }),
+        });
+
+        assert_eq!(receipt.as_deref(), Some("opaque-receipt"));
+        assert!(event.payload.get("_calendar_delivery_receipt").is_none());
+    }
+
+    #[tokio::test]
+    async fn calendar_delivery_receipt_is_positive_when_no_routes_resolve() {
+        let (tx, rx) = mpsc::channel(1);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel(1);
+        let mut dispatcher = Dispatcher::new(
+            rx,
+            Router::new(Arc::new(AppConfig::default())),
+            Box::new(DefaultRenderer),
+            HashMap::new(),
+            Duration::from_secs(30),
+            None,
+            new_shared_native_hook_observability(),
+        )
+        .with_calendar_receipts(receipt_tx);
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent {
+            kind: "calendar.event.created".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"_calendar_delivery_receipt": "receipt-1"}),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            receipt_rx.recv().await,
+            Some(CalendarDeliveryReceipt {
+                id: "receipt-1".into(),
+                delivered: true,
+            })
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn calendar_delivery_receipt_is_negative_when_a_sink_is_missing() {
+        let config = AppConfig {
+            routes: vec![RouteRule {
+                event: "calendar.event.created".into(),
+                sink: "missing".into(),
+                channel: Some("ops".into()),
+                ..RouteRule::default()
+            }],
+            ..AppConfig::default()
+        };
+        let (tx, rx) = mpsc::channel(1);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel(1);
+        let mut dispatcher = Dispatcher::new(
+            rx,
+            Router::new(Arc::new(config)),
+            Box::new(DefaultRenderer),
+            HashMap::new(),
+            Duration::from_secs(30),
+            None,
+            new_shared_native_hook_observability(),
+        )
+        .with_calendar_receipts(receipt_tx);
+        let task = tokio::spawn(async move { dispatcher.run().await.unwrap() });
+
+        tx.send(IncomingEvent {
+            kind: "calendar.event.created".into(),
+            channel: None,
+            mention: None,
+            format: None,
+            template: None,
+            payload: json!({"_calendar_delivery_receipt": "receipt-1"}),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            receipt_rx.recv().await,
+            Some(CalendarDeliveryReceipt {
+                id: "receipt-1".into(),
+                delivered: false,
+            })
+        );
+        task.await.unwrap();
     }
 
     #[test]

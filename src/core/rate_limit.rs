@@ -35,6 +35,17 @@ impl TokenBucket {
         }
     }
 
+    /// Attempts to consume tokens without taking any available partial refill on rejection.
+    pub fn try_consume(&mut self, count: u32) -> bool {
+        self.refill();
+        let needed = f64::from(count);
+        if self.tokens < needed {
+            return false;
+        }
+        self.tokens -= needed;
+        true
+    }
+
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
@@ -70,6 +81,16 @@ impl RateLimiter {
             .or_insert_with(|| TokenBucket::new(capacity, refill_per_sec))
             .consume_or_delay(1)
     }
+
+    /// Consumes one token for `key`, leaving the bucket untouched when unavailable.
+    pub fn try_consume(&mut self, key: &str) -> bool {
+        let capacity = self.capacity;
+        let refill_per_sec = self.refill_per_sec;
+        self.buckets
+            .entry(key.to_string())
+            .or_insert_with(|| TokenBucket::new(capacity, refill_per_sec))
+            .try_consume(1)
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +111,22 @@ mod tests {
         assert_eq!(limiter.delay_for("a"), Duration::ZERO);
         assert!(limiter.delay_for("a") >= Duration::from_secs(1));
         assert_eq!(limiter.delay_for("b"), Duration::ZERO);
+    }
+
+    #[test]
+    fn rejected_try_consume_keeps_partial_refill_available() {
+        let mut bucket = TokenBucket::new(1, 0.0);
+        bucket.tokens = 0.5;
+
+        assert!(!bucket.try_consume(1));
+        assert_eq!(bucket.tokens, 0.5);
+    }
+
+    #[test]
+    fn limiter_try_consume_is_scoped_per_key() {
+        let mut limiter = RateLimiter::new(1, 0.0);
+        assert!(limiter.try_consume("a"));
+        assert!(!limiter.try_consume("a"));
+        assert!(limiter.try_consume("b"));
     }
 }
