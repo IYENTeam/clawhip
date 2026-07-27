@@ -170,6 +170,7 @@ an escalation channel, and complete in an audit file.
 | AWS EventBridge | `POST /aws/eventbridge` | GuardDuty, Health, EC2, custom events |
 | Cloudflare Notifications | `POST /cloudflare` | alert policies and health checks |
 | Cloudflare Logpush | `POST /cloudflare/logpush` | firewall and audit batches |
+| Linear webhooks | [`POST /linear`](docs/linear-intake.md) | issues, labels, SLA, and other signed Linear events |
 | Google Calendar | `POST /google/calendar` | watch synchronization and resource changes |
 | Custom systems | CLI and `POST /api/event` | internal operational signals |
 
@@ -179,7 +180,7 @@ an escalation channel, and complete in an audit file.
 | --- | --- | --- |
 | Discord | channels, threads, webhooks | explicit targets, rate-limit handling |
 | Slack | channels and incoming webhooks | Block Kit rendering, 429 and 5xx retry |
-| Local files | JSONL paths | durable audit, replay, and high-volume capture |
+| Local files | JSONL paths | rendered, bounded local capture; not an authoritative raw-event audit trail |
 | Drop | explicit route | acknowledge noise without accidental delivery |
 
 ## Route by intent
@@ -230,6 +231,22 @@ event = "cloudflare.logpush.audit_logs_v2"
 sink = "localfile"
 local_path = "/var/log/op_pi/cloudflare-audit.jsonl"
 ```
+
+### Linear issue updates to Discord
+
+```toml
+[linear]
+webhook_secret = "LINEAR_WEBHOOK_SECRET"
+
+[[routes]]
+event = "linear.issue-label-update"
+sink = "discord"
+channel = "TRIAGE_CHANNEL_ID"
+format = "compact"
+```
+
+See the [Linear intake guide](docs/linear-intake.md) for signature,
+acknowledgement, retry, and delivery caveats.
 
 ### Google Calendar changes to Slack
 
@@ -361,7 +378,20 @@ verification.
 
 </details>
 
-Read the complete [AWS and Cloudflare intake guide](docs/aws-cloudflare-intake.md).
+<details>
+<summary><strong>Linear webhook authentication</strong></summary>
+
+<br />
+
+- returns `503` until `[linear].webhook_secret` is configured
+- verifies `Linear-Signature` as a hex HMAC-SHA256 over the exact raw body
+- rejects signed bodies whose `webhookTimestamp` is more than 60 seconds from the daemon clock
+- returns Linear's required `200` after queue admission, or for a replay-suppressed duplicate of a previously admitted request
+
+</details>
+
+Read the complete [AWS and Cloudflare intake guide](docs/aws-cloudflare-intake.md)
+and [Linear intake guide](docs/linear-intake.md).
 For Calendar watch setup and event fields, see the
 [Google Calendar intake guide](docs/google-calendar-intake.md).
 
@@ -426,7 +456,7 @@ deployments, and telemetry. The versioned telemetry schema is
 
 ```text
 src/source/       event producers and monitors
-src/intake.rs     AWS, Cloudflare, and Google Calendar intake authentication
+src/intake.rs     AWS, Cloudflare, Linear, and Google Calendar intake authentication
 src/router.rs     route resolution
 src/render/       destination-independent rendering
 src/sink/         Discord, Slack, and local-file delivery

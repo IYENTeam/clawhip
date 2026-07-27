@@ -317,7 +317,7 @@ async fn real_main(cli: Cli) -> Result<()> {
                 editable.run_interactive_editor(&config_path)
             }
             ConfigCommand::Show => {
-                println!("{}", config.to_pretty_toml()?);
+                println!("{}", config.to_redacted_pretty_toml()?);
                 Ok(())
             }
             ConfigCommand::Path => {

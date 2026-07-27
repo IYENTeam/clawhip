@@ -33,10 +33,16 @@ rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 sha2 = { version = "0.10", features = ["oid"] }
 base64 = "0.22"
+hmac = "0.12.1"
+hex = "0.4.3"
+heck = "0.5.0"
+http-body-util = "0.1"
 
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3.15"
+tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
 
 # The profile that 'dist' will build with
 [profile.dist]

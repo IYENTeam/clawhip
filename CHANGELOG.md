@@ -22,6 +22,9 @@
 - require private regular config/state files and pin release API/OAuth origins
 - expose Calendar cursor, channel, expiration, notification, success, and error
   status with separate sync/watch health while keeping credentials and tokens private
+- document the closed-by-default Linear webhook intake contract, including signed
+  `POST /linear`, generic `linear.*` routing events, exact acknowledgement
+  statuses, and volatile-queue delivery caveats.
 
 ### Upgrade notes
 
@@ -29,6 +32,9 @@
 - enabling Calendar API synchronization additionally requires
   `credentials_file`, `state_file`, and `callback_url`
 - route `calendar.*` to Slack or Discord for typed event and failure delivery
+- `[linear].webhook_secret` is optional; existing configs need no migration, and
+  `POST /linear` remains closed with `503` until a nonblank secret is configured.
+  When configured, it must live in a private regular file and saves atomically as `0600`; `config show` redacts credentials.
 
 ## 0.6.11 - 2026-06-16
 

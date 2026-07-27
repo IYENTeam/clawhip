@@ -10,8 +10,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::Engine as _;
+use heck::ToKebabCase;
+use hmac::{Hmac, Mac};
 use rsa::RsaPublicKey;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use sha2::Sha256;
 
 use crate::events::IncomingEvent;
 
@@ -42,6 +45,82 @@ impl std::fmt::Display for IntakeError {
 }
 
 impl std::error::Error for IntakeError {}
+
+/// Maximum accepted raw Linear webhook body size.
+pub const LINEAR_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Verify a Linear webhook signature over its exact raw request body.
+pub fn verify_linear_signature(
+    body: &[u8],
+    signature: Option<&str>,
+    secret: &str,
+) -> Result<(), IntakeError> {
+    let signature = signature
+        .ok_or_else(|| IntakeError::Unauthorized("missing Linear signature header".into()))?;
+    let signature = hex::decode(signature)
+        .map_err(|_| IntakeError::Unauthorized("invalid Linear signature".into()))?;
+    if signature.len() != 32 {
+        return Err(IntakeError::Unauthorized("invalid Linear signature".into()));
+    }
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts arbitrary-length keys");
+    mac.update(body);
+    mac.verify_slice(&signature)
+        .map_err(|_| IntakeError::Unauthorized("invalid Linear signature".into()))
+}
+
+/// Normalize a verified Linear webhook into an incoming event.
+pub fn normalize_linear_webhook(
+    body: &[u8],
+    delivery: Option<&str>,
+    now_ms: u64,
+) -> Result<IncomingEvent, IntakeError> {
+    let webhook: Value = serde_json::from_slice(body)
+        .map_err(|_| IntakeError::BadRequest("invalid Linear webhook JSON".into()))?;
+    let object = webhook
+        .as_object()
+        .ok_or_else(|| IntakeError::BadRequest("Linear webhook must be an object".into()))?;
+    let timestamp = object
+        .get("webhookTimestamp")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| IntakeError::BadRequest("invalid Linear webhookTimestamp".into()))?;
+    if now_ms.abs_diff(timestamp) > 60_000 {
+        return Err(IntakeError::Unauthorized(
+            "stale Linear webhook timestamp".into(),
+        ));
+    }
+
+    let entity = linear_kind_component(object, "type")?;
+    let action = linear_kind_component(object, "action")?;
+    let mut payload = Map::from_iter([("webhook".to_string(), webhook)]);
+    if let Some(delivery) = delivery {
+        payload.insert(
+            "linear_delivery".to_string(),
+            Value::String(delivery.to_string()),
+        );
+    }
+    Ok(intake_event(
+        format!("linear.{entity}-{action}"),
+        Value::Object(payload),
+    ))
+}
+
+fn linear_kind_component(object: &Map<String, Value>, field: &str) -> Result<String, IntakeError> {
+    let raw = object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| IntakeError::BadRequest(format!("missing Linear {field}")))?;
+    let normalized = raw.to_kebab_case();
+    if normalized.is_empty() {
+        Err(IntakeError::BadRequest(format!("invalid Linear {field}")))
+    } else {
+        Ok(normalized)
+    }
+}
 
 /// Normalize an AWS SNS HTTP envelope (Notification or SubscriptionConfirmation).
 pub fn normalize_sns_envelope(payload: &Value) -> Result<IncomingEvent, IntakeError> {
@@ -867,6 +946,112 @@ mod tests {
 
         assert_eq!(event.payload["record_count"], 2);
         assert_eq!(event.payload["records"][0]["RayID"], "ray-1");
+    }
+
+    const LINEAR_SECRET: &str = "linear-test-secret";
+    const LINEAR_BODY: &[u8] = b"{\n  \"action\": \"update\",\n  \"type\": \"IssueLabel\",\n  \"webhookTimestamp\": 1700000000000,\n  \"data\": {\"id\":\"lbl_1\"}\n}";
+    const LINEAR_SIGNATURE: &str =
+        "451d9b630543595dd22a62e8517f2714806175fff46f1f740828040e5de7d47c";
+
+    #[test]
+    fn linear_fixed_raw_body_hmac_vector_and_whitespace_mutation() {
+        assert_eq!(LINEAR_BODY.len(), 111);
+        verify_linear_signature(LINEAR_BODY, Some(LINEAR_SIGNATURE), LINEAR_SECRET).unwrap();
+        let mut mutation = LINEAR_BODY.to_vec();
+        mutation.insert(1, b' ');
+        assert!(matches!(
+            verify_linear_signature(&mutation, Some(LINEAR_SIGNATURE), LINEAR_SECRET),
+            Err(IntakeError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn linear_auth_rejects_missing_malformed_wrong_length_and_mismatched_signatures() {
+        for signature in [
+            None,
+            Some("not-hex"),
+            Some("00"),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        ] {
+            assert!(matches!(
+                verify_linear_signature(b"not json", signature, LINEAR_SECRET),
+                Err(IntakeError::Unauthorized(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn linear_timestamp_requires_unsigned_integer_and_enforces_inclusive_window() {
+        for timestamp in [
+            json!(-1),
+            json!(1.5),
+            json!("1700000000000"),
+            json!(true),
+            json!(null),
+        ] {
+            let body = serde_json::to_vec(
+                &json!({"type":"IssueLabel", "action":"update", "webhookTimestamp":timestamp}),
+            )
+            .unwrap();
+            assert!(matches!(
+                normalize_linear_webhook(&body, None, 1_700_000_000_000),
+                Err(IntakeError::BadRequest(_))
+            ));
+        }
+        for timestamp in [1_700_000_060_000u64, 1_699_999_940_000] {
+            let body = serde_json::to_vec(
+                &json!({"type":"IssueLabel", "action":"update", "webhookTimestamp":timestamp}),
+            )
+            .unwrap();
+            assert!(normalize_linear_webhook(&body, None, 1_700_000_000_000).is_ok());
+        }
+        for timestamp in [1_700_000_060_001u64, 1_699_999_939_999, u64::MAX] {
+            let body = serde_json::to_vec(
+                &json!({"type":"IssueLabel", "action":"update", "webhookTimestamp":timestamp}),
+            )
+            .unwrap();
+            assert!(matches!(
+                normalize_linear_webhook(&body, None, 1_700_000_000_000),
+                Err(IntakeError::Unauthorized(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn linear_normalizes_signed_type_action_and_preserves_object_and_delivery() {
+        let event =
+            normalize_linear_webhook(LINEAR_BODY, Some("delivery-123"), 1_700_000_000_000).unwrap();
+        let webhook: Value = serde_json::from_slice(LINEAR_BODY).unwrap();
+        assert_eq!(event.kind, "linear.issue-label-update");
+        assert_eq!(
+            event.payload,
+            json!({"webhook": webhook, "linear_delivery": "delivery-123"})
+        );
+        let sla = serde_json::to_vec(&json!({"type":" IssueSLA ", "action":" highRisk ", "webhookTimestamp":1_700_000_000_000u64})).unwrap();
+        assert_eq!(
+            normalize_linear_webhook(&sla, None, 1_700_000_000_000)
+                .unwrap()
+                .kind,
+            "linear.issue-sla-high-risk"
+        );
+    }
+
+    #[test]
+    fn linear_rejects_non_object_and_empty_normalized_components() {
+        assert!(matches!(
+            normalize_linear_webhook(b"[]", None, 1_700_000_000_000),
+            Err(IntakeError::BadRequest(_))
+        ));
+        for (kind, action) in [("   ", "update"), ("Issue", "!!!"), ("!!!", "update")] {
+            let body = serde_json::to_vec(
+                &json!({"type":kind, "action":action, "webhookTimestamp":1_700_000_000_000u64}),
+            )
+            .unwrap();
+            assert!(matches!(
+                normalize_linear_webhook(&body, None, 1_700_000_000_000),
+                Err(IntakeError::BadRequest(_))
+            ));
+        }
     }
 }
 

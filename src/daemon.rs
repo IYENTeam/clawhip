@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::extract::{Extension, State};
@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router as AxumRouter};
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
 
 use crate::Result;
 use crate::VERSION;
@@ -45,6 +45,13 @@ use crate::telemetry;
 use crate::update::{self, SharedPendingUpdate};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
+const LINEAR_REPLAY_TTL_MS: u64 = 60_000;
+const LINEAR_REPLAY_CAPACITY: usize = 1_024;
+const LINEAR_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const LINEAR_MAX_CONCURRENT_READS: usize = 32;
+const LINEAR_DELIVERY_MAX_BYTES: usize = 1_024;
+const LINEAR_RATE_BURST: u32 = 128;
+const LINEAR_RATE_PER_SEC: f64 = 64.0;
 const CALENDAR_PERSIST_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY: u32 = 32;
 const CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC: f64 = 8.0;
@@ -66,6 +73,87 @@ const EVENT_REPLAY_TIMESTAMP_POINTERS: &[&str] = &[
     "/observed_at",
     "/created_at",
 ];
+
+#[derive(Clone)]
+struct LinearIntake {
+    replay: Arc<StdMutex<LinearReplayCache>>,
+    permits: Arc<Semaphore>,
+    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    read_timeout: Duration,
+    rate: Arc<StdMutex<LinearRateLimiter>>,
+}
+
+struct LinearReplayCache {
+    entries: VecDeque<([u8; 32], u64)>,
+}
+
+struct LinearRateLimiter {
+    tokens: f64,
+    last_ms: u64,
+}
+
+impl LinearIntake {
+    fn production() -> Self {
+        Self::new(
+            LINEAR_MAX_CONCURRENT_READS,
+            LINEAR_READ_TIMEOUT,
+            unix_timestamp_ms,
+        )
+    }
+
+    fn new(
+        max_concurrent_reads: usize,
+        read_timeout: Duration,
+        now_ms: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> Self {
+        let initial_now = now_ms();
+        Self {
+            replay: Arc::new(StdMutex::new(LinearReplayCache {
+                entries: VecDeque::new(),
+            })),
+            permits: Arc::new(Semaphore::new(max_concurrent_reads)),
+            now_ms: Arc::new(now_ms),
+            read_timeout,
+            rate: Arc::new(StdMutex::new(LinearRateLimiter {
+                tokens: f64::from(LINEAR_RATE_BURST),
+                last_ms: initial_now,
+            })),
+        }
+    }
+
+    fn replay_identity(body: &[u8]) -> [u8; 32] {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(body).into()
+    }
+}
+
+impl LinearReplayCache {
+    fn prune(&mut self, now_ms: u64) {
+        self.entries.retain(|(_, expires_at)| *expires_at >= now_ms);
+    }
+
+    fn contains(&self, identity: &[u8; 32]) -> bool {
+        self.entries.iter().any(|(entry, _)| entry == identity)
+    }
+
+    fn insert(&mut self, identity: [u8; 32], expires_at: u64) {
+        self.entries.push_back((identity, expires_at));
+    }
+}
+
+impl LinearRateLimiter {
+    fn try_consume(&mut self, now_ms: u64) -> bool {
+        let elapsed_ms = now_ms.saturating_sub(self.last_ms);
+        self.tokens = (self.tokens + elapsed_ms as f64 * LINEAR_RATE_PER_SEC / 1_000.0)
+            .min(f64::from(LINEAR_RATE_BURST));
+        self.last_ms = now_ms;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -194,7 +282,44 @@ pub async fn run(
         });
     }
 
-    let app = AxumRouter::new()
+    let app = app_router_with_calendar(
+        AppState {
+            config: config.clone(),
+            port,
+            tx,
+            tmux_registry,
+            pending_update,
+            native_observability,
+            source_health,
+            cron_state_path,
+            discord_watch_lock: Arc::new(Mutex::new(())),
+            sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
+            calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
+                CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
+                CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
+            ))),
+        },
+        calendar_notification_tx,
+        LinearIntake::production(),
+    );
+    println!(
+        "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
+        local_addr
+    );
+    telemetry::emit(daemon_record(
+        telemetry::reason::DAEMON_LISTENING,
+        json!({"version": VERSION, "addr": local_addr.to_string(), "token_source": token_source}),
+    ));
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn app_router_with_calendar(
+    state: AppState,
+    calendar_notification_tx: mpsc::Sender<CalendarNotification>,
+    linear: LinearIntake,
+) -> AxumRouter {
+    AxumRouter::new()
         .route("/health", get(health))
         .route("/api/status", get(status))
         .route("/event", post(post_event))
@@ -214,39 +339,21 @@ pub async fn run(
                 crate::intake::LOGPUSH_MAX_BODY_BYTES,
             )),
         )
+        .route("/linear", post(post_linear).layer(Extension(linear)))
         .route(
             "/google/calendar",
             post(post_google_calendar_with_source).layer(Extension(calendar_notification_tx)),
         )
         .route("/api/update/status", get(update_status))
         .route("/api/update/approve", post(approve_update))
-        .route("/api/update/dismiss", post(dismiss_update));
-    let app = app.with_state(AppState {
-        config: config.clone(),
-        port,
-        tx,
-        tmux_registry,
-        pending_update,
-        native_observability,
-        source_health,
-        cron_state_path,
-        discord_watch_lock: Arc::new(Mutex::new(())),
-        sns_cert_cache: Arc::new(crate::intake::SnsCertCache::new()),
-        calendar_webhook_rate_limit: Arc::new(Mutex::new(RateLimiter::new(
-            CALENDAR_WEBHOOK_RATE_LIMIT_CAPACITY,
-            CALENDAR_WEBHOOK_RATE_LIMIT_REFILL_PER_SEC,
-        ))),
-    });
-    println!(
-        "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
-        local_addr
-    );
-    telemetry::emit(daemon_record(
-        telemetry::reason::DAEMON_LISTENING,
-        json!({"version": VERSION, "addr": local_addr.to_string(), "token_source": token_source}),
-    ));
-    axum::serve(listener, app).await?;
-    Ok(())
+        .route("/api/update/dismiss", post(dismiss_update))
+        .with_state(state)
+}
+
+#[cfg(test)]
+fn app_router(state: AppState) -> AxumRouter {
+    let (calendar_notification_tx, _calendar_notification_rx) = mpsc::channel(1);
+    app_router_with_calendar(state, calendar_notification_tx, LinearIntake::production())
 }
 
 fn spawn_source<S>(source: S, tx: mpsc::Sender<IncomingEvent>, source_health: SharedSourceHealth)
@@ -1132,6 +1239,134 @@ fn gajae_hold_target(config: &AppConfig, repo: &str) -> Option<String> {
         .or_else(|| config.gajae.hold_target_channel.clone())
 }
 
+async fn post_linear(
+    State(state): State<AppState>,
+    Extension(linear): Extension<LinearIntake>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> axum::response::Response {
+    let Some(secret) = state.config.linear.webhook_secret.as_deref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let now_ms = (linear.now_ms)();
+    if !linear
+        .rate
+        .lock()
+        .expect("Linear rate limiter poisoned")
+        .try_consume(now_ms)
+    {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let Ok(_permit) = linear.permits.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let body = match tokio::time::timeout(
+        linear.read_timeout,
+        axum::body::to_bytes(body, crate::intake::LINEAR_MAX_BODY_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) if is_linear_body_limit_error(&error) => {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+        Ok(Err(_)) | Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let signature = headers
+        .get("linear-signature")
+        .and_then(|value| value.to_str().ok());
+    if crate::intake::verify_linear_signature(&body, signature, secret).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(_signature) = signature else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let delivery = headers.get("linear-delivery").and_then(|value| {
+        (value.as_bytes().len() <= LINEAR_DELIVERY_MAX_BYTES)
+            .then(|| std::str::from_utf8(value.as_bytes()).ok())
+            .flatten()
+    });
+    if headers
+        .get("linear-delivery")
+        .is_some_and(|value| value.as_bytes().len() > LINEAR_DELIVERY_MAX_BYTES)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let mut event =
+        match crate::intake::normalize_linear_webhook(&body, delivery, (linear.now_ms)()) {
+            Ok(event) => event,
+            Err(crate::intake::IntakeError::Unauthorized(_)) => {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            Err(crate::intake::IntakeError::BadRequest(_)) => {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        };
+    let event_id = uuid::Uuid::new_v4().to_string();
+    if let Some(payload) = event.payload.as_object_mut() {
+        payload.insert("event_id".to_string(), json!(event_id));
+        payload.insert("correlation_id".to_string(), json!(event_id));
+    }
+    let timestamp = event.payload["webhook"]["webhookTimestamp"]
+        .as_u64()
+        .unwrap_or_default();
+    let expires_at = timestamp.saturating_add(LINEAR_REPLAY_TTL_MS);
+    let event_kind = event.canonical_kind().to_string();
+    let accepted_record = linear_accepted_record(&event_kind, &event_id);
+    let identity = LinearIntake::replay_identity(&body);
+    let accepted = {
+        let mut replay = linear.replay.lock().expect("Linear replay cache poisoned");
+        replay.prune(now_ms);
+        if replay.contains(&identity) {
+            return StatusCode::OK.into_response();
+        }
+        if replay.entries.len() == LINEAR_REPLAY_CAPACITY {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if state.tx.try_send(event).is_err() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        replay.insert(identity, expires_at);
+        true
+    };
+    if accepted {
+        telemetry::emit(accepted_record);
+    }
+    StatusCode::OK.into_response()
+}
+
+fn is_linear_body_limit_error(error: &axum::Error) -> bool {
+    let mut source: &(dyn std::error::Error + 'static) = error;
+    loop {
+        if source.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        let Some(next) = source.source() else {
+            return false;
+        };
+        source = next;
+    }
+}
+
+fn linear_accepted_record(event_kind: &str, event_id: &str) -> serde_json::Map<String, Value> {
+    let mut record = telemetry::record(
+        telemetry::event_name::EVENT_ACCEPTED,
+        telemetry::reason::ACCEPT_ENQUEUED,
+        event_id,
+    );
+    record.insert("event_kind".to_string(), json!(event_kind));
+    record.insert("details".to_string(), json!({"event_id": event_id}));
+    record
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 async fn post_aws_sns(
     State(state): State<AppState>,
     Json(payload): Json<Value>,
@@ -1715,10 +1950,13 @@ mod tests {
     use crate::router::Router;
     use crate::sink::SinkTarget;
     use crate::source::tmux::{ParentProcessInfo, RegistrationSource};
-    use axum::body::to_bytes;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{HeaderValue, Request};
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
     use tokio::time::{Duration, timeout};
+    use tower::ServiceExt;
 
     fn native_hook_test_state() -> (AppState, mpsc::Receiver<IncomingEvent>) {
         let (tx, rx) = mpsc::channel(8);
@@ -1744,7 +1982,14 @@ mod tests {
     }
 
     fn app_state_with_config(config: AppConfig) -> (AppState, mpsc::Receiver<IncomingEvent>) {
-        let (tx, rx) = mpsc::channel(8);
+        app_state_with_config_and_capacity(config, 8)
+    }
+
+    fn app_state_with_config_and_capacity(
+        config: AppConfig,
+        capacity: usize,
+    ) -> (AppState, mpsc::Receiver<IncomingEvent>) {
+        let (tx, rx) = mpsc::channel(capacity);
         (
             AppState {
                 config: Arc::new(config),
@@ -3858,6 +4103,582 @@ mod tests {
         assert!(response.status().is_success());
         let event = rx.recv().await.expect("event should be enqueued");
         assert_eq!(event.kind, "cloudflare.health_check_status_notification");
+    }
+
+    fn configured_linear_state() -> (AppState, mpsc::Receiver<IncomingEvent>) {
+        let mut config = AppConfig::default();
+        config.linear.webhook_secret = Some("linear-test-secret".into());
+        app_state_with_config(config)
+    }
+
+    fn current_linear_body() -> Vec<u8> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        serde_json::to_vec(&json!({
+            "type": "IssueLabel",
+            "action": "update",
+            "webhookTimestamp": now_ms,
+            "data": {"id": "lbl_1"},
+        }))
+        .unwrap()
+    }
+
+    fn linear_signature(body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        type HmacSha256 = Hmac<sha2::Sha256>;
+        let mut mac = HmacSha256::new_from_slice(b"linear-test-secret").unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn linear_request(body: Vec<u8>, signature: Option<String>) -> Request<Body> {
+        let mut builder = Request::post("/linear");
+        if let Some(signature) = signature {
+            builder = builder.header("Linear-Signature", signature);
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    fn linear_body_at(timestamp: u64, data_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "type": "IssueLabel",
+            "action": "update",
+            "webhookTimestamp": timestamp,
+            "data": {"id": data_id},
+        }))
+        .unwrap()
+    }
+
+    fn app_router_with_linear(state: AppState, linear: LinearIntake) -> AxumRouter {
+        let (calendar_notification_tx, _calendar_notification_rx) = mpsc::channel(1);
+        app_router_with_calendar(state, calendar_notification_tx, linear)
+    }
+
+    #[tokio::test]
+    async fn linear_router_auth_precedence_and_route_registration() {
+        let (state, _rx) = configured_linear_state();
+        assert_eq!(
+            app_router(state)
+                .oneshot(linear_request(b"not json".to_vec(), None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (state, _rx) = configured_linear_state();
+        let malformed = b"not json".to_vec();
+        assert_eq!(
+            app_router(state)
+                .oneshot(linear_request(
+                    malformed.clone(),
+                    Some(linear_signature(&malformed))
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let (state, _rx) = configured_linear_state();
+        assert_eq!(
+            app_router(state)
+                .oneshot(Request::get("/linear").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        let (state, _rx) = configured_linear_state();
+        assert_eq!(
+            app_router(state)
+                .oneshot(linear_request(current_linear_body(), None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (state, _rx) = configured_linear_state();
+        assert_eq!(
+            app_router(state)
+                .oneshot(Request::post("/api/linear").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let (state, _rx) = configured_linear_state();
+        assert_eq!(
+            app_router(state)
+                .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_router_accepts_exact_200_and_preserves_signed_payload() {
+        let (state, mut rx) = configured_linear_state();
+        let body = current_linear_body();
+        let response = app_router(state)
+            .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let event = rx.recv().await.expect("Linear event should be enqueued");
+        assert_eq!(event.kind, "linear.issue-label-update");
+        assert_eq!(
+            event.payload["webhook"],
+            serde_json::from_slice::<Value>(&body).unwrap()
+        );
+        assert_eq!(event.payload["event_id"], event.payload["correlation_id"]);
+    }
+
+    #[tokio::test]
+    async fn linear_router_unconfigured_oversized_body_returns_503() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+        let response = app_router(state)
+            .oneshot(linear_request(
+                vec![b'x'; crate::intake::LINEAR_MAX_BODY_BYTES + 1],
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn linear_router_preserves_valid_utf8_delivery_header() {
+        let (state, mut rx) = configured_linear_state();
+        let body = current_linear_body();
+        let mut request = linear_request(body.clone(), Some(linear_signature(&body)));
+        request.headers_mut().insert(
+            "linear-delivery",
+            HeaderValue::from_bytes(b"delivery-\xc3\xa9").unwrap(),
+        );
+        assert_eq!(
+            app_router(state).oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            rx.recv()
+                .await
+                .expect("Linear event should be enqueued")
+                .payload["linear_delivery"],
+            "delivery-é"
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_router_unconfigured_and_unavailable_queue_return_503() {
+        let (state, _rx) = app_state_with_config(AppConfig::default());
+        assert_eq!(
+            app_router(state)
+                .oneshot(linear_request(b"not json".to_vec(), None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let (state, _rx) = app_state_with_config_and_capacity(
+            AppConfig {
+                linear: crate::config::LinearConfig {
+                    webhook_secret: Some("linear-test-secret".into()),
+                },
+                ..AppConfig::default()
+            },
+            1,
+        );
+        state
+            .tx
+            .try_send(IncomingEvent::custom(None, "queue filler".into()))
+            .unwrap();
+        let body = current_linear_body();
+        let response = app_router(state)
+            .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let (state, rx) = configured_linear_state();
+        drop(rx);
+        let body = current_linear_body();
+        assert_eq!(
+            app_router(state)
+                .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_router_suppresses_max_future_duplicate_with_injected_clock() {
+        let now = Arc::new(AtomicU64::new(1_700_000_000_000));
+        let clock = Arc::clone(&now);
+        let linear = LinearIntake::new(32, Duration::from_secs(5), move || {
+            clock.load(Ordering::Relaxed)
+        });
+        let (state, mut rx) = configured_linear_state();
+        let timestamp = now.load(Ordering::Relaxed) + 59_000;
+        let body = linear_body_at(timestamp, "future");
+        let app = app_router_with_linear(state, linear);
+        for signature in [
+            linear_signature(&body),
+            linear_signature(&body).to_uppercase(),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(linear_request(body.clone(), Some(signature)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        now.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(
+            app.oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert!(rx.recv().await.is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn linear_router_full_replay_cache_returns_503_without_eviction_or_enqueue() {
+        let now_ms = 1_700_000_000_000;
+        let clock = Arc::new(AtomicU64::new(now_ms));
+        let clock_for_intake = Arc::clone(&clock);
+        let linear = LinearIntake::new(32, Duration::from_secs(5), move || {
+            clock_for_intake.load(Ordering::Relaxed)
+        });
+        let existing = linear_body_at(now_ms, "existing");
+        let existing_identity = LinearIntake::replay_identity(&existing);
+        {
+            let mut replay = linear.replay.lock().unwrap();
+            replay.insert(existing_identity, now_ms + LINEAR_REPLAY_TTL_MS);
+            for index in 1..LINEAR_REPLAY_CAPACITY {
+                replay.insert([index as u8; 32], now_ms + LINEAR_REPLAY_TTL_MS);
+            }
+        }
+        let (state, mut rx) = configured_linear_state();
+        let app = app_router_with_linear(state, linear.clone());
+        let unique = linear_body_at(now_ms, "unique");
+        assert_eq!(
+            app.clone()
+                .oneshot(linear_request(
+                    unique.clone(),
+                    Some(linear_signature(&unique))
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            linear.replay.lock().unwrap().entries.len(),
+            LINEAR_REPLAY_CAPACITY
+        );
+        assert!(linear.replay.lock().unwrap().contains(&existing_identity));
+        assert_eq!(
+            app.oneshot(linear_request(
+                existing.clone(),
+                Some(linear_signature(&existing)),
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn linear_router_rejects_oversized_delivery_header_without_enqueue() {
+        let now_ms = 1_700_000_000_000;
+        let linear = LinearIntake::new(32, Duration::from_secs(5), move || now_ms);
+        let (state, mut rx) = configured_linear_state();
+        let body = linear_body_at(now_ms, "delivery-limit");
+        let mut oversized = linear_request(body.clone(), Some(linear_signature(&body)));
+        oversized.headers_mut().insert(
+            "linear-delivery",
+            HeaderValue::from_bytes(&vec![b'd'; LINEAR_DELIVERY_MAX_BYTES + 1]).unwrap(),
+        );
+        let app = app_router_with_linear(state, linear);
+        assert_eq!(
+            app.clone().oneshot(oversized).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut accepted = linear_request(body.clone(), Some(linear_signature(&body)));
+        accepted.headers_mut().insert(
+            "linear-delivery",
+            HeaderValue::from_bytes(&vec![b'd'; LINEAR_DELIVERY_MAX_BYTES]).unwrap(),
+        );
+        assert_eq!(
+            app.oneshot(accepted).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert!(rx.recv().await.is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn linear_router_rate_limit_returns_429_without_enqueue_and_refills() {
+        let now = Arc::new(AtomicU64::new(1_700_000_000_000));
+        let clock = Arc::clone(&now);
+        let linear = LinearIntake::new(32, Duration::from_secs(5), move || {
+            clock.load(Ordering::Relaxed)
+        });
+        let (state, mut rx) = app_state_with_config_and_capacity(
+            AppConfig {
+                linear: crate::config::LinearConfig {
+                    webhook_secret: Some("linear-test-secret".into()),
+                },
+                ..AppConfig::default()
+            },
+            LINEAR_RATE_BURST as usize + 1,
+        );
+        let app = app_router_with_linear(state, linear);
+        let timestamp = now.load(Ordering::Relaxed);
+        for index in 0..LINEAR_RATE_BURST {
+            let body = linear_body_at(timestamp, &format!("rate-{index}"));
+            assert_eq!(
+                app.clone()
+                    .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let limited = linear_body_at(timestamp, "limited");
+        assert_eq!(
+            app.clone()
+                .oneshot(linear_request(
+                    limited.clone(),
+                    Some(linear_signature(&limited))
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        for _ in 0..LINEAR_RATE_BURST {
+            assert!(rx.recv().await.is_some());
+        }
+        assert!(rx.try_recv().is_err());
+        now.fetch_add(1_000, Ordering::Relaxed);
+        let refilled = linear_body_at(timestamp, "refilled");
+        assert_eq!(
+            app.oneshot(linear_request(
+                refilled.clone(),
+                Some(linear_signature(&refilled)),
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn linear_replay_suppresses_duplicates_only_after_admission() {
+        let (state, mut rx) = configured_linear_state();
+        let body = current_linear_body();
+        let app = app_router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.oneshot(linear_request(
+                body.clone(),
+                Some(linear_signature(&body).to_uppercase()),
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::OK
+        );
+        assert!(rx.recv().await.is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn linear_queue_failure_does_not_cache_retry() {
+        let (state, mut rx) = app_state_with_config_and_capacity(
+            AppConfig {
+                linear: crate::config::LinearConfig {
+                    webhook_secret: Some("linear-test-secret".into()),
+                },
+                ..AppConfig::default()
+            },
+            1,
+        );
+        state
+            .tx
+            .try_send(IncomingEvent::custom(None, "filler".into()))
+            .unwrap();
+        let body = current_linear_body();
+        let app = app_router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(rx.recv().await.is_some());
+        assert_eq!(
+            app.oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(rx.recv().await.unwrap().kind, "linear.issue-label-update");
+    }
+
+    #[test]
+    fn linear_replay_identity_ignores_signature_hex_casing_and_rate_is_bounded() {
+        let body = b"verified-body";
+        assert_eq!(
+            LinearIntake::replay_identity(body),
+            LinearIntake::replay_identity(body)
+        );
+        let mut rate = LinearRateLimiter {
+            tokens: 128.0,
+            last_ms: 0,
+        };
+        for _ in 0..128 {
+            assert!(rate.try_consume(0));
+        }
+        assert!(!rate.try_consume(0));
+        assert!(rate.try_consume(16));
+    }
+
+    #[test]
+    fn linear_replay_cache_expires_with_injected_time() {
+        let mut cache = LinearReplayCache {
+            entries: VecDeque::new(),
+        };
+        let identity = [7; 32];
+        cache.insert(identity, 10 + LINEAR_REPLAY_TTL_MS);
+        cache.prune(10 + LINEAR_REPLAY_TTL_MS);
+        assert!(cache.contains(&identity));
+        cache.prune(11 + LINEAR_REPLAY_TTL_MS);
+        assert!(!cache.contains(&identity));
+    }
+
+    #[tokio::test]
+    async fn linear_timeout_and_saturation_are_deterministic() {
+        let (state, _rx) = configured_linear_state();
+        let body = current_linear_body();
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-signature", linear_signature(&body).parse().unwrap());
+        let saturated = LinearIntake::new(1, Duration::from_secs(1), unix_timestamp_ms);
+        let permit = saturated.permits.clone().acquire_owned().await.unwrap();
+        assert_eq!(
+            post_linear(
+                State(state),
+                Extension(saturated),
+                headers,
+                Body::from(body)
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(permit);
+
+        let (state, _rx) = configured_linear_state();
+        let body = current_linear_body();
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-signature", linear_signature(&body).parse().unwrap());
+        let timed_out = LinearIntake::new(1, Duration::from_millis(1), unix_timestamp_ms);
+        let stalled_body = Body::from_stream(futures_util::stream::pending::<
+            std::result::Result<axum::body::Bytes, std::convert::Infallible>,
+        >());
+        assert_eq!(
+            post_linear(State(state), Extension(timed_out), headers, stalled_body)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let (state, _rx) = configured_linear_state();
+        let body = current_linear_body();
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-signature", linear_signature(&body).parse().unwrap());
+        let stream_error = Body::from_stream(futures_util::stream::once(async {
+            Err::<axum::body::Bytes, std::io::Error>(std::io::Error::other("read failed"))
+        }));
+        assert_eq!(
+            post_linear(
+                State(state),
+                Extension(LinearIntake::new(
+                    1,
+                    Duration::from_secs(1),
+                    unix_timestamp_ms
+                )),
+                headers,
+                stream_error,
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn linear_router_enforces_one_mebibyte_body_limit() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        for (size, expected) in [
+            (1_048_576usize, StatusCode::OK),
+            (1_048_577usize, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let prefix = format!(
+                "{{\"type\":\"Issue\",\"action\":\"update\",\"webhookTimestamp\":{now_ms},\"data\":\""
+            );
+            let suffix = "\"}";
+            let body = format!(
+                "{prefix}{}{}",
+                "x".repeat(size - prefix.len() - suffix.len()),
+                suffix
+            )
+            .into_bytes();
+            assert_eq!(body.len(), size);
+            let (state, mut rx) = configured_linear_state();
+            let response = app_router(state)
+                .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::OK {
+                assert!(rx.recv().await.is_some());
+            } else {
+                assert!(rx.try_recv().is_err());
+            }
+        }
     }
 
     #[tokio::test]
