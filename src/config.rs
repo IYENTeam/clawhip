@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub aws: AwsConfig,
     #[serde(default, skip_serializing_if = "CloudflareConfig::is_empty")]
     pub cloudflare: CloudflareConfig,
+    #[serde(default, skip_serializing_if = "LinearConfig::is_empty")]
+    pub linear: LinearConfig,
     #[serde(default, skip_serializing_if = "GoogleCalendarConfig::is_empty")]
     pub google_calendar: GoogleCalendarConfig,
 }
@@ -129,6 +131,17 @@ pub struct CloudflareConfig {
 impl CloudflareConfig {
     fn is_empty(&self) -> bool {
         self.webhook_secret.is_none() && self.logpush_secret.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct LinearConfig {
+    pub webhook_secret: Option<String>,
+}
+
+impl LinearConfig {
+    fn is_empty(&self) -> bool {
+        self.webhook_secret.is_none()
     }
 }
 
@@ -877,7 +890,8 @@ impl AppConfig {
         };
         let mut config: Self = toml::from_str(&raw)?;
         config.normalize();
-        if config.google_calendar.channel_token.is_some() {
+        if config.google_calendar.channel_token.is_some() || config.linear.webhook_secret.is_some()
+        {
             validate_private_regular_config_file(path)?;
         }
         Ok(config)
@@ -887,9 +901,41 @@ impl AppConfig {
         Ok(toml::to_string_pretty(self)?)
     }
 
+    pub fn to_redacted_pretty_toml(&self) -> Result<String> {
+        let mut redacted = self.clone();
+        for value in [
+            &mut redacted.providers.discord.bot_token,
+            &mut redacted.providers.slack.bot_token,
+            &mut redacted.aws.webhook_secret,
+            &mut redacted.cloudflare.webhook_secret,
+            &mut redacted.cloudflare.logpush_secret,
+            &mut redacted.google_calendar.channel_token,
+            &mut redacted.linear.webhook_secret,
+            &mut redacted.monitors.github_token,
+        ] {
+            if value.is_some() {
+                *value = Some("[REDACTED]".into());
+            }
+        }
+        for route in &mut redacted.routes {
+            if route.webhook.is_some() {
+                route.webhook = Some("[REDACTED]".into());
+            }
+            if route.slack_webhook.is_some() {
+                route.slack_webhook = Some("[REDACTED]".into());
+            }
+        }
+        if let Some(openclaw) = redacted.providers.openclaw.as_mut()
+            && openclaw.gateway_token.is_some()
+        {
+            openclaw.gateway_token = Some("[REDACTED]".into());
+        }
+        redacted.to_pretty_toml()
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let contents = self.to_pretty_toml()?;
-        if self.google_calendar.channel_token.is_some() {
+        if self.google_calendar.channel_token.is_some() || self.linear.webhook_secret.is_some() {
             write_private_config(path, contents.as_bytes())
         } else {
             if let Some(parent) = path
@@ -1606,6 +1652,7 @@ impl AppConfig {
             normalize_text(self.google_calendar.callback_url.take());
         self.providers.discord.bot_token =
             normalize_secret(self.providers.discord.bot_token.clone());
+        self.linear.webhook_secret = normalize_secret(self.linear.webhook_secret.clone());
         self.defaults.channel = normalize_text(self.defaults.channel.clone());
         self.monitors.github_token = normalize_secret(self.monitors.github_token.clone());
 
@@ -2789,6 +2836,148 @@ poll_interval_secs = 3
         );
         let round_tripped: AppConfig = toml::from_str(&toml).expect("round-trip default config");
         assert!(round_tripped.discord_watch.is_empty());
+    }
+
+    #[test]
+    fn linear_characterization_old_toml_without_section_parses() {
+        let config: AppConfig = toml::from_str(
+            "[[routes]]\nevent = \"custom\"\nsink = \"localfile\"\nlocal_path = \"/tmp/op_pi/events.jsonl\"\n",
+        )
+        .expect("old TOML without [linear] parses");
+
+        assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    #[test]
+    fn linear_characterization_default_pretty_toml_omits_empty_provider_sections() {
+        let toml = AppConfig::default()
+            .to_pretty_toml()
+            .expect("serialize default config");
+        assert!(!toml.contains("[aws]"));
+        assert!(!toml.contains("[cloudflare]"));
+        assert!(!toml.contains("[providers]"));
+    }
+
+    #[test]
+    fn linear_default_config_is_empty_and_omitted_from_pretty_toml() {
+        let config = AppConfig::default();
+        assert_eq!(config.linear, LinearConfig::default());
+        assert!(config.linear.is_empty());
+        assert!(
+            !config
+                .to_pretty_toml()
+                .expect("serialize default config")
+                .contains("[linear]")
+        );
+    }
+
+    #[test]
+    fn linear_config_parses_and_normalizes_nonempty_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_private_config_fixture(&path, "[[routes]]\nevent = \"custom\"\nsink = \"localfile\"\nlocal_path = \"/tmp/op_pi/events.jsonl\"\n\n[linear]\nwebhook_secret = \" qa-secret \"\n").unwrap();
+        let config = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.linear.webhook_secret.as_deref(), Some("qa-secret"));
+        assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    #[test]
+    fn linear_config_normalizes_blank_secret_to_none_and_omits_from_pretty_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[[routes]]\nevent = \"custom\"\nsink = \"localfile\"\nlocal_path = \"/tmp/op_pi/events.jsonl\"\n\n[linear]\nwebhook_secret = \"   \"\n").unwrap();
+        let config = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.linear.webhook_secret, None);
+        assert!(
+            !config
+                .to_pretty_toml()
+                .expect("serialize normalized config")
+                .contains("[linear]")
+        );
+    }
+
+    #[test]
+    fn linear_config_rejects_non_string_secret() {
+        let error = toml::from_str::<AppConfig>("[linear]\nwebhook_secret = 42\n")
+            .expect_err("non-string Linear webhook_secret must fail");
+        assert!(error.to_string().contains("invalid type"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linear_secret_requires_private_regular_file_and_redacts_display() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[linear]\nwebhook_secret = \"test-linear-secret\"\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(AppConfig::load_or_default(&path).is_err());
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let config = AppConfig::load_or_default(&path).unwrap();
+        let display = config.to_redacted_pretty_toml().unwrap();
+        assert!(display.contains("[REDACTED]"));
+        assert!(!display.contains("test-linear-secret"));
+        assert!(
+            config
+                .to_pretty_toml()
+                .unwrap()
+                .contains("test-linear-secret")
+        );
+
+        let link = directory.path().join("config-link.toml");
+        symlink(&path, &link).unwrap();
+        assert!(AppConfig::load_or_default(&link).is_err());
+    }
+
+    #[test]
+    fn redacted_pretty_toml_hides_all_known_credentials() {
+        let mut config = AppConfig::default();
+        config.providers.discord.bot_token = Some("discord-fixture".into());
+        config.providers.slack.bot_token = Some("slack-fixture".into());
+        config.aws.webhook_secret = Some("aws-fixture".into());
+        config.cloudflare.webhook_secret = Some("cloudflare-fixture".into());
+        config.cloudflare.logpush_secret = Some("logpush-fixture".into());
+        config.google_calendar.channel_token = Some("calendar-fixture".into());
+        config.linear.webhook_secret = Some("linear-fixture".into());
+        config.monitors.github_token = Some("github-fixture".into());
+        config.routes.push(RouteRule {
+            webhook: Some("https://example.test/bearer-discord".into()),
+            slack_webhook: Some("https://example.test/bearer-slack".into()),
+            ..RouteRule::default()
+        });
+        let display = config.to_redacted_pretty_toml().unwrap();
+        for value in [
+            "discord-fixture",
+            "slack-fixture",
+            "aws-fixture",
+            "cloudflare-fixture",
+            "logpush-fixture",
+            "calendar-fixture",
+            "linear-fixture",
+            "github-fixture",
+            "bearer-discord",
+            "bearer-slack",
+        ] {
+            assert!(!display.contains(value));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_linear_secret_uses_private_atomic_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.linear.webhook_secret = Some("test-linear-secret".into());
+        config.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
