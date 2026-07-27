@@ -1,0 +1,12 @@
+{
+  "lsp": {
+    "rust": {
+      "priority": 100,
+      "initialization": {
+        "check": {
+          "command": "clippy"
+        }
+      }
+    }
+  }
+}
