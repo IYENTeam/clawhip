@@ -14,6 +14,7 @@
 
 mod error;
 mod inbox;
+mod intake;
 mod mirror;
 mod outbox;
 
@@ -21,6 +22,7 @@ use sqlx::PgPool;
 
 pub use error::LedgerError;
 pub use inbox::{AppendOutcome, InboxRecord};
+pub use intake::IntakeError;
 pub use mirror::{AcceptedReceipt, MirrorOutcome};
 pub use outbox::{NewOutboxEntry, OutboxEntry};
 
