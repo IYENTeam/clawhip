@@ -1253,6 +1253,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "evidence-ledger",
  "flate2",
  "futures-util",
  "heck",

@@ -196,3 +196,37 @@ async fn empty_destination_and_receipt_id_fail_closed() {
     assert!(matches!(err, LedgerError::EmptyReceiptId));
     assert_eq!(ledger.count_mirrored().await.unwrap(), 0);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn accept_fails_closed_during_a_db_outage() {
+    let Some(healthy) = pool().await else { return };
+    let ledger = EvidenceLedger::new(healthy);
+
+    // Sever a second connection to the same database to simulate an outage. The
+    // transactional accept cannot even begin, so it fails closed: no inbox row,
+    // no outbox row, no false ACK.
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let severed = PgPoolOptions::new().connect(&url).await.unwrap();
+    let during_outage = EvidenceLedger::new(severed.clone());
+    severed.close().await;
+    let err = during_outage
+        .accept(&record("evt-outage-accept"), &[outbox("task-flow")])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::Database(_)));
+    assert_eq!(ledger.count().await.unwrap(), 0);
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 0);
+
+    // Recovery: the redelivered event commits atomically, exactly once, with its
+    // outbox intent intact.
+    assert_eq!(
+        ledger
+            .accept(&record("evt-outage-accept"), &[outbox("task-flow")])
+            .await
+            .unwrap(),
+        AppendOutcome::Committed
+    );
+    assert_eq!(ledger.count().await.unwrap(), 1);
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 1);
+}

@@ -155,3 +155,49 @@ async fn interleaved_replays_keep_exactly_one_row() {
     assert!(ledger.get("evt-fixed").await.unwrap().is_some());
     assert_eq!(ledger.count().await.unwrap(), committed_unique + 1);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn outage_fails_closed_then_keeps_loss_zero_after_recovery() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    // A healthy pool owns the schema and the clean slate; a second, severed pool
+    // stands in for the same database during an outage.
+    let healthy = PgPoolOptions::new().connect(&url).await.unwrap();
+    let ledger = EvidenceLedger::new(healthy.clone());
+    ledger.migrate().await.unwrap();
+    truncate(&healthy).await;
+
+    let severed = PgPoolOptions::new().connect(&url).await.unwrap();
+    let during_outage = EvidenceLedger::new(severed.clone());
+    severed.close().await;
+
+    // Commit-before-ACK under an outage: append fails closed (an error, so the
+    // caller withholds its 200) and durably writes nothing.
+    let err = during_outage
+        .append(&record("evt-outage", "session.finished"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::Database(_)));
+    assert!(ledger.get("evt-outage").await.unwrap().is_none());
+    assert_eq!(ledger.count().await.unwrap(), 0);
+
+    // Recovery + redelivery: the event commits exactly once and a further
+    // redelivery deduplicates — loss 0 and no double-processing across the outage.
+    assert_eq!(
+        ledger
+            .append(&record("evt-outage", "session.finished"))
+            .await
+            .unwrap(),
+        AppendOutcome::Committed
+    );
+    assert_eq!(
+        ledger
+            .append(&record("evt-outage", "session.finished"))
+            .await
+            .unwrap(),
+        AppendOutcome::Duplicate
+    );
+    assert_eq!(ledger.count().await.unwrap(), 1);
+}
