@@ -22,10 +22,12 @@ async fn ledger() -> Option<EvidenceLedger> {
 }
 
 async fn truncate(pool: &PgPool) {
-    sqlx::query("TRUNCATE evidence_inbox")
-        .execute(pool)
-        .await
-        .expect("truncate");
+    sqlx::query(
+        "TRUNCATE evidence_inbox, evidence_outbox, accepted_receipt_mirror RESTART IDENTITY CASCADE",
+    )
+    .execute(pool)
+    .await
+    .expect("truncate");
 }
 
 fn record(event_id: &str, kind: &str) -> InboxRecord {
