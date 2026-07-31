@@ -230,3 +230,42 @@ async fn accept_fails_closed_during_a_db_outage() {
     assert_eq!(ledger.count().await.unwrap(), 1);
     assert_eq!(ledger.pending_outbox_count().await.unwrap(), 1);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn mirror_refuses_authority_origination_kinds() {
+    let Some(pool) = pool().await else { return };
+    let ledger = EvidenceLedger::new(pool);
+
+    // ADR-011 no-authority-origination: op_pi mirrors decisions made by
+    // Task Flow and originates none. Raw selection/permit/preference writes
+    // are refused fail-closed and leave no mirror row.
+    for kind in evidence_ledger::FORBIDDEN_ORIGINATION_KINDS {
+        let err = ledger
+            .mirror_accepted(&AcceptedReceipt {
+                receipt_id: format!("origination-attempt-{kind}"),
+                run_id: "run-1".to_string(),
+                kind: (*kind).to_string(),
+                body: json!({ "originated_by": "op_pi" }),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::AuthorityOrigination));
+    }
+    assert_eq!(ledger.count_mirrored().await.unwrap(), 0);
+
+    // A genuine Task-Flow-accepted receipt still mirrors.
+    assert_eq!(
+        ledger
+            .mirror_accepted(&AcceptedReceipt {
+                receipt_id: "accepted-1".to_string(),
+                run_id: "run-1".to_string(),
+                kind: "task_flow.accepted".to_string(),
+                body: json!({ "decision": "made-upstream" }),
+            })
+            .await
+            .unwrap(),
+        MirrorOutcome::Appended
+    );
+    assert_eq!(ledger.count_mirrored().await.unwrap(), 1);
+}

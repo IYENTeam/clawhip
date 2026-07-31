@@ -20,4 +20,9 @@ pub enum LedgerError {
     /// A receipt carried no usable `receipt_id`.
     #[error("receipt_id must be a non-empty string")]
     EmptyReceiptId,
+    /// The mirror was asked to record an authority-origination kind
+    /// (ADR-011 no-authority-origination): op_pi mirrors decisions made by
+    /// Task Flow and originates none.
+    #[error("mirror cannot originate a selection, permit, or preference write")]
+    AuthorityOrigination,
 }

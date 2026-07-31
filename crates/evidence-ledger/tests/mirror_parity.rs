@@ -6,7 +6,7 @@
 //! Requires PostgreSQL via `DATABASE_URL`; no-ops when unset. Fixtures load
 //! from `AGI_FIXTURES_DIR` (default: the enclosing AGI monorepo).
 
-use evidence_ledger::{AcceptedReceipt, EvidenceLedger, MirrorOutcome};
+use evidence_ledger::{AcceptedReceipt, EvidenceLedger, LedgerError, MirrorOutcome};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -109,10 +109,18 @@ async fn owner_verdict(ledger: &EvidenceLedger, pool: &PgPool, case: &Value) -> 
             }
         }
         "mirror-invalid-op-pi-side-permit-write" => {
-            // Structural invariant: the ledger schema has no authority surface
-            // to originate a selection, permit, or preference. Mirroring a
-            // permit-shaped body only records what Task Flow accepted; it
-            // creates no authority artifact.
+            // op_pi must not originate a selection, permit, or preference
+            // write: the mirror guard refuses authority-origination kinds
+            // fail-closed, and the schema carries no authority surface.
+            let attempt = ledger
+                .mirror_accepted(&AcceptedReceipt {
+                    receipt_id: "origination-attempt".to_string(),
+                    run_id: "run-1".to_string(),
+                    kind: "effect_permit".to_string(),
+                    body: json!({ "op": "write_effect_permit" }),
+                })
+                .await;
+            let refused = matches!(attempt, Err(LedgerError::AuthorityOrigination));
             let tables: Vec<String> = sqlx::query_scalar(
                 "SELECT table_name FROM information_schema.tables \
                  WHERE table_schema = 'public' AND table_name <> '_sqlx_migrations' \
@@ -121,15 +129,15 @@ async fn owner_verdict(ledger: &EvidenceLedger, pool: &PgPool, case: &Value) -> 
             .fetch_all(pool)
             .await
             .expect("list tables");
-            let originates = tables.iter().any(|table| {
+            let no_authority_table = !tables.iter().any(|table| {
                 table.contains("permit")
                     || table.contains("selection")
                     || table.contains("preference")
             });
-            if originates {
-                "accept".to_string()
-            } else {
+            if refused && no_authority_table {
                 "fail_closed".to_string()
+            } else {
+                "accept".to_string()
             }
         }
         other => panic!("unmapped mirror fixture case: {other}"),

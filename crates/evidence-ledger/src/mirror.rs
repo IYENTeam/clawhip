@@ -10,6 +10,15 @@ use sqlx::types::Json;
 
 use crate::{EvidenceLedger, LedgerError};
 
+/// Receipt kinds that would turn the mirror into an authority originator.
+///
+/// ADR-011 no-authority-origination: op_pi mirrors decisions Task Flow has
+/// already accepted. Mirroring a raw selection decision, effect permit, or
+/// preference write is refused fail-closed — those artifacts originate only
+/// in Task Flow.
+pub const FORBIDDEN_ORIGINATION_KINDS: &[&str] =
+    &["selection_decision", "effect_permit", "preference_write"];
+
 /// Result of mirroring an accepted receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MirrorOutcome {
@@ -36,7 +45,9 @@ impl EvidenceLedger {
     /// Append a Task-Flow-accepted receipt to the mirror.
     ///
     /// Append-only: an existing `receipt_id` is never rewritten, so replays are
-    /// absorbed as [`MirrorOutcome::AlreadyMirrored`].
+    /// absorbed as [`MirrorOutcome::AlreadyMirrored`]. Authority-origination
+    /// kinds ([`FORBIDDEN_ORIGINATION_KINDS`]) are refused fail-closed with
+    /// [`LedgerError::AuthorityOrigination`].
     pub async fn mirror_accepted(
         &self,
         receipt: &AcceptedReceipt,
@@ -44,6 +55,9 @@ impl EvidenceLedger {
         let receipt_id = receipt.receipt_id.trim();
         if receipt_id.is_empty() {
             return Err(LedgerError::EmptyReceiptId);
+        }
+        if FORBIDDEN_ORIGINATION_KINDS.contains(&receipt.kind.as_str()) {
+            return Err(LedgerError::AuthorityOrigination);
         }
 
         let rows = sqlx::query(
