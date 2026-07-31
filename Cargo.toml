@@ -48,3 +48,7 @@ futures-util = "0.3"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[workspace]
+members = ["crates/evidence-ledger"]
+resolver = "2"
