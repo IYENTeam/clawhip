@@ -386,7 +386,8 @@ verification.
 - returns `503` until `[linear].webhook_secret` is configured
 - verifies `Linear-Signature` as a hex HMAC-SHA256 over the exact raw body
 - rejects signed bodies whose `webhookTimestamp` is more than 60 seconds from the daemon clock
-- returns Linear's required `200` after queue admission, or for a replay-suppressed duplicate of a previously admitted request
+- without `OP_PI_DATABASE_URL`, returns Linear's required `200` after volatile queue admission or replay-cache suppression
+- with `OP_PI_DATABASE_URL`, commits and deduplicates in PostgreSQL before `200`; ledger or queue failure returns `503`. This is an AGI-vendored prototype, not owner-approved deployment evidence; see [roadmap M2](../../docs/roadmap.md#m2--durable-capture--target)
 
 </details>
 

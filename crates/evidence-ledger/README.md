@@ -2,16 +2,16 @@
 
 op_pi durable evidence ledger — AGI architecture §4.2, roadmap `M2`.
 
-Today `POST /linear` answers `200` once an event reaches an in-memory queue, so a
-crash drops in-flight events and a redelivery is processed twice. This crate makes
-the acknowledgement durable: an event is committed to PostgreSQL **before** it is
-acknowledged, and redeliveries collide on the `event_id` primary key so they are
-absorbed instead of reprocessed.
+Without `OP_PI_DATABASE_URL`, `POST /linear` keeps the legacy volatile path and
+answers `200` after in-memory queue admission. With the setting present, this crate
+commits the signed-body dedupe record to PostgreSQL **before** `200`; redeliveries
+collide on the durable key and ledger or queue failure returns `503`.
 
 ## Status
 
-AGI-side prototype inside the vendored `op_pi` tree. It is **not** wired into the
-live intake handler yet and is **not** an owner-approved deployment. See
+AGI-side prototype inside the vendored `op_pi` tree. The daemon wires it into
+`POST /linear` only when `OP_PI_DATABASE_URL` is set; the unset mode remains
+volatile. This conditional wiring is **not** an owner-approved deployment. See
 [`docs/roadmap.md`](../../../../docs/roadmap.md) `M2` for the gate.
 
 ## Run the tests
