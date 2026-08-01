@@ -46,4 +46,5 @@ async fn assert_database_round_trip(pool: &PgPool) {
         .await
         .unwrap_or_else(|error| panic!("PostgreSQL readiness round trip: {error}"));
     assert_eq!(value, 1, "PostgreSQL readiness round trip returned {value}");
+    println!("AGI_BACKEND_ROUND_TRIP:1");
 }
