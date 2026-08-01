@@ -3,7 +3,7 @@
 use serde_json::Value;
 use sqlx::types::Json;
 
-use crate::{EvidenceLedger, LedgerError};
+use crate::{EvidenceLedger, LedgerError, payload};
 
 /// Result of appending an event to the durable inbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,22 +47,45 @@ impl EvidenceLedger {
             return Err(LedgerError::EmptyEventId);
         }
 
+        let payload_hash = payload::inbox_hash(&record.kind, &record.payload);
         let rows = sqlx::query(
-            "INSERT INTO evidence_inbox (event_id, kind, payload) \
-             VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING",
+            "INSERT INTO evidence_inbox (event_id, kind, payload, payload_hash) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (event_id) DO NOTHING",
         )
         .bind(event_id)
         .bind(&record.kind)
         .bind(Json(&record.payload))
+        .bind(&payload_hash)
         .execute(&self.pool)
         .await?
         .rows_affected();
 
-        Ok(if rows == 1 {
-            AppendOutcome::Committed
+        if rows == 1 {
+            Ok(AppendOutcome::Committed)
         } else {
-            AppendOutcome::Duplicate
-        })
+            self.ensure_inbox_duplicate_matches(event_id, &payload_hash)
+                .await
+        }
+    }
+
+    pub(crate) async fn ensure_inbox_duplicate_matches(
+        &self,
+        event_id: &str,
+        expected_hash: &str,
+    ) -> Result<AppendOutcome, LedgerError> {
+        let stored_hash: Option<String> =
+            sqlx::query_scalar("SELECT payload_hash FROM evidence_inbox WHERE event_id = $1")
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await?;
+        if stored_hash.as_deref() == Some(expected_hash) {
+            Ok(AppendOutcome::Duplicate)
+        } else {
+            Err(LedgerError::PayloadMismatch {
+                record_type: "inbox",
+                record_id: event_id.to_string(),
+            })
+        }
     }
 
     /// Fetch a durably stored record by `event_id`.

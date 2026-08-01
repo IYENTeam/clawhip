@@ -495,6 +495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "sqlx",
  "thiserror 2.0.18",
  "time",

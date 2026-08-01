@@ -60,6 +60,49 @@ async fn duplicate_accept_keeps_outbox_idempotent() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn duplicate_accept_with_conflicting_payload_fails_closed() {
+    let pool = require_clean_pool().await;
+    let ledger = EvidenceLedger::new(pool.clone());
+    let original = record("evt-bound-accept");
+    let mut conflicting = original.clone();
+    conflicting.payload = json!({ "event_id": "evt-bound-accept", "tampered": true });
+
+    assert_eq!(
+        ledger
+            .accept(&original, &[outbox("task-flow")])
+            .await
+            .unwrap(),
+        AppendOutcome::Committed
+    );
+    let error = ledger
+        .accept(&conflicting, &[outbox("task-flow")])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LedgerError::PayloadMismatch { .. }));
+
+    let mut conflicting_outbox = outbox("task-flow");
+    conflicting_outbox.payload = json!({ "to": "different-content" });
+    let error = ledger
+        .accept(&original, &[conflicting_outbox])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LedgerError::PayloadMismatch { .. }));
+
+    sqlx::query("UPDATE evidence_inbox SET acceptance_hash = NULL WHERE event_id = $1")
+        .bind("evt-bound-accept")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy_error = ledger
+        .accept(&original, &[outbox("task-flow")])
+        .await
+        .unwrap_err();
+    assert!(matches!(legacy_error, LedgerError::PayloadMismatch { .. }));
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn relay_claims_then_marks_dispatched() {
     let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
@@ -140,15 +183,18 @@ async fn mirror_is_append_only_and_replay_safe() {
         ledger.mirror_accepted(&receipt).await.unwrap(),
         MirrorOutcome::Appended
     );
-    // A different body under the same receipt_id must NOT overwrite the row.
+    assert_eq!(
+        ledger.mirror_accepted(&receipt).await.unwrap(),
+        MirrorOutcome::AlreadyMirrored
+    );
+    // A different body under the same receipt_id must fail closed, not look like
+    // an idempotent replay, and must never overwrite the stored row.
     let tampered = AcceptedReceipt {
         body: json!({ "ok": false }),
         ..receipt.clone()
     };
-    assert_eq!(
-        ledger.mirror_accepted(&tampered).await.unwrap(),
-        MirrorOutcome::AlreadyMirrored
-    );
+    let error = ledger.mirror_accepted(&tampered).await.unwrap_err();
+    assert!(matches!(error, LedgerError::PayloadMismatch { .. }));
     assert_eq!(ledger.count_mirrored().await.unwrap(), 1);
 }
 

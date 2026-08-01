@@ -7,25 +7,21 @@
 //! and stamps `dispatched_at` only after that dispatch succeeds.
 //!
 //! Delivery is therefore **at-least-once** — a crash between a successful
-//! dispatch and its stamp replays the entry, and the downstream dedupes. A tick
-//! drains in `id` order and stops at the first dispatch failure, leaving that
-//! entry and everything after it pending for the next tick. That preserves
-//! in-order, at-least-once delivery over the outbox log and never advances past a
-//! stuck entry.
+//! dispatch and its stamp replays the entry, and the downstream dedupes. Drain
+//! workers claim disjoint rows with expiring PostgreSQL leases. A dispatch failure
+//! is durably counted and does not block later rows; after three failures the row
+//! is quarantined as a dead letter rather than silently skipped.
 //!
 //! A dispatch failure is normal backpressure, not an error: [`relay_once`] still
-//! returns `Ok` and records it in [`RelayProgress::stalled`]. Only a ledger
-//! (database) failure surfaces as [`RelayError`].
-//!
-//! The relay assumes a single worker. The stamp ([`EvidenceLedger::mark_outbox_dispatched`])
-//! is idempotent, so a duplicate dispatch stays harmless if that assumption is
-//! ever broken.
+//! returns `Ok` and records it in [`RelayProgress`]. Only a ledger (database)
+//! failure surfaces as [`RelayError`].
 //!
 //! [`relay_once`]: EvidenceLedger::relay_once
 
 use std::future::Future;
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{EvidenceLedger, LedgerError, OutboxEntry};
 
@@ -45,8 +41,11 @@ pub trait Dispatcher {
 pub struct RelayProgress {
     /// Entries delivered and durably stamped dispatched.
     pub dispatched: u64,
-    /// True when the work stopped early because a dispatch failed. The failed
-    /// entry, and every entry after it, stays pending for the next attempt.
+    /// Dispatch attempts that failed and were durably recorded.
+    pub failed_attempts: u64,
+    /// Entries quarantined after exhausting their retry budget.
+    pub dead_lettered: u64,
+    /// True when at least one dispatch attempt failed. Later rows still run.
     pub stalled: bool,
 }
 
@@ -82,16 +81,22 @@ impl EvidenceLedger {
         if batch <= 0 {
             return Ok(RelayProgress::default());
         }
-        let pending = self.claim_pending_outbox(batch).await?;
+        let lease_id = Uuid::new_v4().to_string();
+        let pending = self.lease_pending_outbox(batch, &lease_id).await?;
         let mut progress = RelayProgress::default();
         for entry in &pending {
             if dispatcher.dispatch(entry).await.is_err() {
+                progress.failed_attempts += 1;
                 progress.stalled = true;
-                break;
+                if self.record_dispatch_failure(entry.id, &lease_id).await? {
+                    progress.dead_lettered += 1;
+                }
+                continue;
             }
-            // A `false` stamp means a concurrent worker already dispatched this
-            // entry; it is done either way, so keep draining without counting it.
-            if self.mark_outbox_dispatched(entry.id).await? {
+            if self
+                .mark_leased_outbox_dispatched(entry.id, &lease_id)
+                .await?
+            {
                 progress.dispatched += 1;
             }
         }
@@ -118,11 +123,10 @@ impl EvidenceLedger {
         loop {
             let tick = self.relay_once(dispatcher, batch).await?;
             total.dispatched += tick.dispatched;
-            if tick.stalled {
-                total.stalled = true;
-                return Ok(total);
-            }
-            if tick.dispatched == 0 {
+            total.failed_attempts += tick.failed_attempts;
+            total.dead_lettered += tick.dead_lettered;
+            total.stalled |= tick.stalled;
+            if tick.dispatched == 0 && tick.failed_attempts == 0 {
                 return Ok(total);
             }
         }

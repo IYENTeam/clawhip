@@ -65,11 +65,11 @@ async fn owner_verdict(ledger: &EvidenceLedger, pool: &PgPool, case: &Value) -> 
                 .mirror_accepted(&receipt(receipt_id, json!({ "body": "original" })))
                 .await
                 .expect("seed mirror row");
-            // The only write path is append; an "update" attempt re-appends.
+            // The only write path is append; a conflicting re-append must be
+            // distinguished from an idempotent replay and fail closed.
             let outcome = ledger
                 .mirror_accepted(&receipt(receipt_id, json!({ "body": "mutated" })))
-                .await
-                .expect("replay mirror row");
+                .await;
             let stored: Value = sqlx::query_scalar(
                 "SELECT body FROM accepted_receipt_mirror WHERE receipt_id = $1",
             )
@@ -77,7 +77,9 @@ async fn owner_verdict(ledger: &EvidenceLedger, pool: &PgPool, case: &Value) -> 
             .fetch_one(pool)
             .await
             .expect("stored body");
-            if outcome == MirrorOutcome::AlreadyMirrored && stored["body"] == "original" {
+            if matches!(outcome, Err(LedgerError::PayloadMismatch { .. }))
+                && stored["body"] == "original"
+            {
                 // The mutation was refused; the stored receipt is untouched.
                 "reject".to_string()
             } else {

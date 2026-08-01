@@ -3,7 +3,7 @@
 use serde_json::Value;
 use sqlx::types::Json;
 
-use crate::{AppendOutcome, EvidenceLedger, InboxRecord, LedgerError};
+use crate::{AppendOutcome, EvidenceLedger, InboxRecord, LedgerError, payload};
 
 /// A downstream intent to persist alongside an inbound event.
 #[derive(Debug, Clone)]
@@ -50,21 +50,34 @@ impl EvidenceLedger {
             return Err(LedgerError::EmptyDestination);
         }
 
+        let payload_hash = payload::inbox_hash(&record.kind, &record.payload);
+        let acceptance_hash = payload::accept_hash(
+            &record.kind,
+            &record.payload,
+            outbox
+                .iter()
+                .map(|entry| (entry.destination.as_str(), &entry.payload)),
+        );
         let mut tx = self.pool.begin().await?;
         let rows = sqlx::query(
-            "INSERT INTO evidence_inbox (event_id, kind, payload) \
-             VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING",
+            "INSERT INTO evidence_inbox \
+             (event_id, kind, payload, payload_hash, acceptance_hash) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (event_id) DO NOTHING",
         )
         .bind(event_id)
         .bind(&record.kind)
         .bind(Json(&record.payload))
+        .bind(&payload_hash)
+        .bind(&acceptance_hash)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
         if rows != 1 {
             tx.rollback().await?;
-            return Ok(AppendOutcome::Duplicate);
+            return self
+                .ensure_accept_duplicate_matches(event_id, &payload_hash, &acceptance_hash)
+                .await;
         }
 
         for entry in outbox {
@@ -82,11 +95,36 @@ impl EvidenceLedger {
         Ok(AppendOutcome::Committed)
     }
 
+    async fn ensure_accept_duplicate_matches(
+        &self,
+        event_id: &str,
+        expected_payload_hash: &str,
+        expected_acceptance_hash: &str,
+    ) -> Result<AppendOutcome, LedgerError> {
+        let stored: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT payload_hash, acceptance_hash FROM evidence_inbox WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if stored.0.as_deref() == Some(expected_payload_hash)
+            && stored.1.as_deref() == Some(expected_acceptance_hash)
+        {
+            Ok(AppendOutcome::Duplicate)
+        } else {
+            Err(LedgerError::PayloadMismatch {
+                record_type: "transactional accept",
+                record_id: event_id.to_string(),
+            })
+        }
+    }
+
     /// Claim the oldest pending outbox entries for dispatch.
     pub async fn claim_pending_outbox(&self, limit: i64) -> Result<Vec<OutboxEntry>, LedgerError> {
         let rows: Vec<(i64, String, String, Json<Value>)> = sqlx::query_as(
             "SELECT id, event_id, destination, payload FROM evidence_outbox \
-             WHERE dispatched_at IS NULL ORDER BY id LIMIT $1",
+             WHERE dispatched_at IS NULL AND dead_lettered_at IS NULL \
+             ORDER BY id LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -108,7 +146,8 @@ impl EvidenceLedger {
     pub async fn mark_outbox_dispatched(&self, id: i64) -> Result<bool, LedgerError> {
         let rows = sqlx::query(
             "UPDATE evidence_outbox SET dispatched_at = now() \
-             WHERE id = $1 AND dispatched_at IS NULL",
+             WHERE id = $1 AND dispatched_at IS NULL AND dead_lettered_at IS NULL \
+             AND lease_token IS NULL",
         )
         .bind(id)
         .execute(&self.pool)
@@ -117,12 +156,24 @@ impl EvidenceLedger {
         Ok(rows == 1)
     }
 
-    /// Count outbox entries still awaiting dispatch.
+    /// Count retryable outbox entries still awaiting dispatch.
     pub async fn pending_outbox_count(&self) -> Result<i64, LedgerError> {
-        let (count,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM evidence_outbox WHERE dispatched_at IS NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM evidence_outbox \
+             WHERE dispatched_at IS NULL AND dead_lettered_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    /// Count outbox entries quarantined after repeated dispatch failures.
+    pub async fn dead_letter_outbox_count(&self) -> Result<i64, LedgerError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM evidence_outbox WHERE dead_lettered_at IS NOT NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok(count)
     }
 }

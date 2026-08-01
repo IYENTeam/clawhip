@@ -8,7 +8,7 @@
 use serde_json::Value;
 use sqlx::types::Json;
 
-use crate::{EvidenceLedger, LedgerError};
+use crate::{EvidenceLedger, LedgerError, payload};
 
 /// Receipt kinds that would turn the mirror into an authority originator.
 ///
@@ -44,8 +44,9 @@ pub struct AcceptedReceipt {
 impl EvidenceLedger {
     /// Append a Task-Flow-accepted receipt to the mirror.
     ///
-    /// Append-only: an existing `receipt_id` is never rewritten, so replays are
-    /// absorbed as [`MirrorOutcome::AlreadyMirrored`]. Authority-origination
+    /// Append-only: an existing `receipt_id` is never rewritten. Byte-equivalent
+    /// semantic replays are absorbed as [`MirrorOutcome::AlreadyMirrored`], while
+    /// conflicting content fails with [`LedgerError::PayloadMismatch`]. Authority-origination
     /// kinds ([`FORBIDDEN_ORIGINATION_KINDS`]) are refused fail-closed with
     /// [`LedgerError::AuthorityOrigination`].
     pub async fn mirror_accepted(
@@ -60,23 +61,38 @@ impl EvidenceLedger {
             return Err(LedgerError::AuthorityOrigination);
         }
 
+        let payload_hash = payload::mirror_hash(&receipt.run_id, &receipt.kind, &receipt.body);
         let rows = sqlx::query(
-            "INSERT INTO accepted_receipt_mirror (receipt_id, run_id, kind, body) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT (receipt_id) DO NOTHING",
+            "INSERT INTO accepted_receipt_mirror \
+             (receipt_id, run_id, kind, body, payload_hash) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(receipt_id)
         .bind(&receipt.run_id)
         .bind(&receipt.kind)
         .bind(Json(&receipt.body))
+        .bind(&payload_hash)
         .execute(&self.pool)
         .await?
         .rows_affected();
 
-        Ok(if rows == 1 {
-            MirrorOutcome::Appended
+        if rows == 1 {
+            return Ok(MirrorOutcome::Appended);
+        }
+        let stored_hash: Option<String> = sqlx::query_scalar(
+            "SELECT payload_hash FROM accepted_receipt_mirror WHERE receipt_id = $1",
+        )
+        .bind(receipt_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if stored_hash.as_deref() == Some(payload_hash.as_str()) {
+            Ok(MirrorOutcome::AlreadyMirrored)
         } else {
-            MirrorOutcome::AlreadyMirrored
-        })
+            Err(LedgerError::PayloadMismatch {
+                record_type: "mirror",
+                record_id: receipt_id.to_string(),
+            })
+        }
     }
 
     /// Count mirrored receipts.

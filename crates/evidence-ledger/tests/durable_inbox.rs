@@ -48,6 +48,26 @@ async fn append_commits_then_deduplicates() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn duplicate_id_with_different_payload_fails_closed() {
+    let ledger = ledger().await;
+    let original = record("evt-bound", "session.finished");
+    let mut conflicting = original.clone();
+    conflicting.payload = json!({ "event_id": "evt-bound", "kind": "tampered" });
+
+    assert_eq!(
+        ledger.append(&original).await.unwrap(),
+        AppendOutcome::Committed
+    );
+    let error = ledger.append(&conflicting).await.unwrap_err();
+    assert!(matches!(error, LedgerError::PayloadMismatch { .. }));
+    assert_eq!(
+        ledger.get("evt-bound").await.unwrap().unwrap().payload,
+        original.payload
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn distinct_event_ids_each_commit() {
     let ledger = ledger().await;
 

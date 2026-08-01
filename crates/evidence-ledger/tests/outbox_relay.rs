@@ -4,7 +4,7 @@
 
 mod support;
 
-use std::sync::Mutex;
+use std::{collections::HashSet, sync::Mutex};
 
 use evidence_ledger::{Dispatcher, EvidenceLedger, InboxRecord, NewOutboxEntry, OutboxEntry};
 use serde_json::json;
@@ -126,22 +126,23 @@ async fn relay_stalls_on_failure_then_retries_at_least_once() {
         .unwrap();
     let ids = pending_ids(&ledger).await;
 
-    // Fails on the second delivery: the first is stamped, the tick then stops in
-    // order without touching the third.
+    // Fails on the second delivery: the failure is durably counted, but it does
+    // not head-of-line block the third entry.
     let flaky = RecordingDispatcher::failing_at(2);
     let stalled = ledger.relay_once(&flaky, 10).await.unwrap();
-    assert_eq!(stalled.dispatched, 1);
+    assert_eq!(stalled.dispatched, 2);
+    assert_eq!(stalled.failed_attempts, 1);
     assert!(stalled.stalled);
-    assert_eq!(flaky.delivered(), vec![ids[0]]);
-    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 2);
+    assert_eq!(flaky.delivered(), vec![ids[0], ids[2]]);
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 1);
 
-    // A healthy retry drains exactly the two still-pending entries — the already
-    // stamped first entry is never reclaimed (no duplicate delivery here).
+    // A healthy retry drains only the failed entry; stamped entries are not
+    // reclaimed.
     let healthy = RecordingDispatcher::default();
     let drained = ledger.relay_once(&healthy, 10).await.unwrap();
-    assert_eq!(drained.dispatched, 2);
+    assert_eq!(drained.dispatched, 1);
     assert!(!drained.stalled);
-    assert_eq!(healthy.delivered(), vec![ids[1], ids[2]]);
+    assert_eq!(healthy.delivered(), vec![ids[1]]);
     assert_eq!(ledger.pending_outbox_count().await.unwrap(), 0);
 }
 
@@ -218,13 +219,100 @@ async fn drain_pending_stops_and_reports_a_stall() {
         .unwrap();
     let ids = pending_ids(&ledger).await;
 
-    // Batch 2: tick one drains ids[0..2]; tick two fails on the third delivery
-    // (call 3) and leaves ids[2..4] pending.
+    // The third call fails once. A full drain records the failure, continues,
+    // and retries that one pending entry without duplicating successful rows.
     let flaky = RecordingDispatcher::failing_at(3);
     let progress = ledger.drain_pending(&flaky, 2).await.unwrap();
 
-    assert_eq!(progress.dispatched, 2);
+    assert_eq!(progress.dispatched, 4);
+    assert_eq!(progress.failed_attempts, 1);
     assert!(progress.stalled);
-    assert_eq!(flaky.delivered(), vec![ids[0], ids[1]]);
-    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 2);
+    assert_eq!(flaky.delivered(), vec![ids[0], ids[1], ids[3], ids[2]]);
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 0);
+}
+
+#[derive(Default)]
+struct PoisonDispatcher {
+    delivered: Mutex<Vec<i64>>,
+}
+
+impl Dispatcher for PoisonDispatcher {
+    async fn dispatch(
+        &self,
+        entry: &OutboxEntry,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if entry.destination == "poison" {
+            return Err("permanent dispatch failure".into());
+        }
+        self.delivered.lock().unwrap().push(entry.id);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn poison_entry_is_quarantined_without_blocking_later_rows() {
+    let pool = require_clean_pool().await;
+    let ledger = EvidenceLedger::new(pool);
+    ledger
+        .accept(
+            &record("evt-relay-poison"),
+            &[outbox("poison"), outbox("healthy")],
+        )
+        .await
+        .unwrap();
+
+    let dispatcher = PoisonDispatcher::default();
+    let progress = ledger.drain_pending(&dispatcher, 1).await.unwrap();
+
+    assert_eq!(progress.dispatched, 1);
+    assert_eq!(progress.failed_attempts, 3);
+    assert_eq!(progress.dead_lettered, 1);
+    assert!(progress.stalled);
+    assert_eq!(dispatcher.delivered.lock().unwrap().len(), 1);
+    assert_eq!(ledger.pending_outbox_count().await.unwrap(), 0);
+    assert_eq!(ledger.dead_letter_outbox_count().await.unwrap(), 1);
+}
+
+#[derive(Default)]
+struct YieldingDispatcher {
+    delivered: Mutex<Vec<i64>>,
+}
+
+impl Dispatcher for YieldingDispatcher {
+    async fn dispatch(
+        &self,
+        entry: &OutboxEntry,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tokio::task::yield_now().await;
+        self.delivered.lock().unwrap().push(entry.id);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn concurrent_drainers_claim_disjoint_entries() {
+    let pool = require_clean_pool().await;
+    let first = EvidenceLedger::new(pool.clone());
+    let second = EvidenceLedger::new(pool);
+    let entries: Vec<_> = (0..10).map(|_| outbox("healthy")).collect();
+    first
+        .accept(&record("evt-relay-concurrent"), &entries)
+        .await
+        .unwrap();
+    let dispatcher = YieldingDispatcher::default();
+
+    let (left, right) = tokio::join!(
+        first.relay_once(&dispatcher, 5),
+        second.relay_once(&dispatcher, 5)
+    );
+    let total = left.unwrap().dispatched + right.unwrap().dispatched;
+    let delivered = dispatcher.delivered.lock().unwrap().clone();
+    let unique: HashSet<_> = delivered.iter().copied().collect();
+
+    assert_eq!(total, 10);
+    assert_eq!(delivered.len(), 10);
+    assert_eq!(unique.len(), 10);
+    assert_eq!(first.pending_outbox_count().await.unwrap(), 0);
 }

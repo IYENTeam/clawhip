@@ -20,6 +20,14 @@ pub enum LedgerError {
     /// A receipt carried no usable `receipt_id`.
     #[error("receipt_id must be a non-empty string")]
     EmptyReceiptId,
+    /// An idempotency key was replayed with different immutable content.
+    #[error("duplicate {record_type} {record_id} has a different payload")]
+    PayloadMismatch {
+        /// The durable record family (`inbox` or `mirror`).
+        record_type: &'static str,
+        /// The conflicting idempotency key.
+        record_id: String,
+    },
     /// The mirror was asked to record an authority-origination kind
     /// (ADR-011 no-authority-origination): op_pi mirrors decisions made by
     /// Task Flow and originates none.
