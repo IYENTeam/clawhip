@@ -16,8 +16,10 @@ volatile. This conditional wiring is **not** an owner-approved deployment. See
 
 ## Run the tests
 
-The integration tests need a PostgreSQL reachable via `DATABASE_URL`. They no-op
-(and pass) when it is unset.
+The 24 integration tests require PostgreSQL via `DATABASE_URL`. They fail closed
+when the variable is missing, the backend is unreachable, migrations fail, or a
+readiness round trip cannot complete. A green result therefore means all 24 tests
+executed against a live backend; it is not a skip-compatible gate.
 
 ```sh
 docker run -d --name agi-op-pi-pg \

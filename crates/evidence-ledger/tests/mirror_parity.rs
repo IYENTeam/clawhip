@@ -3,33 +3,23 @@
 //! identical verdicts. op_pi owns this family (vendored, AGI-authoritative
 //! implementation), so this test is the owner-validator half of parity.
 //!
-//! Requires PostgreSQL via `DATABASE_URL`; no-ops when unset. Fixtures load
-//! from `AGI_FIXTURES_DIR` (default: the enclosing AGI monorepo).
+//! Requires PostgreSQL via `DATABASE_URL`; missing or unreachable backends fail
+//! closed. Fixtures load from `AGI_FIXTURES_DIR` (default: the enclosing AGI
+//! monorepo).
+
+mod support;
+
+use std::path::PathBuf;
 
 use evidence_ledger::{AcceptedReceipt, EvidenceLedger, LedgerError, MirrorOutcome};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
-use std::path::PathBuf;
+use support::require_clean_pool;
 
 const DEFAULT_FIXTURES_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../../contracts/fixtures"
 );
-
-async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .expect("connect to DATABASE_URL");
-    EvidenceLedger::new(pool.clone())
-        .migrate()
-        .await
-        .expect("run migrations");
-    Some(pool)
-}
 
 async fn truncate(pool: &PgPool) {
     sqlx::query("TRUNCATE accepted_receipt_mirror RESTART IDENTITY CASCADE")
@@ -147,7 +137,7 @@ async fn owner_verdict(ledger: &EvidenceLedger, pool: &PgPool, case: &Value) -> 
 #[tokio::test]
 #[serial_test::serial]
 async fn mirror_fixtures_match_agi_verdicts() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool.clone());
 
     let path = fixtures_dir().join("mirror.fixtures.json");

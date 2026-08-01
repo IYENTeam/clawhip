@@ -1,33 +1,17 @@
 //! Integration tests for the durable evidence inbox.
 //!
-//! Requires a live PostgreSQL reachable via `DATABASE_URL`; tests no-op when it
-//! is unset so the suite stays green in environments without a database.
+//! Requires a live PostgreSQL reachable via `DATABASE_URL`. Missing or
+//! unreachable backends fail closed instead of turning evidence tests into no-ops.
+
+mod support;
 
 use evidence_ledger::{AppendOutcome, EvidenceLedger, InboxRecord, LedgerError};
 use serde_json::json;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use support::{require_clean_pool, require_database_url};
 
-async fn ledger() -> Option<EvidenceLedger> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .expect("connect to DATABASE_URL");
-    let ledger = EvidenceLedger::new(pool.clone());
-    ledger.migrate().await.expect("run migrations");
-    truncate(&pool).await;
-    Some(ledger)
-}
-
-async fn truncate(pool: &PgPool) {
-    sqlx::query(
-        "TRUNCATE evidence_inbox, evidence_outbox, accepted_receipt_mirror RESTART IDENTITY CASCADE",
-    )
-    .execute(pool)
-    .await
-    .expect("truncate");
+async fn ledger() -> EvidenceLedger {
+    EvidenceLedger::new(require_clean_pool().await)
 }
 
 fn record(event_id: &str, kind: &str) -> InboxRecord {
@@ -41,9 +25,7 @@ fn record(event_id: &str, kind: &str) -> InboxRecord {
 #[tokio::test]
 #[serial_test::serial]
 async fn append_commits_then_deduplicates() {
-    let Some(ledger) = ledger().await else {
-        return;
-    };
+    let ledger = ledger().await;
     let event = record("evt-A", "session.finished");
 
     assert_eq!(
@@ -67,9 +49,7 @@ async fn append_commits_then_deduplicates() {
 #[tokio::test]
 #[serial_test::serial]
 async fn distinct_event_ids_each_commit() {
-    let Some(ledger) = ledger().await else {
-        return;
-    };
+    let ledger = ledger().await;
 
     assert!(
         ledger
@@ -91,15 +71,10 @@ async fn distinct_event_ids_each_commit() {
 #[tokio::test]
 #[serial_test::serial]
 async fn dedupe_survives_a_restart() {
-    let url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
-    };
+    let url = require_database_url();
     // First "process": commit the event, then drop the pool to simulate a crash.
-    let first = PgPoolOptions::new().connect(&url).await.unwrap();
+    let first = require_clean_pool().await;
     let ledger = EvidenceLedger::new(first.clone());
-    ledger.migrate().await.unwrap();
-    truncate(&first).await;
     assert_eq!(
         ledger.append(&record("evt-restart", "x")).await.unwrap(),
         AppendOutcome::Committed
@@ -120,9 +95,7 @@ async fn dedupe_survives_a_restart() {
 #[tokio::test]
 #[serial_test::serial]
 async fn empty_event_id_is_rejected() {
-    let Some(ledger) = ledger().await else {
-        return;
-    };
+    let ledger = ledger().await;
     let err = ledger.append(&record("   ", "blank")).await.unwrap_err();
     assert!(matches!(err, LedgerError::EmptyEventId));
     assert_eq!(ledger.count().await.unwrap(), 0);
@@ -131,9 +104,7 @@ async fn empty_event_id_is_rejected() {
 #[tokio::test]
 #[serial_test::serial]
 async fn interleaved_replays_keep_exactly_one_row() {
-    let Some(ledger) = ledger().await else {
-        return;
-    };
+    let ledger = ledger().await;
     // A fixed id replayed many times, interleaved with unique ids. The fixed id
     // must end with exactly one row regardless of order.
     let mut committed_unique = 0i64;
@@ -159,15 +130,11 @@ async fn interleaved_replays_keep_exactly_one_row() {
 #[tokio::test]
 #[serial_test::serial]
 async fn outage_fails_closed_then_keeps_loss_zero_after_recovery() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        return;
-    };
+    let url = require_database_url();
     // A healthy pool owns the schema and the clean slate; a second, severed pool
     // stands in for the same database during an outage.
-    let healthy = PgPoolOptions::new().connect(&url).await.unwrap();
+    let healthy = require_clean_pool().await;
     let ledger = EvidenceLedger::new(healthy.clone());
-    ledger.migrate().await.unwrap();
-    truncate(&healthy).await;
 
     let severed = PgPoolOptions::new().connect(&url).await.unwrap();
     let during_outage = EvidenceLedger::new(severed.clone());

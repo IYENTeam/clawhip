@@ -1,23 +1,19 @@
-//! Integration tests for the intake wiring (durable-before-signal). Requires
-//! PostgreSQL via `DATABASE_URL`; no-ops when unset.
+//! Integration tests for the intake wiring (durable-before-signal).
+//!
+//! PostgreSQL via `DATABASE_URL` is mandatory; missing or unreachable backends
+//! fail the test binary.
+
+mod support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use evidence_ledger::{AppendOutcome, EvidenceLedger, InboxRecord, IntakeError, NewOutboxEntry};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
+use support::require_clean_pool;
 
-async fn ledger() -> Option<EvidenceLedger> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = PgPoolOptions::new().connect(&url).await.expect("connect");
-    let ledger = EvidenceLedger::new(pool.clone());
-    ledger.migrate().await.expect("migrate");
-    sqlx::query("TRUNCATE evidence_inbox, evidence_outbox, accepted_receipt_mirror RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await
-        .expect("truncate");
-    Some(ledger)
+async fn ledger() -> EvidenceLedger {
+    EvidenceLedger::new(require_clean_pool().await)
 }
 
 fn record(event_id: &str) -> InboxRecord {
@@ -38,7 +34,7 @@ fn outbox() -> Vec<NewOutboxEntry> {
 #[tokio::test]
 #[serial_test::serial]
 async fn signals_once_on_commit_and_never_on_duplicate() {
-    let Some(ledger) = ledger().await else { return };
+    let ledger = ledger().await;
     let signals = Arc::new(AtomicUsize::new(0));
 
     let first = ledger
@@ -73,7 +69,7 @@ async fn signals_once_on_commit_and_never_on_duplicate() {
 #[tokio::test]
 #[serial_test::serial]
 async fn event_stays_durable_when_signal_fails() {
-    let Some(ledger) = ledger().await else { return };
+    let ledger = ledger().await;
 
     let result = ledger
         .accept_and_signal(&record("evt-B"), &outbox(), || async {
@@ -91,7 +87,7 @@ async fn event_stays_durable_when_signal_fails() {
 #[tokio::test]
 #[serial_test::serial]
 async fn empty_event_id_never_signals() {
-    let Some(ledger) = ledger().await else { return };
+    let ledger = ledger().await;
     let signals = Arc::new(AtomicUsize::new(0));
 
     let result = ledger

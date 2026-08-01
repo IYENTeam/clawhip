@@ -1,30 +1,14 @@
 //! Integration tests for the outbox relay drain (roadmap M2 — outbox→dispatcher).
-//! Requires PostgreSQL via `DATABASE_URL`; every test no-ops when it is unset.
+//! PostgreSQL via `DATABASE_URL` is mandatory; missing or unreachable backends
+//! fail the test binary.
+
+mod support;
 
 use std::sync::Mutex;
 
 use evidence_ledger::{Dispatcher, EvidenceLedger, InboxRecord, NewOutboxEntry, OutboxEntry};
 use serde_json::json;
-use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
-
-async fn pool() -> Option<PgPool> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .expect("connect to DATABASE_URL");
-    EvidenceLedger::new(pool.clone())
-        .migrate()
-        .await
-        .expect("run migrations");
-    sqlx::query("TRUNCATE evidence_inbox, evidence_outbox, accepted_receipt_mirror RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await
-        .expect("truncate");
-    Some(pool)
-}
+use support::require_clean_pool;
 
 fn record(event_id: &str) -> InboxRecord {
     InboxRecord {
@@ -96,7 +80,7 @@ impl Dispatcher for RecordingDispatcher {
 #[tokio::test]
 #[serial_test::serial]
 async fn relay_drains_pending_in_order_and_stamps_dispatched() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
     ledger
         .accept(
@@ -127,7 +111,7 @@ async fn relay_drains_pending_in_order_and_stamps_dispatched() {
 #[tokio::test]
 #[serial_test::serial]
 async fn relay_stalls_on_failure_then_retries_at_least_once() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
     ledger
         .accept(
@@ -164,7 +148,7 @@ async fn relay_stalls_on_failure_then_retries_at_least_once() {
 #[tokio::test]
 #[serial_test::serial]
 async fn drain_pending_walks_past_the_batch_window() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
     ledger
         .accept(
@@ -195,7 +179,7 @@ async fn drain_pending_walks_past_the_batch_window() {
 #[tokio::test]
 #[serial_test::serial]
 async fn relay_ignores_a_nonpositive_batch() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
     ledger
         .accept(&record("evt-relay-zero"), &[outbox("task-flow")])
@@ -218,7 +202,7 @@ async fn relay_ignores_a_nonpositive_batch() {
 #[tokio::test]
 #[serial_test::serial]
 async fn drain_pending_stops_and_reports_a_stall() {
-    let Some(pool) = pool().await else { return };
+    let pool = require_clean_pool().await;
     let ledger = EvidenceLedger::new(pool);
     ledger
         .accept(
