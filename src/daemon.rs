@@ -282,6 +282,14 @@ pub async fn run(
         });
     }
 
+    let ledger = match std::env::var("OP_PI_DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let ledger = evidence_ledger::EvidenceLedger::connect(&url).await?;
+            ledger.migrate().await?;
+            Some(ledger)
+        }
+        _ => None,
+    };
     let app = app_router_with_calendar(
         AppState {
             config: config.clone(),
@@ -301,6 +309,7 @@ pub async fn run(
         },
         calendar_notification_tx,
         LinearIntake::production(),
+        ledger,
     );
     println!(
         "op_pi daemon v{VERSION} listening on http://{} (token_source: {token_source})",
@@ -318,6 +327,7 @@ fn app_router_with_calendar(
     state: AppState,
     calendar_notification_tx: mpsc::Sender<CalendarNotification>,
     linear: LinearIntake,
+    ledger: Option<evidence_ledger::EvidenceLedger>,
 ) -> AxumRouter {
     AxumRouter::new()
         .route("/health", get(health))
@@ -348,12 +358,18 @@ fn app_router_with_calendar(
         .route("/api/update/approve", post(approve_update))
         .route("/api/update/dismiss", post(dismiss_update))
         .with_state(state)
+        .layer(Extension(ledger))
 }
 
 #[cfg(test)]
 fn app_router(state: AppState) -> AxumRouter {
     let (calendar_notification_tx, _calendar_notification_rx) = mpsc::channel(1);
-    app_router_with_calendar(state, calendar_notification_tx, LinearIntake::production())
+    app_router_with_calendar(
+        state,
+        calendar_notification_tx,
+        LinearIntake::production(),
+        None,
+    )
 }
 
 fn spawn_source<S>(source: S, tx: mpsc::Sender<IncomingEvent>, source_health: SharedSourceHealth)
@@ -1242,6 +1258,7 @@ fn gajae_hold_target(config: &AppConfig, repo: &str) -> Option<String> {
 async fn post_linear(
     State(state): State<AppState>,
     Extension(linear): Extension<LinearIntake>,
+    Extension(ledger): Extension<Option<evidence_ledger::EvidenceLedger>>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> axum::response::Response {
@@ -1313,6 +1330,31 @@ async fn post_linear(
         .unwrap_or_default();
     let expires_at = timestamp.saturating_add(LINEAR_REPLAY_TTL_MS);
     let event_kind = event.canonical_kind().to_string();
+    if let Some(ledger) = ledger {
+        // The durable dedupe key must be stable across Linear redeliveries, so it
+        // is the digest of the signed body, not the per-request correlation uuid.
+        let dedupe_key = hex::encode(LinearIntake::replay_identity(&body));
+        let record = evidence_ledger::InboxRecord {
+            event_id: dedupe_key,
+            kind: event_kind.clone(),
+            payload: event.payload.clone(),
+        };
+        let tx = state.tx.clone();
+        let signal = move || async move {
+            tx.try_send(event).map_err(|_| {
+                Box::<dyn std::error::Error + Send + Sync>::from("linear queue send failed")
+            })
+        };
+        return match ledger.accept_and_signal(&record, &[], signal).await {
+            Ok(outcome) => {
+                if matches!(outcome, evidence_ledger::AppendOutcome::Committed) {
+                    telemetry::emit(linear_accepted_record(&event_kind, &event_id));
+                }
+                StatusCode::OK.into_response()
+            }
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
     let accepted_record = linear_accepted_record(&event_kind, &event_id);
     let identity = LinearIntake::replay_identity(&body);
     let accepted = {
@@ -4153,7 +4195,7 @@ mod tests {
 
     fn app_router_with_linear(state: AppState, linear: LinearIntake) -> AxumRouter {
         let (calendar_notification_tx, _calendar_notification_rx) = mpsc::channel(1);
-        app_router_with_calendar(state, calendar_notification_tx, linear)
+        app_router_with_calendar(state, calendar_notification_tx, linear, None)
     }
 
     #[tokio::test]
@@ -4236,6 +4278,61 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap()
         );
         assert_eq!(event.payload["event_id"], event.payload["correlation_id"]);
+    }
+
+    #[tokio::test]
+    async fn linear_router_durably_dedupes_redelivery_via_ledger() {
+        // Runtime proof of the durable plug end to end. Requires DATABASE_URL;
+        // no-ops (passes) when it is unset so the suite stays green without a DB.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let ledger = evidence_ledger::EvidenceLedger::connect(&url)
+            .await
+            .unwrap();
+        ledger.migrate().await.unwrap();
+
+        let (state, mut rx) = configured_linear_state();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // A body unique to this run so its digest key cannot collide with rows
+        // left by other runs in the shared database.
+        let body = linear_body_at(now_ms, &format!("e2e-{now_ms}"));
+        let dedupe_key = hex::encode(LinearIntake::replay_identity(&body));
+
+        let (calendar_notification_tx, _calendar_notification_rx) = mpsc::channel(1);
+        let router = app_router_with_calendar(
+            state,
+            calendar_notification_tx,
+            LinearIntake::production(),
+            Some(ledger.clone()),
+        );
+
+        let first = router
+            .clone()
+            .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // An identical redelivery is acknowledged but deduplicated durably.
+        let second = router
+            .oneshot(linear_request(body.clone(), Some(linear_signature(&body))))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        // The event is durably stored under the stable body-digest key...
+        assert!(ledger.get(&dedupe_key).await.unwrap().is_some());
+        // ...and only the first delivery reached the processing queue.
+        let event = rx.recv().await.expect("first delivery enqueued");
+        assert_eq!(event.kind, "linear.issue-label-update");
+        assert!(
+            rx.try_recv().is_err(),
+            "a durable redelivery must not enqueue the event again"
+        );
     }
 
     #[tokio::test]
@@ -4598,6 +4695,7 @@ mod tests {
             post_linear(
                 State(state),
                 Extension(saturated),
+                Extension(None),
                 headers,
                 Body::from(body)
             )
@@ -4616,9 +4714,15 @@ mod tests {
             std::result::Result<axum::body::Bytes, std::convert::Infallible>,
         >());
         assert_eq!(
-            post_linear(State(state), Extension(timed_out), headers, stalled_body)
-                .await
-                .status(),
+            post_linear(
+                State(state),
+                Extension(timed_out),
+                Extension(None),
+                headers,
+                stalled_body
+            )
+            .await
+            .status(),
             StatusCode::BAD_REQUEST
         );
 
@@ -4637,6 +4741,7 @@ mod tests {
                     Duration::from_secs(1),
                     unix_timestamp_ms
                 )),
+                Extension(None),
                 headers,
                 stream_error,
             )
