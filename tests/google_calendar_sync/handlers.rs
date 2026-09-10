@@ -178,7 +178,7 @@ pub(crate) async fn fake_watch(
         "id": payload["id"],
         "resourceId": "resource-new",
         "resourceUri": "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-        "expiration": "1785400000000"
+        "expiration": TEST_WATCH_EXPIRATION_MS.to_string()
     }))
     .into_response()
 }

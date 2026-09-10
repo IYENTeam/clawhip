@@ -176,12 +176,22 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
     timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
-    let after_restart = client
-        .post(&callback)
-        .headers(calendar_headers_for("channel-1", "exists", 3))
-        .send()
-        .await
-        .expect("post duplicate after daemon restart");
+    let after_restart = timeout(TEST_EVENT_TIMEOUT, async {
+        loop {
+            let response = client
+                .post(&callback)
+                .headers(calendar_headers_for("channel-1", "exists", 3))
+                .send()
+                .await
+                .expect("post duplicate after daemon restart");
+            if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("restarted daemon never accepted Calendar callbacks");
     assert_eq!(after_restart.status(), StatusCode::ACCEPTED);
     let restart_barrier = client
         .post(&callback)

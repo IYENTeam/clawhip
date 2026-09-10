@@ -21,6 +21,7 @@ pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio::time::timeout;
 
 pub(crate) const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const TEST_WATCH_EXPIRATION_MS: i64 = 4_102_444_800_000;
 
 #[path = "process.rs"]
 mod process;

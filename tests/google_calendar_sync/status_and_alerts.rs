@@ -78,7 +78,7 @@ async fn status_reports_calendar_cursor_channel_expiration_and_last_notification
     let details = &status["sources"]["google-calendar"]["details"];
     assert_eq!(details["cursor_present"], true);
     assert_eq!(details["active_channel_id"], channel_id);
-    assert_eq!(details["active_expiration_ms"], 1_785_400_000_000_i64);
+    assert_eq!(details["active_expiration_ms"], TEST_WATCH_EXPIRATION_MS);
     assert_eq!(details["last_message_number"], 1);
     assert!(
         details["last_notification_at"]
