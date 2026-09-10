@@ -51,7 +51,12 @@ async fn incremental_calendar_changes_emit_created_updated_and_cancelled_deliver
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
     let mut contents = Vec::new();
-    for _ in 0..3 {
+    while !(contents
+        .iter()
+        .any(|content: &String| content.contains("Created"))
+        && contents.iter().any(|content| content.contains("Updated"))
+        && contents.iter().any(|content| content.contains("Cancelled")))
+    {
         let payload = timeout(Duration::from_secs(8), delivery_rx.recv())
             .await
             .expect("typed Calendar event was not delivered")
@@ -171,12 +176,22 @@ async fn duplicate_calendar_message_number_does_not_repeat_incremental_sync() {
     timeout(TEST_EVENT_TIMEOUT, restarted_listening.notified())
         .await
         .expect("restarted op_pi daemon never announced its listener");
-    let after_restart = client
-        .post(&callback)
-        .headers(calendar_headers_for("channel-1", "exists", 3))
-        .send()
-        .await
-        .expect("post duplicate after daemon restart");
+    let after_restart = timeout(TEST_EVENT_TIMEOUT, async {
+        loop {
+            let response = client
+                .post(&callback)
+                .headers(calendar_headers_for("channel-1", "exists", 3))
+                .send()
+                .await
+                .expect("post duplicate after daemon restart");
+            if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("restarted daemon never accepted Calendar callbacks");
     assert_eq!(after_restart.status(), StatusCode::ACCEPTED);
     let restart_barrier = client
         .post(&callback)

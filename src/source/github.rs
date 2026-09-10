@@ -51,7 +51,6 @@ impl Source for GitHubSource {
         let reconciliation_interval = self.config.monitors.reconciliation_interval_polls;
 
         let mut state = load_state(&state_path).await;
-        let state_was_restored = !state.is_empty() && state_path.is_some();
         let mut poll_count: u64 = 0;
         let mut error_logs = ErrorLogDeduper::default();
 
@@ -61,7 +60,6 @@ impl Source for GitHubSource {
                 github_client.as_ref(),
                 &tx,
                 &mut state,
-                state_was_restored,
             )
             .await
             {
@@ -94,7 +92,7 @@ impl Source for GitHubSource {
                 && poll_count.is_multiple_of(reconciliation_interval)
                 && let Some(client) = github_client.as_ref()
                 && let Err(error) =
-                    run_reconciliation(self.config.as_ref(), client, &tx, &state).await
+                    run_reconciliation(self.config.as_ref(), client, &mut state).await
             {
                 eprintln!("op_pi source github reconciliation failed: {error}");
             }
@@ -221,9 +219,8 @@ async fn run_github_poll_cycle(
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
-    state_was_restored: bool,
 ) -> Result<()> {
-    poll_github(config, github_client, tx, state, state_was_restored).await
+    poll_github(config, github_client, tx, state).await
 }
 
 async fn snapshot_github_repo(repo: &GitRepoMonitor) -> Result<GitSnapshot> {
@@ -261,7 +258,6 @@ async fn poll_github(
     github_client: Option<&reqwest::Client>,
     tx: &mpsc::Sender<IncomingEvent>,
     state: &mut HashMap<String, GitHubRepoState>,
-    state_was_restored: bool,
 ) -> Result<()> {
     let mut errors = Vec::new();
     for repo in &config.monitors.git.repos {
@@ -288,8 +284,6 @@ async fn poll_github(
         };
 
         let previous = state.get(&repo.path);
-        let is_new_repo = state_was_restored && previous.is_none();
-
         let issues = match poll_issues(config, github_client, repo, &snapshot, previous, tx).await {
             Ok(issues) => issues,
             Err(error) => {
@@ -300,10 +294,6 @@ async fn poll_github(
             }
         };
 
-        if is_new_repo {
-            backfill_issues(repo, &snapshot, &issues, tx).await?;
-        }
-
         let prs =
             match poll_pull_requests(config, github_client, repo, &snapshot, previous, tx).await {
                 Ok(prs) => prs,
@@ -312,10 +302,6 @@ async fn poll_github(
                     previous.map(|entry| entry.prs.clone()).unwrap_or_default()
                 }
             };
-        if is_new_repo {
-            backfill_prs(repo, &snapshot, &prs, tx).await?;
-        }
-
         let (ci, ci_baseline_established) = match poll_ci_statuses(
             config,
             github_client,
@@ -360,63 +346,6 @@ async fn poll_github(
         )
         .into())
     }
-}
-
-async fn backfill_issues(
-    repo: &GitRepoMonitor,
-    snapshot: &GitSnapshot,
-    issues: &HashMap<u64, IssueSnapshot>,
-    tx: &mpsc::Sender<IncomingEvent>,
-) -> Result<()> {
-    for (number, issue) in issues.iter().filter(|(_, issue)| issue.state == "open") {
-        let mut event = IncomingEvent::github_issue_opened(
-            snapshot.repo_name.clone(),
-            *number,
-            issue.title.clone(),
-            repo.channel.clone(),
-        )
-        .with_mention(repo.mention.clone())
-        .with_format(repo.format.clone());
-        if let Some(payload) = event.payload.as_object_mut() {
-            payload.insert("source".to_string(), json!("backfill"));
-        }
-        send_event(tx, event).await?;
-        eprintln!(
-            "op_pi source github backfill: issued issue #{} for {}",
-            number, snapshot.repo_name
-        );
-    }
-    Ok(())
-}
-
-async fn backfill_prs(
-    repo: &GitRepoMonitor,
-    snapshot: &GitSnapshot,
-    prs: &HashMap<u64, PullRequestSnapshot>,
-    tx: &mpsc::Sender<IncomingEvent>,
-) -> Result<()> {
-    for (number, pr) in prs.iter().filter(|(_, pr)| pr.status == "open") {
-        let mut event = IncomingEvent::github_pr_status_changed(
-            snapshot.repo_name.clone(),
-            *number,
-            pr.title.clone(),
-            "<backfill>".to_string(),
-            pr.status.clone(),
-            pr.url.clone(),
-            repo.channel.clone(),
-        )
-        .with_mention(repo.mention.clone())
-        .with_format(repo.format.clone());
-        if let Some(payload) = event.payload.as_object_mut() {
-            payload.insert("source".to_string(), json!("backfill"));
-        }
-        send_event(tx, event).await?;
-        eprintln!(
-            "op_pi source github backfill: issued PR #{} for {}",
-            number, snapshot.repo_name
-        );
-    }
-    Ok(())
 }
 
 async fn poll_issues(
@@ -569,14 +498,13 @@ async fn send_event(tx: &mpsc::Sender<IncomingEvent>, event: IncomingEvent) -> R
 
 // ── Reconciliation ───────────────────────────────────────────────────────
 
-/// Run reconciliation for all repos: fetch open issues/PRs and compare with
-/// tracked state. Emit events for items present on GitHub but absent from
-/// state, marking the payload with `"source": "reconciliation"`.
+/// Repair incomplete state snapshots without turning pre-existing GitHub
+/// items into new activity. The normal poll loop is the only producer of
+/// issue/PR transition events.
 async fn run_reconciliation(
     config: &AppConfig,
     client: &reqwest::Client,
-    tx: &mpsc::Sender<IncomingEvent>,
-    state: &HashMap<String, GitHubRepoState>,
+    state: &mut HashMap<String, GitHubRepoState>,
 ) -> Result<()> {
     for repo in &config.monitors.git.repos {
         if !repo.emit_issue_opened && !repo.emit_pr_status {
@@ -594,13 +522,12 @@ async fn run_reconciliation(
             }
         };
 
-        let Some(repo_state) = state.get(&repo.path) else {
+        let Some(repo_state) = state.get_mut(&repo.path) else {
             continue;
         };
 
         if repo.emit_issue_opened
-            && let Err(error) =
-                reconcile_issues(config, client, repo, &snapshot, repo_state, tx).await
+            && let Err(error) = reconcile_issues(config, client, repo, &snapshot, repo_state).await
         {
             eprintln!(
                 "op_pi source github reconciliation: issue check failed for {}: {error}",
@@ -609,7 +536,7 @@ async fn run_reconciliation(
         }
 
         if repo.emit_pr_status
-            && let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state, tx).await
+            && let Err(error) = reconcile_prs(config, client, repo, &snapshot, repo_state).await
         {
             eprintln!(
                 "op_pi source github reconciliation: PR check failed for {}: {error}",
@@ -625,8 +552,7 @@ async fn reconcile_issues(
     client: &reqwest::Client,
     repo: &GitRepoMonitor,
     snapshot: &GitSnapshot,
-    repo_state: &GitHubRepoState,
-    tx: &mpsc::Sender<IncomingEvent>,
+    repo_state: &mut GitHubRepoState,
 ) -> Result<()> {
     let github_repo = snapshot
         .github_repo
@@ -655,33 +581,18 @@ async fn reconcile_issues(
             "failed to decode reconciliation issues response for {github_repo}: {e}, body: {snippet}"
         )
     })?;
-    let mut emitted = 0u64;
-
     for issue in issues {
         if issue.is_pull_request() {
             continue;
         }
-        if !repo_state.issues.contains_key(&issue.number) {
-            let event = IncomingEvent::github_issue_opened(
-                snapshot.repo_name.clone(),
-                issue.number,
-                issue.title,
-                repo.channel.clone(),
-            )
-            .with_mention(repo.mention.clone())
-            .with_format(repo.format.clone())
-            .with_source("reconciliation");
-
-            send_event(tx, event).await?;
-            emitted += 1;
-        }
-    }
-
-    if emitted > 0 {
-        eprintln!(
-            "op_pi source github reconciliation: emitted {} issue(s) for {}",
-            emitted, snapshot.repo_name
-        );
+        repo_state
+            .issues
+            .entry(issue.number)
+            .or_insert(IssueSnapshot {
+                title: issue.title,
+                state: issue.state,
+                comments: issue.comments,
+            });
     }
     Ok(())
 }
@@ -691,8 +602,7 @@ async fn reconcile_prs(
     client: &reqwest::Client,
     repo: &GitRepoMonitor,
     snapshot: &GitSnapshot,
-    repo_state: &GitHubRepoState,
-    tx: &mpsc::Sender<IncomingEvent>,
+    repo_state: &mut GitHubRepoState,
 ) -> Result<()> {
     let github_repo = snapshot
         .github_repo
@@ -721,39 +631,24 @@ async fn reconcile_prs(
             "failed to decode reconciliation PRs response for {github_repo}: {e}, body: {snippet}"
         )
     })?;
-    let mut emitted = 0u64;
-
     for pull in pulls {
-        if !repo_state.prs.contains_key(&pull.number) {
-            let status = if pull.merged_at.is_some() {
-                "merged"
-            } else {
-                pull.state.as_str()
-            };
-
-            let event = IncomingEvent::github_pr_status_changed(
-                snapshot.repo_name.clone(),
-                pull.number,
-                pull.title,
-                "<new>".to_string(),
-                status.to_string(),
-                pull.html_url,
-                repo.channel.clone(),
-            )
-            .with_mention(repo.mention.clone())
-            .with_format(repo.format.clone())
-            .with_source("reconciliation");
-
-            send_event(tx, event).await?;
-            emitted += 1;
-        }
-    }
-
-    if emitted > 0 {
-        eprintln!(
-            "op_pi source github reconciliation: emitted {} PR(s) for {}",
-            emitted, snapshot.repo_name
-        );
+        let status = if pull.merged_at.is_some() {
+            "merged".to_string()
+        } else {
+            pull.state.clone()
+        };
+        repo_state
+            .prs
+            .entry(pull.number)
+            .or_insert(PullRequestSnapshot {
+                title: pull.title,
+                status,
+                url: pull.html_url,
+                head_branch: pull.head.reference,
+                head_sha: pull.head.sha,
+                review_count: pull.review_comments + pull.comments,
+                review_comment_count: pull.review_comments,
+            });
     }
     Ok(())
 }
@@ -2103,7 +1998,7 @@ mod tests {
     // ── Reconciliation tests ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn reconciliation_emits_events_for_untracked_open_issues() {
+    async fn reconciliation_primes_untracked_open_issues_without_emitting() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2150,7 +2045,7 @@ mod tests {
         }];
 
         let client = build_github_client(None).unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (_tx, mut rx) = mpsc::channel::<IncomingEvent>(4);
 
         let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
         state.insert(
@@ -2163,18 +2058,17 @@ mod tests {
             },
         );
 
-        run_reconciliation(&config, &client, &tx, &state)
+        run_reconciliation(&config, &client, &mut state)
             .await
             .unwrap();
 
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.canonical_kind(), "github.issue-opened");
-        assert_eq!(event.payload["number"], json!(100));
-        assert_eq!(event.payload["title"], json!("untracked issue"));
-        assert_eq!(event.payload["source"], json!("reconciliation"));
-
-        // PR #200 should be filtered out (is_pull_request)
-        assert!(rx.try_recv().is_err(), "PR should be filtered out");
+        assert!(
+            rx.try_recv().is_err(),
+            "reconciliation must not emit history"
+        );
+        let repo_state = state.get("/tmp/op_pi").unwrap();
+        assert!(repo_state.issues.contains_key(&100));
+        assert!(!repo_state.issues.contains_key(&200));
 
         let _req = server.await.unwrap();
     }
@@ -2220,7 +2114,7 @@ mod tests {
         }];
 
         let client = build_github_client(None).unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (_tx, mut rx) = mpsc::channel::<IncomingEvent>(4);
 
         let mut issues = HashMap::new();
         issues.insert(
@@ -2242,7 +2136,7 @@ mod tests {
             },
         );
 
-        run_reconciliation(&config, &client, &tx, &state)
+        run_reconciliation(&config, &client, &mut state)
             .await
             .unwrap();
 
@@ -2255,7 +2149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_emits_events_for_untracked_open_prs() {
+    async fn reconciliation_primes_untracked_open_prs_without_emitting() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2300,7 +2194,7 @@ mod tests {
         }];
 
         let client = build_github_client(None).unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (_tx, mut rx) = mpsc::channel::<IncomingEvent>(4);
 
         let mut state: HashMap<String, GitHubRepoState> = HashMap::new();
         state.insert(
@@ -2313,15 +2207,15 @@ mod tests {
             },
         );
 
-        run_reconciliation(&config, &client, &tx, &state)
+        run_reconciliation(&config, &client, &mut state)
             .await
             .unwrap();
 
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.canonical_kind(), "github.pr-status-changed");
-        assert_eq!(event.payload["number"], json!(42));
-        assert_eq!(event.payload["title"], json!("untracked PR"));
-        assert_eq!(event.payload["source"], json!("reconciliation"));
+        assert!(
+            rx.try_recv().is_err(),
+            "reconciliation must not emit history"
+        );
+        assert!(state.get("/tmp/op_pi").unwrap().prs.contains_key(&42));
 
         let _req = server.await.unwrap();
     }
@@ -2381,103 +2275,5 @@ mod tests {
         assert_eq!(channel, "route-channel");
         assert!(content.starts_with("<@test> "));
         assert!(content.contains("test issue"));
-    }
-
-    #[tokio::test]
-    async fn reconciliation_marked_events_route_through_discord_sink() {
-        let event =
-            IncomingEvent::github_issue_opened("op_pi".into(), 99, "reconciled issue".into(), None)
-                .with_mention(Some("<@bot>".into()))
-                .with_format(Some(MessageFormat::Alert))
-                .with_source("reconciliation");
-
-        assert_eq!(event.payload["source"], json!("reconciliation"));
-
-        let config = AppConfig {
-            defaults: DefaultsConfig {
-                channel: Some("default".into()),
-                channel_name: None,
-                format: MessageFormat::Compact,
-            },
-            routes: vec![RouteRule {
-                event: "github.*".into(),
-                sink: "discord".into(),
-                filter: [("repo".to_string(), "op_pi".to_string())]
-                    .into_iter()
-                    .collect(),
-                channel: Some("recon-route".into()),
-                channel_name: None,
-                webhook: None,
-                slack_webhook: None,
-                mention: Some("<@bot>".into()),
-                allow_dynamic_tokens: false,
-                format: Some(MessageFormat::Alert),
-                template: None,
-                ..RouteRule::default()
-            }],
-            ..AppConfig::default()
-        };
-        let router = Router::new(Arc::new(config));
-        let (channel, format, content) = router.preview(&event).await.unwrap();
-        assert_eq!(channel, "recon-route");
-        assert_eq!(format, MessageFormat::Alert);
-        assert!(content.starts_with("<@bot> "));
-        assert!(content.contains("reconciled issue"));
-    }
-
-    // ── Backfill tests ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn backfill_emits_only_open_issues_with_source_marker() {
-        let repo = GitRepoMonitor {
-            path: "/tmp/op_pi".into(),
-            name: Some("op_pi".into()),
-            channel: Some("dev-channel".into()),
-            ..GitRepoMonitor::default()
-        };
-        let snapshot = GitSnapshot {
-            repo_name: "op_pi".into(),
-            repo_path: "/tmp/op_pi".into(),
-            worktree_path: "/tmp/op_pi".into(),
-            branch: "main".into(),
-            head: "abc".into(),
-            commits: Vec::new(),
-            github_repo: Some("owner/op_pi".into()),
-        };
-        let mut issues = HashMap::new();
-        // Open issue — should emit
-        issues.insert(
-            1_u64,
-            IssueSnapshot {
-                title: "open issue".into(),
-                state: "open".into(),
-                comments: 0,
-            },
-        );
-        // Closed issue — should NOT emit
-        issues.insert(
-            2_u64,
-            IssueSnapshot {
-                title: "closed issue".into(),
-                state: "closed".into(),
-                comments: 5,
-            },
-        );
-
-        let (tx, mut rx) = mpsc::channel(4);
-        backfill_issues(&repo, &snapshot, &issues, &tx)
-            .await
-            .unwrap();
-
-        let event = rx.recv().await.unwrap();
-        assert_eq!(event.canonical_kind(), "github.issue-opened");
-        assert_eq!(event.payload["number"], json!(1));
-        assert_eq!(event.payload["title"], json!("open issue"));
-        assert_eq!(event.payload["source"], json!("backfill"));
-
-        assert!(
-            rx.try_recv().is_err(),
-            "closed issue should not be backfilled"
-        );
     }
 }
