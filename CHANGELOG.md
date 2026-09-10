@@ -4,6 +4,8 @@
 
 ### Highlights
 
+- prime GitHub issue and pull-request baselines silently on cold start and
+  reconciliation so existing repository history is never replayed as new activity
 - synchronize Google Calendar changes through durable full/incremental cursors,
   typed created/updated/cancelled events, and HTTP 410 baseline recovery
 - renew Calendar watch channels at their expiration margin, activate
