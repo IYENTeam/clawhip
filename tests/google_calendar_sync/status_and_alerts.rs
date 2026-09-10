@@ -61,9 +61,9 @@ async fn status_reports_calendar_cursor_channel_expiration_and_last_notification
         .await
         .expect("post channel sync");
     assert_eq!(sync.status(), StatusCode::ACCEPTED);
-    timeout(TEST_EVENT_TIMEOUT, state.incremental_requested.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.incremental_succeeded.notified())
         .await
-        .expect("channel sync never reached Calendar worker");
+        .expect("channel sync never completed successfully");
 
     let status = client
         .get(format!("http://127.0.0.1:{daemon_port}/api/status"))

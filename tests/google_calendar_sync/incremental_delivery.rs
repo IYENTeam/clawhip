@@ -51,7 +51,12 @@ async fn incremental_calendar_changes_emit_created_updated_and_cancelled_deliver
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
     let mut contents = Vec::new();
-    for _ in 0..3 {
+    while !(contents
+        .iter()
+        .any(|content: &String| content.contains("Created"))
+        && contents.iter().any(|content| content.contains("Updated"))
+        && contents.iter().any(|content| content.contains("Cancelled")))
+    {
         let payload = timeout(Duration::from_secs(8), delivery_rx.recv())
             .await
             .expect("typed Calendar event was not delivered")
