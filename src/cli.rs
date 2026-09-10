@@ -284,7 +284,7 @@ impl EmitArgs {
             return Err("emit fields must be provided as --key value pairs".into());
         }
 
-        for pair in self.fields.chunks_exact(2) {
+        for pair in self.fields.chunks(2) {
             let key = pair[0]
                 .strip_prefix("--")
                 .ok_or_else(|| format!("emit field names must start with --, got {}", pair[0]))?;

@@ -150,7 +150,7 @@ async fn expired_incremental_cursor_triggers_fresh_full_sync() {
         .expect("post Calendar notification");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    timeout(Duration::from_secs(4), state.recovery_succeeded.notified())
+    timeout(TEST_EVENT_TIMEOUT, state.recovery_succeeded.notified())
         .await
         .expect("HTTP 410 recovery did not retry to success");
     assert_eq!(state.recovery_requests.load(Ordering::SeqCst), 2);
